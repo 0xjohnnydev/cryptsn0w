@@ -1,30 +1,40 @@
 # Dopamine Cryptex bootstrap overlay
 
-This directory contains the custom source added on top of opa334/Dopamine 3.x.
-The public upstream repository and its 239 MiB Git history are intentionally
-not duplicated here.
+This is the source overlay for the generic-Cryptex Dopamine 3.x
+Procursus/Sileo compatibility lane. The public upstream history and generated
+device-bound artifacts are intentionally not stored in this private repo.
+
+From the repository root, the normal entry point is:
+
+```sh
+./Dopamine-CryptexBootstrap/setup.sh --install
+```
+
+Safer incremental modes are available:
+
+```sh
+./Dopamine-CryptexBootstrap/setup.sh          # host checks and preparation
+./Dopamine-CryptexBootstrap/setup.sh --build  # host-only matched build
+```
+
+`setup.sh` installs missing build tools with an existing Homebrew installation,
+creates the pinned Python virtual environment, fetches only the pinned
+opa334/Dopamine commit, copies this overlay into the generated
+`Dopamine-upstream` working tree, and auto-selects a valid local Apple
+Development profile for `org.coolstar.SileoStore`. It never installs Homebrew
+itself and never uses `sudo`.
 
 Pinned upstream:
 
 - repository: `https://github.com/opa334/Dopamine.git`
 - branch: `3.x`
-- commit: `939a3a2` (`Print backtrace on darksword / clearsword krw failure`)
+- commit: `939a3a21400f0dc6d6163b2b5999ba2ace0d2732`
 
-To reconstruct the working tree from the root of this private repository:
+For a machine with multiple signing identities, optional overrides are
+`CODEX_SILEO_DEVELOPMENT_IDENTITY`, `CODEX_SILEO_PROVISIONING_PROFILE`, and
+`CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS`. Run `setup.sh --help` for the device
+guard and selection options.
 
-```sh
-git clone --branch 3.x https://github.com/opa334/Dopamine.git Dopamine-upstream
-git -C Dopamine-upstream checkout 939a3a2
-rsync -a Dopamine-CryptexBootstrap/CryptexBootstrap/ \
-  Dopamine-upstream/CryptexBootstrap/
-cd Dopamine-upstream
-```
-
-The sibling `tools/cryptexd-static` directory supplies the personalizer used
-by `CryptexBootstrap/README.md`. The source snapshot also includes the final
-v52/v36 runbook and proof metadata, but not the device-bound tickets, signed
-Cryptex bundle, IPA, provisioning profile, or logs.
-
-The build scripts contain the development identity and profile path used on
-the original Mac as defaults. Override them with the documented
-`CODEX_SILEO_*` environment variables on another host.
+The sibling `tools/cryptexd-static` directory supplies the strictly verified
+generic Cryptex1 personalizer. Device-bound tickets, signed Cryptex bundles,
+IPAs, provisioning profiles, caches, and logs stay in ignored output trees.
