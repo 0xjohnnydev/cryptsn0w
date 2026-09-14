@@ -8,8 +8,6 @@ Private iPhone18,2 / iOS 27.0 (24A435) security-research workspace.
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-[REDACTED: Related request, payload, or installation details omitted.]
-
 ## Validated configuration
 
 - Device: iPhone18,2
@@ -20,9 +18,8 @@ Private iPhone18,2 / iOS 27.0 (24A435) security-research workspace.
   `939a3a21400f0dc6d6163b2b5999ba2ace0d2732`
 - Python dependencies: pinned in `requirements.txt`
 
-Other devices and builds are rejected by default. The override is intended for
-deliberate porting work, not as an indication that another configuration is
-known to work.
+The default device guard selects this exact product, version, and build. Use the
+documented override when deliberately porting to another configuration.
 
 ## Prerequisites
 
@@ -31,7 +28,7 @@ known to work.
 Install or configure the following before running setup:
 
 - macOS with Homebrew available.
-- Full Xcode, not only the Command Line Tools package.
+- Full Xcode with the iPhoneOS SDK.
 - The iPhoneOS SDK selected by `xcrun`.
 - Apple Security Research Device host tools, including
   `/System/Library/SecurityResearch/usr/bin/cryptexctl.research`.
@@ -46,17 +43,14 @@ test -x /System/Library/SecurityResearch/usr/bin/cryptexctl.research \
   && echo "cryptexctl.research is available"
 ```
 
-If `xcrun` is selecting Command Line Tools instead of full Xcode, set the
-developer directory for the current shell without changing the system-wide
-selection:
+Set the full Xcode developer directory for the current shell when needed:
 
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ```
 
-`setup.sh` can install missing `dpkg`, `ldid`, `ripgrep`, and `zstd` formulae
-through an existing Homebrew installation. It does not install Homebrew,
-Xcode, or the SRD host tools.
+`setup.sh` installs missing `dpkg`, `ldid`, `ripgrep`, and `zstd` formulae
+through Homebrew. Install Xcode, Homebrew, and the SRD host tools first.
 
 ### Apple Development signing
 
@@ -77,9 +71,8 @@ You can confirm that a code-signing identity is visible with:
 security find-identity -v -p codesigning
 ```
 
-The setup script discovers and validates the identity/profile automatically.
-No certificate, provisioning profile, team identifier, or private key is
-stored in Git.
+The setup script discovers and validates the identity/profile automatically,
+then generates machine-local signing configuration in an ignored work tree.
 
 ### iPhone
 
@@ -95,9 +88,8 @@ Before installation:
 xcrun devicectl list devices
 ```
 
-The installation uses pymobiledevice3's in-process userspace RemoteXPC tunnel.
-The project scripts do not run `sudo` and do not require a privileged tunnel
-daemon.
+The installation uses pymobiledevice3's in-process userspace RemoteXPC tunnel,
+so the setup flow runs directly as the current user.
 
 ## Clone
 
@@ -135,7 +127,7 @@ When several eligible devices are present, pass the target UDID:
 ./Dopamine-CryptexBootstrap/setup.sh --install --device <UDID>
 ```
 
-To refuse replacement of an older project Cryptex:
+To require a clean Cryptex install state:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh --install --no-replace
@@ -143,20 +135,20 @@ To refuse replacement of an older project Cryptex:
 
 ## Prepare and build separately
 
-Run the default mode to prepare the host, fetch upstream, create the venv, and
-validate signing without touching the iPhone:
+Run the default host-only mode to fetch upstream, create the venv, and validate
+signing:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh
 ```
 
-Build the complete matched pair without installing anything on the iPhone:
+Build the complete matched pair in host-only mode:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh --build
 ```
 
-Prevent setup from installing missing Homebrew packages:
+Check Homebrew dependencies and report any missing formulae:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh --build --no-brew
@@ -169,7 +161,7 @@ Generated build products are written below:
 ```
 
 The generated upstream checkout, caches, tickets, IPAs, profiles, and run logs
-are ignored by Git.
+stay in ignored work directories.
 
 ## Signing overrides
 
@@ -188,9 +180,9 @@ The identity must be installed, included in the selected profile, and valid for
 code signing. A custom entitlement plist is still checked against the
 profile's application identifier, team identifier, and `get-task-allow` value.
 
-## Deliberate device-porting override
+## Porting to another device configuration
 
-The validated matrix guard can be bypassed explicitly:
+Select another connected physical device explicitly:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh --install \
@@ -198,25 +190,24 @@ The validated matrix guard can be bypassed explicitly:
   --allow-unverified-device
 ```
 
-This only disables the local product/version/build check. It does not bypass
-pairing, provisioning, Cryptex validation, ticket validation, or Apple's
-server-side authorization.
+This mode retains pairing, provisioning, Cryptex validation, ticket validation,
+and Apple's server-side authorization while relaxing the local validated-matrix
+check.
 
 ## After installation
 
 The Cryptex launch daemon prepares or repairs the managed Procursus tree,
 starts the root broker, performs `apt-get check`, and asks `uiopen` to launch
-Sileo. Keep the device unlocked during this stage. If Sileo does not appear
-automatically after a successful install result, open it manually.
+Sileo. Keep the device unlocked during this stage, then open Sileo manually if
+needed.
 
 Successful host-side run metadata is saved in the newest
 `Dopamine-upstream/CryptexBootstrap/out/runs/<run-id>/flow-summary.json`.
 Detailed on-device acceptance gates and the known-good run are documented in
 [`RUNNING_PROOF_20260914.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/RUNNING_PROOF_20260914.md).
 
-The Cryptex and its trust cache are nonpersistent. After reboot, `/var/jb` and
-the managed Procursus files remain, but the Cryptex root job and trust cache do
-not. Reconnect and rerun:
+The Cryptex and its trust cache are nonpersistent. After reboot, the managed
+Procursus tree remains at `/var/jb`; reconnect and remount a fresh Cryptex with:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh --install
@@ -233,7 +224,7 @@ proves UID 0 through key-only SSH, and opens an interactive shell:
 ./untitled.py
 ```
 
-Select a device explicitly or run one command without opening a shell:
+Select a device explicitly or run one command and save its result:
 
 ```sh
 ./untitled.py --device <UDID>
@@ -258,9 +249,8 @@ ignored `cache`, `work`, and `out` directories in the generated upstream tree.
 
 ### `missing ... cryptexctl.research`
 
-The Apple Security Research host tools are not installed or available on this
-Mac. There is no bundled substitute. Install the authorized host tooling and
-verify the absolute path shown in the prerequisites.
+Install the authorized Apple Security Research host tooling and verify the
+absolute path shown in the prerequisites.
 
 ### `the iPhoneOS SDK is unavailable`
 
@@ -287,10 +277,9 @@ Unlock and reconnect the device, accept its trust prompt, and inspect:
 xcrun devicectl list devices
 ```
 
-Do not use `--allow-unverified-device` unless you are intentionally porting and
-have reviewed the build-specific assumptions.
+Reserve `--allow-unverified-device` for reviewed porting work.
 
-### The provisioned Sileo app does not install
+### Sileo installation fails
 
 Confirm Developer Mode is enabled and that the selected provisioning profile
 contains the connected device. Building an automatically signed app to that
@@ -303,17 +292,13 @@ device once in Xcode usually resolves registration and profile refresh issues.
 ### Sileo reports a missing APT `Packages` directory
 
 Use the newest matched app/Cryptex pair and confirm the on-device acceptance
-gates in the running-proof document. A Featured-card `Package Unavailable`
-message is different: those cards can reference third-party repositories that
-are not part of the base Procursus source set.
+gates in the running-proof document. Treat a Featured-card
+`Package Unavailable` message as a separate third-party repository configuration
+issue.
 
 ## Repository contents
 
 [REDACTED: Related request, payload, or installation details omitted.]
-
-[REDACTED: Related request, payload, or installation details omitted.]
-
-## Scope and persistence
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
