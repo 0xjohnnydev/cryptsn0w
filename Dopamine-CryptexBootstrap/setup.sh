@@ -98,12 +98,13 @@ fi
 typeset -A FORMULA_FOR
 FORMULA_FOR=(
     dpkg-deb dpkg
+    gpg gnupg
     ldid ldid
     python3 python
     rg ripgrep
     zstd zstd
 )
-BREW_TOOLS=(dpkg-deb ldid python3 rg zstd)
+BREW_TOOLS=(dpkg-deb gpg ldid python3 rg zstd)
 missing_formulas=()
 for tool in "${BREW_TOOLS[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -121,7 +122,7 @@ if (( ${#missing_formulas} > 0 )); then
 fi
 
 HOST_TOOLS=(
-    awk codesign curl ditto dpkg-deb file git install_name_tool ldid make nm
+    awk codesign curl ditto dpkg-deb file git gpg install_name_tool ldid lipo make nm
     otool plutil python3 rsync security shasum tar xcrun zstd rg
 )
 for tool in "${HOST_TOOLS[@]}"; do
@@ -165,6 +166,14 @@ prepare_upstream() {
     fi
     [[ "$(git -C "$UPSTREAM_DIR" rev-parse HEAD)" == "$UPSTREAM_COMMIT" ]] || \
         die "Dopamine checkout does not match pinned commit $UPSTREAM_COMMIT"
+    expected_opainject=$(git -C "$UPSTREAM_DIR" ls-tree "$UPSTREAM_COMMIT" \
+        BaseBin/opainject | awk '{print $3}')
+    [[ -n "$expected_opainject" ]] || \
+        die "pinned Dopamine commit has no opainject submodule"
+    git -C "$UPSTREAM_DIR" submodule update --init --depth=1 BaseBin/opainject
+    [[ "$(git -C "$UPSTREAM_DIR/BaseBin/opainject" rev-parse HEAD)" == \
+        "$expected_opainject" ]] || \
+        die "opainject checkout does not match pinned Dopamine gitlink"
 }
 
 prepare_upstream
@@ -178,6 +187,8 @@ rsync -a --delete \
 
 print -- "Preparing pinned Python environment..."
 make -C "$PROJECT_ROOT" python
+"$PROJECT_ROOT/.venv/bin/python" \
+    "$PROJECT_ROOT/tools/patch_pymobiledevice3_remotexpc.py"
 
 SIGNING_DIR="$UPSTREAM_DIR/CryptexBootstrap/work/signing"
 mkdir -p "$SIGNING_DIR"

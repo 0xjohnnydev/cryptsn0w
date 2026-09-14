@@ -61,11 +61,11 @@ The host-only forms are:
 
 ```sh
 ./Dopamine-CryptexBootstrap/setup.sh          # prepare and signing preflight
-./Dopamine-CryptexBootstrap/setup.sh --build  # build without touching a device
+./Dopamine-CryptexBootstrap/setup.sh --build  # host-only build
 ```
 
-No administrator tunnel daemon is required. The install path uses
-pymobiledevice3's in-process userspace RemoteXPC transport.
+The install path uses pymobiledevice3's in-process userspace RemoteXPC
+transport.
 
 ## Signing
 
@@ -97,11 +97,10 @@ After `setup.sh` has prepared `Dopamine-upstream`, the lower-level driver is:
 
 It invokes `build_cryptex.sh` before `build_sileo_launcher.sh`, generates a
 fresh numeric Cryptex version, and gives the IPA and its JSON summary matching
-versioned names. Do not reverse the two underlying build scripts.
+versioned names. The driver enforces that build order.
 
-Despite its legacy filename, `build_sileo_launcher.sh` now emits the direct
-Sileo main executable with the constructor broker; it does not build an exec
-launcher. Set `CODEX_SILEO_LAUNCHER_IPA` and
+`build_sileo_launcher.sh` emits the direct Sileo main executable with the
+constructor broker. Set `CODEX_SILEO_LAUNCHER_IPA` and
 `CODEX_SILEO_LAUNCHER_SUMMARY` to fresh paths for additional builds.
 
 [REDACTED: Related request, payload, or installation details omitted.]
@@ -109,26 +108,22 @@ launcher. Set `CODEX_SILEO_LAUNCHER_IPA` and
 The root installer performs a non-mutating `apt-get check` before launching
 Sileo. Treat `aptDependencyCheckExit=0`, `sileoSystemRootBrokerReady=true`,
 `root broker preflight complete`, and `result=success` as the acceptance
-gates. The original missing Packages-index failure is resolved only when all
-of these pass; a clean-looking UI alone is not sufficient.
+gates for the complete package-index and broker path.
 
 The stock Procursus archive includes the chain
 `shshd -> libdimentio0 -> libkrw0 -> libkrw0-plugin`. This compatibility lane
-does not provide Dopamine's kernel-RW plugin. If no real provider is installed,
-the root installer removes only that dormant three-package chain after
-checking that no package outside the exact removal set depends on it. It never
-installs a fake `libkrw0-plugin` provider.
+detects that dormant package chain and removes it only after checking that no
+package outside the exact removal set depends on it.
 
 Installation is nonpersistent at the cryptexd layer. Rebooting or unmounting
-the Cryptex removes its trust cache and root broker; `/var/jb` and the managed
-preboot payload intentionally persist. Do not launch this Sileo build without
-remounting the matching Cryptex first.
+the Cryptex clears its trust cache and root broker while `/var/jb` and the
+managed preboot payload persist. Rerun `setup.sh --install` after reboot to
+remount the matched Cryptex before using Sileo.
 
-## Scope
+## Runtime model
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-Sileo's Featured cards come from repositories that are not part of the base
-Procursus source set. `Package Unavailable` on those cards means their
-third-party source has not been added; it is distinct from an APT lists or
-dependency-database failure.
+Sileo's Featured cards can reference optional repositories in addition to the
+standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's
+repository when a featured package comes from another source.

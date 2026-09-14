@@ -2,18 +2,22 @@ Types: deb
 URIs: https://repo.chariz.com/
 Suites: ./
 Components:
+Signed-By: 3D32F8ECD0930A1BC4F2A4A817C6BB3FC4114BDF!
 
 Types: deb
 URIs: https://havoc.app/
 Suites: ./
 Components:
+Signed-By: C101A4205F8616491D9B23BAB4532449E1E8AA68!
 
 Types: deb
 URIs: http://apt.thebigboss.org/repofiles/cydia/
 Suites: stable
 Components: main
+Signed-By: A9C96A37115894A23B894107694D17D38764B4F4!
 
 Types: deb
 URIs: https://ellekit.space/
 Suites: ./
 Components:
+Signed-By: 71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370!

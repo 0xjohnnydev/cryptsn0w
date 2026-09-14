@@ -84,6 +84,7 @@ ensure_python()
 
 import requests  # noqa: E402
 # [REDACTED] Related personalization helper imports omitted.
+from pymobiledevice3.exceptions import TunneldConnectionError  # noqa: E402
 from pymobiledevice3.remote.userspace_tunnel import (  # noqa: E402
     establish_userspace_rsd,
 )
@@ -393,7 +394,7 @@ def personalize(
 async def open_rsd(udid: str) -> tuple[Any, str]:
     try:
         rsd = await get_tunneld_device_by_udid(udid)
-    except (ConnectionError, OSError):
+    except (ConnectionError, OSError, TunneldConnectionError):
         rsd = None
     if rsd is not None:
         return rsd, "tunneld"

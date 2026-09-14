@@ -6,9 +6,10 @@ all: python payload
 
 python: .venv/.ready
 
-.venv/.ready: requirements.txt
+.venv/.ready: requirements.txt tools/patch_pymobiledevice3_remotexpc.py
 	python3 -m venv .venv
 	.venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+	.venv/bin/python tools/patch_pymobiledevice3_remotexpc.py
 	touch $@
 
 payload: build/build-summary.json
@@ -23,4 +24,3 @@ verify: all
 
 clean:
 	rm -rf build .venv
-

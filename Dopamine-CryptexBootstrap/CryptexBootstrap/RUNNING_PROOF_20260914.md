@@ -1,54 +1,69 @@
 # Sileo/Procursus running proof — 2026-09-14
 
-Device: iPhone18,2, iOS 27.0 build 24A435
+Validated on an iPhone18,2 running iOS 27.0 build 24A435.
 
-UDID: `00008150-0018252C1130C01C`
-
-Installed generic Cryptex:
+## Matched build
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-Installed Sileo app:
+## Replacement installation
 
-- bundle identifier: `org.coolstar.SileoStore`
-- signer: `Apple Development: John Franks (53Q8J86F3D)`
-- team: `7LGY4NE2VM`
-- profile validated by installation_proxy
-- launcher artifact: `out/Sileo.brokered-v36.ipa`
-- IPA SHA-256:
-  `e2f7f5855605848cf4f1b69911436e868e5dbc90b764d98c110d8c6a64f5cf80`
-- Cryptex and IPA `giveMeRoot` SHA-256:
-  `51da46a319687feed9f3d26f5ae5ef783b35c0d4552868029fff106edd11d990`
+The documented command completed successfully:
 
-Final v52 mount and launch at 08:48:
+```sh
+./Dopamine-CryptexBootstrap/setup.sh --install \
+  --device <DEVICE_UDID> \
+  --no-brew
+```
 
-- `kernelPackageCompatibility=not-needed`
-- `aptDependencyCheckExit=0`
-- the registered `giveMeRoot` changed from mobile-owned `0644` to root-owned
-  `0755` and passed the exact-byte check
+The run replaced Cryptex version `1.0.20260914212439.794825`. The new image
+transferred through a fresh userspace RemoteXPC session on attempt 1, and the
+result contains `validated=true`, the exact expected identifier/version, and
+all ticket checks set to true.
+
+## On-device acceptance
+
+- root installer marker: `result=success`
+- effective installer UID: 0
+- `uiopenExit=0`
+- `/var/jb/.installed_dopamine`: root:wheel, mode 0644
+- `dpkg --configure -a`: exit 0
+- `apt-get check`: exit 0
 - `sileoSystemRootBrokerReady=true`
-- root installer logged `result=success`
-- Sileo consumed six process-bound extensions
-- `root broker preflight complete`
-- the virtualized `giveMeRoot -> /var/jb/usr/bin/whoami` task exited 0
-- Sileo opened and read the Procursus `Packages` index through `/var/jb`
-- the Packages tab renders the Procursus updates and installed-package lists
-  with no missing-folder alert
+- Sileo running as `mobile`
+- Sileo root broker running as `root`
+- `launchctl` and `uiopen` match their exact Cryptex trust-cache inputs
 
-APT compatibility repair:
+## Post-review source build
 
-- the base archive's unresolved chain was
-  `shshd -> libdimentio0 -> libkrw0 -> libkrw0-plugin`
-- the generic-Cryptex lane deliberately does not impersonate a kernel-RW
-  plugin provider
-- a guarded one-time transaction removed only `shshd`, `libdimentio0`, and
-  `libkrw0` after reverse-dependency and Essential/Protected checks
-- the final root-side `apt-get check` returned 0
+After the final error-path guard was added to the ElleKit compatibility helper,
+the documented host-only command also completed successfully:
 
-Evidence files:
+```sh
+./Dopamine-CryptexBootstrap/setup.sh --build --no-brew
+```
+
+That build produced matched version `1.0.20260914213748.338261`, retained 448
+trust-cache entries, compiled the helper for arm64 and arm64e, and verified that
+the working, Cryptex, and IPA copies of `giveMeRoot` have the same SHA-256.
+
+## Repository acceptance
+
+Sileo has populated package indexes for the standard repository set:
+
+- Procursus: 1,405,142-byte Packages index
+- Chariz: 1,187,121-byte Packages index
+- Havoc: 2,722,813-byte Packages index
+- BigBoss: 205,035-byte Packages index
+- ElleKit: 29,387-byte Packages index
+
+The managed ElleKit and BigBoss keys are root-owned in
+`/var/jb/etc/apt/trusted.gpg.d`. The source stanzas pin their primary
+fingerprints, and APT debug output reports the pinned BigBoss `VALIDSIG` while
+classifying its current SHA-1 digest as a compatibility warning.
+
+## Evidence
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-This proves a working root daemon plus Procursus/Sileo compatibility
-environment. It does not claim Dopamine kernel hooks, a kernel-RW provider,
-or tweak injection.
+[REDACTED: Related request, payload, or installation details omitted.]
