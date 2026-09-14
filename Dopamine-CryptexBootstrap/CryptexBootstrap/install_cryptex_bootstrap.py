@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
 from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
 from pymobiledevice3.remote.xpc_message import XpcUInt64Type
 from pymobiledevice3.services.cryptexd import CryptexdService
@@ -52,6 +53,8 @@ ALLOWED_INFO_KEYS = {
     "Version",
 }
 MAX_IMAGE_SIZE = 128 * 1024 * 1024
+INSTALL_TIMEOUT_SECONDS = 90
+INSTALL_ATTEMPTS = 3
 
 
 def _sha256(path: Path) -> str:
@@ -138,6 +141,15 @@ def _validate_bundle(
     }
 
 
+async def _open_rsd(args: argparse.Namespace) -> Any:
+    if args.tunneld:
+        rsd = await get_tunneld_device_by_udid(args.udid)
+        if rsd is None:
+            raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
+        return rsd
+    return await establish_userspace_rsd(serial=args.udid)
+
+
 async def _install(args: argparse.Namespace) -> dict[str, Any]:
     restore_dir, identity, digests, local = _validate_bundle(
         args.bundle, args.build_summary
@@ -159,12 +171,7 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
     ).parent
     ticket = (variant_dir / "im4m").read_bytes()
 
-    if args.tunneld:
-        rsd = await get_tunneld_device_by_udid(args.udid)
-        if rsd is None:
-            raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
-    else:
-        rsd = await establish_userspace_rsd(serial=args.udid)
+    rsd = await _open_rsd(args)
     try:
         service = CryptexdService(rsd)
         before = await service.copy_installed()
@@ -220,46 +227,122 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
             await service.uninstall(
                 existing[0].identifier, existing[0].version
             )
-
-        properties: dict[str, Any] = {
-            "Cryptex1,UseProductClass": identity["Cryptex1,UseProductClass"],
-            "MountedCryptex": False,
-            "Cryptex1,SubType": XpcUInt64Type(identity["Cryptex1,SubType"]),
-            "Cryptex1,NonceDomain": XpcUInt64Type(
-                identity["Cryptex1,NonceDomain"]
-            ),
-            "Cryptex1,Version": identity["Cryptex1,Version"],
-            "Cryptex1,PreauthVersion": identity[
-                "Cryptex1,PreauthorizationVersion"
-            ],
-        }
-        await service.install(
-            image=image,
-            trustcache=trustcache,
-            im4m=ticket,
-            info=info,
-            volumehash=volumehash,
-            cryptex1_properties=properties,
-            image_type_index=10,
-            persistence=0,
-            nonce_persistence=0,
-            auth=0,
-        )
-        after = await service.copy_installed()
     finally:
         await rsd.close()
 
-    installed = [
-        {"identifier": item.identifier, "version": item.version}
-        for item in after
-        if item.identifier == identifier
-    ]
     expected = [{"identifier": identifier, "version": version}]
-    if installed != expected:
-        raise RuntimeError(
-            f"install returned but exact Cryptex was not listed: {installed}"
-        )
-    return preflight | {"installed": installed[0], "replaced": replaced}
+    properties: dict[str, Any] = {
+        "Cryptex1,UseProductClass": identity["Cryptex1,UseProductClass"],
+        "MountedCryptex": False,
+        "Cryptex1,SubType": XpcUInt64Type(identity["Cryptex1,SubType"]),
+        "Cryptex1,NonceDomain": XpcUInt64Type(
+            identity["Cryptex1,NonceDomain"]
+        ),
+        "Cryptex1,Version": identity["Cryptex1,Version"],
+        "Cryptex1,PreauthVersion": identity[
+            "Cryptex1,PreauthorizationVersion"
+        ],
+    }
+
+    # Unmounting an older Cryptex tears down its jobs and file mappings. Give
+    # cryptexd a clean RemoteXPC session for the replacement image transfer.
+    if replaced is not None:
+        await asyncio.sleep(1)
+
+    retryable = (
+        asyncio.TimeoutError,
+        ConnectionError,
+        ConnectionTerminatedError,
+        EOFError,
+        OSError,
+        StreamClosedError,
+    )
+    for attempt in range(1, INSTALL_ATTEMPTS + 1):
+        install_rsd = await _open_rsd(args)
+        try:
+            service = CryptexdService(install_rsd)
+            current = await service.copy_installed()
+            installed = [
+                {"identifier": item.identifier, "version": item.version}
+                for item in current
+                if item.identifier == identifier
+            ]
+            if installed == expected:
+                return preflight | {
+                    "installed": installed[0],
+                    "replaced": replaced,
+                    "installAttempts": attempt,
+                    "recoveredExistingInstall": True,
+                }
+            if installed:
+                raise RuntimeError(
+                    "unexpected Cryptex appeared before replacement transfer: "
+                    f"{installed}"
+                )
+
+            chip = await service.read_personalization_identifiers()
+            nonce = await service.cryptex_nonce(
+                identity["Cryptex1,NonceDomain"]
+            )
+            current_checks = _ticket_checks(
+                ticket, identity, chip, nonce, digests
+            )
+            if not all(current_checks.values()):
+                failed = [
+                    name for name, passed in current_checks.items() if not passed
+                ]
+                raise ValueError(
+                    "ticket changed before replacement transfer: "
+                    + ", ".join(failed)
+                )
+
+            await asyncio.wait_for(
+                service.install(
+                    image=image,
+                    trustcache=trustcache,
+                    im4m=ticket,
+                    info=info,
+                    volumehash=volumehash,
+                    cryptex1_properties=properties,
+                    image_type_index=10,
+                    persistence=0,
+                    nonce_persistence=0,
+                    auth=0,
+                ),
+                timeout=INSTALL_TIMEOUT_SECONDS,
+            )
+            after = await service.copy_installed()
+            installed = [
+                {"identifier": item.identifier, "version": item.version}
+                for item in after
+                if item.identifier == identifier
+            ]
+            if installed != expected:
+                raise RuntimeError(
+                    "install returned but exact Cryptex was not listed: "
+                    f"{installed}"
+                )
+            return preflight | {
+                "installed": installed[0],
+                "replaced": replaced,
+                "installAttempts": attempt,
+                "recoveredExistingInstall": False,
+            }
+        except retryable as error:
+            if attempt == INSTALL_ATTEMPTS:
+                raise RuntimeError(
+                    f"Cryptex transfer failed after {attempt} attempts: {error}"
+                ) from error
+            print(
+                f"Cryptex transfer attempt {attempt} failed: {error}; retrying",
+                file=sys.stderr,
+                flush=True,
+            )
+        finally:
+            await install_rsd.close()
+        await asyncio.sleep(attempt)
+
+    raise AssertionError("unreachable Cryptex install retry state")
 
 
 def main() -> int:

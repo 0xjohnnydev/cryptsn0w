@@ -1,8 +1,8 @@
 # Dopamine Cryptex bootstrap overlay
 
 This is the source overlay for the generic-Cryptex Dopamine 3.x
-Procursus/Sileo compatibility lane. The public upstream history and generated
-device-bound artifacts are intentionally not stored in this private repo.
+Procursus/Sileo compatibility lane. Setup assembles it with a pinned upstream
+Dopamine checkout and machine-local device personalization data.
 
 From the repository root, the normal entry point is:
 
@@ -21,8 +21,8 @@ Safer incremental modes are available:
 creates the pinned Python virtual environment, fetches only the pinned
 opa334/Dopamine commit, copies this overlay into the generated
 `Dopamine-upstream` working tree, and auto-selects a valid local Apple
-Development profile for `org.coolstar.SileoStore`. It never installs Homebrew
-itself and never uses `sudo`.
+Development profile for `org.coolstar.SileoStore`. It also applies the pinned
+RemoteXPC flow-control patch used for large Cryptex image transfers.
 
 Pinned upstream:
 
@@ -36,12 +36,14 @@ For a machine with multiple signing identities, optional overrides are
 guard and selection options.
 
 The sibling `tools/cryptexd-static` directory supplies the strictly verified
-generic Cryptex1 personalizer. Device-bound tickets, signed Cryptex bundles,
-IPAs, provisioning profiles, caches, and logs stay in ignored output trees.
+generic Cryptex1 personalizer. Its tickets, signed Cryptex bundles, IPAs,
+provisioning profiles, caches, and logs are organized in ignored output trees.
 
 The on-device repair path maintains Dopamine's standard Chariz, Havoc,
 BigBoss, and ElleKit entries in
 `/var/jb/etc/apt/sources.list.d/dopamine-default.sources`. Procursus remains the
-bootstrap feed. The installer restores Procursus metadata whenever the base APT
-index is missing, and Sileo refreshes the complete repository set when it opens.
-Custom repository files remain available beside it.
+bootstrap feed. The installer deploys the pinned repository keys, configures
+BigBoss's verified legacy-signature compatibility, restores Procursus metadata,
+synchronizes the trust-cached `launchctl` and `uiopen` executables, and refreshes
+the complete repository set. Custom repository files remain available beside
+the managed defaults.

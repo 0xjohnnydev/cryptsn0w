@@ -100,6 +100,63 @@ static bool write_marker(const char *path, NSString *value) {
     return wrote;
 }
 
+static bool ensure_root_owned_empty_file(const char *path, mode_t mode,
+                                         NSString **errorText) {
+    struct stat before;
+    int statusResult = lstat(path, &before);
+    if (statusResult == 0) {
+        if (S_ISREG(before.st_mode)) {
+            // Continue below to normalize the existing marker in place.
+        } else {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"managed marker is not a regular file: %s", path];
+            }
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed marker status failed: %s",
+                                 strerror(errno)];
+        }
+        return false;
+    }
+
+    int file = open(path, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, mode);
+    if (file < 0) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed marker open failed: %s",
+                                 strerror(errno)];
+        }
+        return false;
+    }
+    struct stat opened;
+    bool ready = fstat(file, &opened) == 0 && S_ISREG(opened.st_mode) &&
+                 ftruncate(file, 0) == 0 && fchown(file, 0, 0) == 0 &&
+                 fchmod(file, mode) == 0 && fsync(file) == 0;
+    int savedError = ready ? 0 : errno;
+    if (close(file) != 0 && ready) {
+        ready = false;
+        savedError = errno;
+    }
+    struct stat after;
+    if (!ready || lstat(path, &after) != 0 || !S_ISREG(after.st_mode) ||
+        after.st_size != 0 || after.st_uid != 0 || after.st_gid != 0 ||
+        (after.st_mode & 07777) != mode) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed marker preparation failed: %s",
+                                 strerror(savedError != 0 ? savedError
+                                                          : errno)];
+        }
+        return false;
+    }
+    return true;
+}
+
 static NSString *boot_manifest_hash(void) {
     io_registry_entry_t chosen =
         IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/chosen");
@@ -1223,15 +1280,19 @@ static bool install_dopamine_default_sources(NSString *source,
 
     NSString *directory = @"/var/jb/etc/apt/sources.list.d";
     NSError *directoryError = nil;
+    NSDictionary *directoryAttributes = @{
+        NSFilePosixPermissions : @0755,
+        NSFileOwnerAccountID : @0,
+        NSFileGroupOwnerAccountID : @0,
+    };
     if (![[NSFileManager defaultManager]
             createDirectoryAtPath:directory
       withIntermediateDirectories:YES
-                       attributes:@{
-                           NSFilePosixPermissions : @0755,
-                           NSFileOwnerAccountID : @0,
-                           NSFileGroupOwnerAccountID : @0,
-                       }
-                            error:&directoryError]) {
+                       attributes:directoryAttributes
+                            error:&directoryError] ||
+        ![[NSFileManager defaultManager] setAttributes:directoryAttributes
+                                         ofItemAtPath:directory
+                                                error:&directoryError]) {
         if (errorText != NULL) {
             *errorText = [NSString
                 stringWithFormat:@"default APT source directory failed: %@",
@@ -1322,6 +1383,160 @@ static bool install_dopamine_default_sources(NSString *source,
         *didUpdate = true;
     }
     log_message("dopamineDefaultSources=updated path=%s bytes=%lu",
+                [destination UTF8String], (unsigned long)expected.length);
+    return true;
+}
+
+static bool install_managed_apt_file(NSString *source, NSString *directory,
+                                     NSString *filename, off_t maximumSize,
+                                     const char *logName, bool *didUpdate,
+                                     NSString **errorText) {
+    if (didUpdate != NULL) {
+        *didUpdate = false;
+    }
+    if (![filename isEqualToString:[filename lastPathComponent]]) {
+        if (errorText != NULL) {
+            *errorText = @"managed APT filename is invalid";
+        }
+        return false;
+    }
+    struct stat sourceStatus;
+    if (lstat([source fileSystemRepresentation], &sourceStatus) != 0 ||
+        !S_ISREG(sourceStatus.st_mode) || sourceStatus.st_size <= 0 ||
+        sourceStatus.st_size > maximumSize) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT payload is invalid: %@",
+                                 source];
+        }
+        return false;
+    }
+    NSError *readError = nil;
+    NSData *expected = [NSData dataWithContentsOfFile:source
+                                              options:NSDataReadingMappedIfSafe
+                                                error:&readError];
+    if (expected == nil) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT payload read failed: %@",
+                                 readError];
+        }
+        return false;
+    }
+
+    NSError *fileError = nil;
+    NSDictionary *directoryAttributes = @{
+        NSFilePosixPermissions : @0755,
+        NSFileOwnerAccountID : @0,
+        NSFileGroupOwnerAccountID : @0,
+    };
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:directory
+      withIntermediateDirectories:YES
+                       attributes:directoryAttributes
+                            error:&fileError] ||
+        ![[NSFileManager defaultManager] setAttributes:directoryAttributes
+                                         ofItemAtPath:directory
+                                                error:&fileError]) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT directory failed: %@",
+                                 fileError];
+        }
+        return false;
+    }
+
+    NSString *destination = [directory stringByAppendingPathComponent:filename];
+    struct stat destinationStatus;
+    if (lstat([destination fileSystemRepresentation], &destinationStatus) ==
+        0) {
+        if (!S_ISREG(destinationStatus.st_mode)) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"managed APT path is not a "
+                                      "regular file: %@",
+                                     destination];
+            }
+            return false;
+        }
+        if (files_are_equal(source, destination)) {
+            if (![[NSFileManager defaultManager]
+                    setAttributes:@{
+                        NSFilePosixPermissions : @0644,
+                        NSFileOwnerAccountID : @0,
+                        NSFileGroupOwnerAccountID : @0,
+                    }
+                     ofItemAtPath:destination
+                            error:&fileError]) {
+                if (errorText != NULL) {
+                    *errorText = [NSString
+                        stringWithFormat:@"managed APT metadata failed: "
+                                          "%@",
+                                         fileError];
+                }
+                return false;
+            }
+            log_message("%s=current path=%s", logName,
+                        [destination UTF8String]);
+            return true;
+        }
+    } else if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT status failed: %s",
+                                 strerror(errno)];
+        }
+        return false;
+    }
+
+    NSString *temporary = [directory
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".%@-%@", filename,
+                                       [[NSUUID UUID] UUIDString]]];
+    if (![expected writeToFile:temporary
+                       options:NSDataWritingWithoutOverwriting
+                         error:&fileError] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0644,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:temporary
+                    error:&fileError]) {
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT staging failed: %@",
+                                 fileError];
+        }
+        return false;
+    }
+    if (rename([temporary fileSystemRepresentation],
+               [destination fileSystemRepresentation]) != 0) {
+        int savedError = errno;
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"managed APT activation failed: %s",
+                                 strerror(savedError)];
+        }
+        return false;
+    }
+    if (!files_are_equal(source, destination) ||
+        lstat([destination fileSystemRepresentation], &destinationStatus) !=
+            0 ||
+        destinationStatus.st_uid != 0 || destinationStatus.st_gid != 0 ||
+        (destinationStatus.st_mode & 07777) != 0644) {
+        if (errorText != NULL) {
+            *errorText = @"managed APT payload verification failed";
+        }
+        return false;
+    }
+    if (didUpdate != NULL) {
+        *didUpdate = true;
+    }
+    log_message("%s=updated path=%s bytes=%lu", logName,
                 [destination UTF8String], (unsigned long)expected.length);
     return true;
 }
@@ -1447,6 +1662,198 @@ static bool restore_replaced_file(NSString *destination, NSString *backup) {
         return false;
     }
     [[NSFileManager defaultManager] removeItemAtPath:failed error:nil];
+    return true;
+}
+
+static bool refresh_trusted_package_executables(
+    NSString *originalRoot, NSString *normalizedRoot, NSUInteger *didUpdate,
+    NSUInteger *alreadyCurrent, NSUInteger *notApplicable,
+    NSString **errorText) {
+    if (didUpdate != NULL) {
+        *didUpdate = 0;
+    }
+    if (alreadyCurrent != NULL) {
+        *alreadyCurrent = 0;
+    }
+    if (notApplicable != NULL) {
+        *notApplicable = 0;
+    }
+
+    NSFileManager *manager = [NSFileManager defaultManager];
+    BOOL originalIsDirectory = NO;
+    BOOL normalizedIsDirectory = NO;
+    if (![manager fileExistsAtPath:originalRoot
+                       isDirectory:&originalIsDirectory] ||
+        !originalIsDirectory ||
+        ![manager fileExistsAtPath:normalizedRoot
+                       isDirectory:&normalizedIsDirectory] ||
+        !normalizedIsDirectory) {
+        if (errorText != NULL) {
+            *errorText = @"trusted package payload roots are unavailable";
+        }
+        return false;
+    }
+
+    NSDirectoryEnumerator<NSString *> *enumerator =
+        [manager enumeratorAtPath:normalizedRoot];
+    for (NSString *relativePath in enumerator) {
+        NSString *normalized =
+            [normalizedRoot stringByAppendingPathComponent:relativePath];
+        struct stat normalizedStatus;
+        if (lstat([normalized fileSystemRepresentation], &normalizedStatus) !=
+                0 ||
+            !S_ISREG(normalizedStatus.st_mode)) {
+            continue;
+        }
+
+        NSString *original =
+            [originalRoot stringByAppendingPathComponent:relativePath];
+        struct stat originalStatus;
+        if (lstat([original fileSystemRepresentation], &originalStatus) != 0) {
+            if (errno == ENOENT) {
+                // codesign may add bundle-local CodeResources metadata. It is
+                // not an executable from the Debian payload and has no
+                // installed destination to refresh.
+                if (notApplicable != NULL) {
+                    ++*notApplicable;
+                }
+                continue;
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"trusted package original status failed for %@: %s",
+                        relativePath, strerror(errno)];
+            }
+            return false;
+        }
+        if (!S_ISREG(originalStatus.st_mode)) {
+            if (notApplicable != NULL) {
+                ++*notApplicable;
+            }
+            continue;
+        }
+
+        // Non-executable package data is byte-identical in both trees. Only
+        // files whose CodeDirectories were normalized need activation.
+        if (files_are_equal(original, normalized)) {
+            continue;
+        }
+
+        NSArray<NSString *> *components = [relativePath pathComponents];
+        if (components.count < 4 ||
+            ![components[1] isEqualToString:@"var"] ||
+            ![components[2] isEqualToString:@"jb"]) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"trusted package path is outside var/jb: %@",
+                        relativePath];
+            }
+            return false;
+        }
+        for (NSString *component in components) {
+            if ([component isEqualToString:@"."] ||
+                [component isEqualToString:@".."] ||
+                [component containsString:@"/"]) {
+                if (errorText != NULL) {
+                    *errorText = [NSString
+                        stringWithFormat:@"unsafe trusted package path: %@",
+                                         relativePath];
+                }
+                return false;
+            }
+        }
+
+        NSString *destination = @"/var/jb";
+        for (NSUInteger index = 3; index < components.count; ++index) {
+            destination =
+                [destination stringByAppendingPathComponent:components[index]];
+        }
+
+        struct stat destinationStatus;
+        if (lstat([destination fileSystemRepresentation],
+                  &destinationStatus) != 0) {
+            if (errno == ENOENT) {
+                if (notApplicable != NULL) {
+                    ++*notApplicable;
+                }
+                continue;
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"installed package status failed for "
+                                      @"%@: %s",
+                                     destination, strerror(errno)];
+            }
+            return false;
+        }
+        if (!S_ISREG(destinationStatus.st_mode)) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"installed package executable is not regular: %@",
+                        destination];
+            }
+            return false;
+        }
+        if (files_are_equal(normalized, destination)) {
+            if (alreadyCurrent != NULL) {
+                ++*alreadyCurrent;
+            }
+            continue;
+        }
+        if (!files_are_equal(original, destination)) {
+            // An independently updated package owns this path. Never replace
+            // bytes that do not match the exact pinned archive input.
+            log_message("trustedPackageExecutable=diverged path=%s",
+                        [destination UTF8String]);
+            if (notApplicable != NULL) {
+                ++*notApplicable;
+            }
+            continue;
+        }
+
+        NSString *backup =
+            [[destination stringByDeletingLastPathComponent]
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@".codex-signature-backup-%@",
+                                               [[NSUUID UUID] UUIDString]]];
+        NSString *replacementError = nil;
+        if (!replace_file_with_backup(normalized, destination, backup,
+                                      &replacementError)) {
+            if (errorText != NULL) {
+                *errorText = replacementError;
+            }
+            return false;
+        }
+        if (!files_are_equal(normalized, destination)) {
+            bool restored = restore_replaced_file(destination, backup);
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"trusted package executable verification failed for "
+                         "%@ (rollback=%@)",
+                        destination, restored ? @"complete" : @"failed"];
+            }
+            return false;
+        }
+        NSError *removeError = nil;
+        if (![manager removeItemAtPath:backup error:&removeError]) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:
+                        @"trusted package backup cleanup failed: %@",
+                        removeError];
+            }
+            return false;
+        }
+        log_message("trustedPackageExecutable=updated path=%s",
+                    [destination UTF8String]);
+        if (didUpdate != NULL) {
+            ++*didUpdate;
+        }
+    }
     return true;
 }
 
@@ -2012,9 +2419,27 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:@"trusted/Sileo.app"];
         NSString *sourceTrustedLaunchctl =
             [sourceProcursus stringByAppendingPathComponent:@"usr/bin/launchctl"];
+        NSString *sourceTrustedUiopen =
+            [sourceProcursus stringByAppendingPathComponent:@"usr/bin/uiopen"];
         NSString *sourceDefaultSources =
             [payloadRoot stringByAppendingPathComponent:
                              @"dopamine-default.sources"];
+        NSString *sourceRepositoryCompatibility =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"apt/99dopamine-repository-compat"];
+        NSString *sourceKeyringDirectory =
+            [payloadRoot stringByAppendingPathComponent:@"keyrings"];
+        NSString *sourceElleKitKey =
+            [sourceKeyringDirectory stringByAppendingPathComponent:
+                                        @"ellekit.gpg"];
+        NSString *sourceBigBossKey =
+            [sourceKeyringDirectory stringByAppendingPathComponent:
+                                        @"bigboss.gpg"];
+        NSString *sourceOriginalTrustedPackages =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted-packages-original"];
+        NSString *sourceTrustedPackages =
+            [payloadRoot stringByAppendingPathComponent:@"trusted-packages"];
         BOOL isDirectory = NO;
         if (![[NSFileManager defaultManager] fileExistsAtPath:sourceProcursus
                                                  isDirectory:&isDirectory] ||
@@ -2025,14 +2450,41 @@ int main(int argc, char *argv[]) {
                      isDirectory:&isDirectory] ||
             !isDirectory ||
             ![[NSFileManager defaultManager]
-                fileExistsAtPath:sourceTrustedLaunchctl]) {
+                fileExistsAtPath:sourceTrustedLaunchctl] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedUiopen]) {
             return fail(@"cryptex payload is incomplete", nil);
+        }
+        if (![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceOriginalTrustedPackages
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedPackages
+                     isDirectory:&isDirectory] ||
+            !isDirectory) {
+            return fail(@"trusted package payload is incomplete", nil);
         }
         struct stat defaultSourcesStatus;
         if (lstat([sourceDefaultSources fileSystemRepresentation],
                   &defaultSourcesStatus) != 0 ||
             !S_ISREG(defaultSourcesStatus.st_mode)) {
             return fail(@"default APT source payload is missing", nil);
+        }
+        struct stat repositoryCompatibilityStatus;
+        if (lstat([sourceRepositoryCompatibility fileSystemRepresentation],
+                  &repositoryCompatibilityStatus) != 0 ||
+            !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
+            return fail(@"repository compatibility payload is missing", nil);
+        }
+        struct stat repositoryKeyStatus;
+        if (lstat([sourceElleKitKey fileSystemRepresentation],
+                  &repositoryKeyStatus) != 0 ||
+            !S_ISREG(repositoryKeyStatus.st_mode) ||
+            lstat([sourceBigBossKey fileSystemRepresentation],
+                  &repositoryKeyStatus) != 0 ||
+            !S_ISREG(repositoryKeyStatus.st_mode)) {
+            return fail(@"repository keyring payload is missing", nil);
         }
 
         NSString *manifestHash = boot_manifest_hash();
@@ -2216,6 +2668,51 @@ int main(int argc, char *argv[]) {
                         ? [rootlessLaunchctlBackup UTF8String]
                         : "not-needed");
 
+        NSString *rootlessUiopen = @"/var/jb/usr/bin/uiopen";
+        NSString *rootlessUiopenBackup = nil;
+        BOOL uiopenMatches = files_are_equal(sourceTrustedUiopen, rootlessUiopen);
+        log_message("rootlessUiopenMatches=%s",
+                    uiopenMatches ? "true" : "false");
+        if (!uiopenMatches) {
+            NSString *cacheDirectory = [destinationProcursus
+                stringByAppendingPathComponent:@".codex-cache"];
+            NSError *cacheError = nil;
+            if (![[NSFileManager defaultManager]
+                    createDirectoryAtPath:cacheDirectory
+              withIntermediateDirectories:YES
+                               attributes:@{
+                                   NSFilePosixPermissions : @0700,
+                                   NSFileOwnerAccountID : @0,
+                                   NSFileGroupOwnerAccountID : @0,
+                               }
+                                    error:&cacheError]) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"uiopen backup directory failed: %@",
+                                  cacheError],
+                    nil);
+            }
+            rootlessUiopenBackup = [cacheDirectory
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"uiopen-backup-%@",
+                                               [[NSUUID UUID] UUIDString]]];
+            NSString *replacementError = nil;
+            if (!replace_file_with_backup(sourceTrustedUiopen, rootlessUiopen,
+                                          rootlessUiopenBackup,
+                                          &replacementError)) {
+                return fail(replacementError, nil);
+            }
+        }
+        if (!files_are_equal(sourceTrustedUiopen, rootlessUiopen)) {
+            return fail(@"rootless uiopen refresh did not match the Cryptex "
+                         "trust-cache input",
+                        nil);
+        }
+        log_message("rootlessUiopenTrusted=true backup=%s",
+                    rootlessUiopenBackup != nil
+                        ? [rootlessUiopenBackup UTF8String]
+                        : "not-needed");
+
         setenv("PATH",
                "/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:"
                "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -2223,6 +2720,13 @@ int main(int argc, char *argv[]) {
         setenv("HOME", "/var/root", 1);
         setenv("SHELL", "/var/jb/bin/sh", 1);
         setenv("NO_PASSWORD_PROMPT", "1", 1);
+
+        NSString *dopamineMarkerError = nil;
+        if (!ensure_root_owned_empty_file("/var/jb/.installed_dopamine", 0644,
+                                          &dopamineMarkerError)) {
+            return fail(dopamineMarkerError, nil);
+        }
+        log_message("dopamineMarkerReady=true path=/var/jb/.installed_dopamine");
 
         if (!repairMode) {
             char *prep_arguments[] = {
@@ -2248,6 +2752,27 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        bool elleKitKeyUpdated = false;
+        bool bigBossKeyUpdated = false;
+        bool repositoryCompatibilityUpdated = false;
+        NSString *repositoryMetadataError = nil;
+        if (!install_managed_apt_file(
+                sourceElleKitKey, @"/var/jb/etc/apt/trusted.gpg.d",
+                @"dopamine-ellekit.gpg", 64 * 1024, "repositoryKeyring",
+                &elleKitKeyUpdated, &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceBigBossKey, @"/var/jb/etc/apt/trusted.gpg.d",
+                @"dopamine-bigboss.gpg", 64 * 1024, "repositoryKeyring",
+                &bigBossKeyUpdated, &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceRepositoryCompatibility,
+                @"/var/jb/etc/apt/apt.conf.d",
+                @"99dopamine-repository-compat", 64 * 1024,
+                "repositoryCompatibility", &repositoryCompatibilityUpdated,
+                &repositoryMetadataError)) {
+            return fail(repositoryMetadataError, nil);
+        }
+
         bool defaultSourcesUpdated = false;
         NSString *defaultSourcesError = nil;
         if (!install_dopamine_default_sources(sourceDefaultSources,
@@ -2263,7 +2788,59 @@ int main(int argc, char *argv[]) {
             return fail(kernelPackageError, nil);
         }
 
-        if (!apt_package_lists_are_populated()) {
+        NSUInteger trustedPackageUpdated = 0;
+        NSUInteger trustedPackageCurrent = 0;
+        NSUInteger trustedPackageNotApplicable = 0;
+        NSString *trustedPackageError = nil;
+        if (!refresh_trusted_package_executables(
+                sourceOriginalTrustedPackages, sourceTrustedPackages,
+                &trustedPackageUpdated, &trustedPackageCurrent,
+                &trustedPackageNotApplicable, &trustedPackageError)) {
+            return fail(trustedPackageError, nil);
+        }
+        log_message("trustedPackageExecutables updated=%lu current=%lu "
+                    "notApplicable=%lu",
+                    (unsigned long)trustedPackageUpdated,
+                    (unsigned long)trustedPackageCurrent,
+                    (unsigned long)trustedPackageNotApplicable);
+
+        // A transaction can stop after unpacking when its first executable was
+        // absent from the previously mounted static trust cache. The current
+        // Cryptex covers the pinned default tweak stack, so finish pending
+        // maintainer scripts before checking APT dependency consistency.
+        char *dpkgConfigureArguments[] = {
+            "/var/jb/usr/bin/dpkg", "--configure", "-a", NULL};
+        int dpkgConfigureStatus = run_and_wait(
+            dpkgConfigureArguments[0], dpkgConfigureArguments);
+        log_message("dpkgConfigurePendingExit=%d", dpkgConfigureStatus);
+        if (dpkgConfigureStatus != 0) {
+            return fail(
+                [NSString stringWithFormat:
+                              @"pending package configuration exited %d",
+                              dpkgConfigureStatus],
+                nil);
+        }
+
+        bool repositoryMetadataChanged =
+            elleKitKeyUpdated || bigBossKeyUpdated ||
+            repositoryCompatibilityUpdated || defaultSourcesUpdated;
+        if (repositoryMetadataChanged) {
+            char *apt_update_arguments[] = {
+                "/var/jb/usr/bin/apt-get", "update", "-o",
+                "Dpkg::Use-Pty=0", NULL};
+            log_message("aptUpdateScope=all reason=repository-metadata-changed");
+            int apt_update_status =
+                run_and_wait(apt_update_arguments[0], apt_update_arguments);
+            log_message("aptUpdateExit=%d", apt_update_status);
+            if (apt_update_status != 0 ||
+                !apt_package_lists_are_populated()) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"APT index refresh exited %d",
+                                  apt_update_status],
+                    nil);
+            }
+        } else if (!apt_package_lists_are_populated()) {
             NSString *procursusSources =
                 @"/var/jb/etc/apt/sources.list.d/procursus.sources";
             if (access([procursusSources fileSystemRepresentation], R_OK) !=
@@ -2289,7 +2866,7 @@ int main(int argc, char *argv[]) {
                     nil);
             }
         } else {
-            log_message("aptUpdateSkipped=package-lists-present");
+            log_message("aptUpdateSkipped=repository-metadata-current");
         }
 
         char *apt_check_arguments[] = {
@@ -2526,6 +3103,9 @@ int main(int argc, char *argv[]) {
         }
         if (rootlessLaunchctlBackup != nil) {
             manifest[@"RootlessLaunchctlBackup"] = rootlessLaunchctlBackup;
+        }
+        if (rootlessUiopenBackup != nil) {
+            manifest[@"RootlessUiopenBackup"] = rootlessUiopenBackup;
         }
         manifest[@"Source"] = @"opa334/Dopamine 3.x";
         if (![manifest writeToFile:rollbackManifest atomically:YES]) {

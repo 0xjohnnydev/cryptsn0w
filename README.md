@@ -50,7 +50,7 @@ Set the full Xcode developer directory for the current shell when needed:
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ```
 
-`setup.sh` installs missing `dpkg`, `ldid`, `ripgrep`, and `zstd` formulae
+`setup.sh` installs missing `dpkg`, `gnupg`, `ldid`, `ripgrep`, and `zstd` formulae
 through Homebrew. Install Xcode, Homebrew, and the SRD host tools first.
 
 ### Apple Development signing
@@ -120,14 +120,17 @@ With the prepared and unlocked iPhone connected:
 That command performs the complete ordered workflow:
 
 1. Checks the host tools, Xcode SDK, and SRD `cryptexctl`.
-2. Creates `.venv` and installs the pinned Python requirements.
+2. Creates `.venv`, installs the pinned Python requirements, and applies the
+   checked-in RemoteXPC flow-control compatibility patch.
 3. Fetches only the pinned opa334/Dopamine commit into the ignored
    `Dopamine-upstream` working tree.
 4. Copies the checked-in Cryptex bootstrap overlay into that working tree.
 5. Selects a matching local development certificate/profile and derives the
    minimal Sileo entitlements.
-6. Downloads and hash-checks the pinned Procursus bootstrap.
-7. Builds the generic Cryptex and its trust cache.
+6. Downloads and hash-checks the pinned Procursus bootstrap and default tweak
+   packages, then validates the ElleKit and BigBoss signing-key fingerprints.
+7. Builds the generic Cryptex, managed repository configuration, and trust
+   cache.
 8. Builds the provisioned Sileo app paired to that exact Cryptex.
 9. Verifies the working, Cryptex, and IPA copies of `giveMeRoot` have the same
    SHA-256.
@@ -187,8 +190,8 @@ Dopamine-upstream/CryptexBootstrap/out/
     └── flow-summary.json
 ```
 
-The generated upstream checkout, caches, tickets, IPAs, profiles, and run logs
-stay in ignored work directories.
+Generated upstream sources, caches, tickets, IPAs, profiles, and run logs live
+in ignored work directories.
 
 ## Signing overrides
 
@@ -224,9 +227,10 @@ check.
 ## After installation
 
 The Cryptex launch daemon prepares or repairs the managed Procursus tree,
-starts the root broker, performs `apt-get check`, and asks `uiopen` to launch
-Sileo. Keep the device unlocked during this stage, then open Sileo manually if
-needed.
+creates Dopamine's bootstrap marker before package scripts run, installs the
+managed repository keys and policy, synchronizes `launchctl` and `uiopen` to
+their trust-cached copies, starts the root broker, performs `apt-get check`,
+and launches Sileo. Keep the device unlocked during this stage.
 
 Successful host-side run metadata is saved in the newest
 `Dopamine-upstream/CryptexBootstrap/out/runs/<run-id>/flow-summary.json`.
@@ -255,8 +259,12 @@ The bootstrap configures the standard Dopamine repository set:
 
 The four Dopamine sources are maintained in
 `/var/jb/etc/apt/sources.list.d/dopamine-default.sources`. Fresh bootstrap and
-repair runs verify that file, then Sileo refreshes the repositories when it
-opens. Custom repository files remain alongside the managed defaults.
+repair runs verify that file and install the ElleKit and BigBoss keys in
+`/var/jb/etc/apt/trusted.gpg.d`. The managed APT policy at
+`/var/jb/etc/apt/apt.conf.d/99dopamine-repository-compat` keeps BigBoss's
+fingerprint-pinned legacy signature valid while reporting its SHA-1 digest as
+a warning. Sileo receives populated package indexes for all five repositories
+when it opens. Custom repository files remain alongside the managed defaults.
 
 ## Root SSH proof of concept
 
@@ -328,6 +336,12 @@ Confirm Developer Mode is enabled and that the selected provisioning profile
 contains the connected device. Building an automatically signed app to that
 device once in Xcode usually resolves registration and profile refresh issues.
 
+### RemoteXPC reports `GOAWAY error 3`
+
+Rerun `./Dopamine-CryptexBootstrap/setup.sh --install`. Setup reapplies the
+checked-in pymobiledevice3 flow-control patch before opening a userspace tunnel,
+and the installer can reuse a still-current personalized run for diagnosis.
+
 ### Cryptex personalization is rejected
 
 Reconnect and unlock the device, then rerun `--install` so setup captures a
@@ -349,14 +363,13 @@ issue.
   Dopamine 3.x Procursus/Sileo compatibility environment.
 - `tools/cryptexd-static/`: generic Cryptex1 personalization and guarded install
   helpers.
-- `tools/atc-streamingzip-chain-static/`: source-only AirTraffic/StreamingZip
+- `tools/atc-streamingzip-chain-static/`: AirTraffic/StreamingZip
   research helpers.
 - `findings/`: relocated-symlink finding documentation.
 
-Generated device images, personalized tickets, signed IPAs, provisioning
-profiles, logs, firmware images, virtual environments, caches, IDA databases,
-and keys stay in ignored local paths. Rebuild and repersonalize the Cryptex to
-add newly installed ad-hoc Mach-O files to its trust cache.
+Build outputs are organized under `build/` and
+`Dopamine-upstream/CryptexBootstrap/out/`. Rebuild and repersonalize the Cryptex
+to add newly installed ad-hoc Mach-O files to its trust cache.
 
 See
 [`Dopamine-CryptexBootstrap/CryptexBootstrap/README.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/README.md)
