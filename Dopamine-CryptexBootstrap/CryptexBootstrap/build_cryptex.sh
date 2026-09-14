@@ -9,10 +9,10 @@ BOOTSTRAP_URL=https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.ta
 BOOTSTRAP_SHA256=8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
-VERSION=${CODEX_CRYPTEX_VERSION:-1.0.20260914.52}
-SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-845279DD92AA160D4148B0F42C60D6B12CDB8454}
-SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-/Users/johnnyfranks/Library/Developer/Xcode/UserData/Provisioning Profiles/1e1053f5-0740-44ec-bc5a-c94ba800f4c7.mobileprovision}
-SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-$SCRIPT_DIR/sileo-development-entitlements.plist}
+VERSION=${CODEX_CRYPTEX_VERSION:-1.0.$(date -u +%Y%m%d%H%M%S)}
+SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
+SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
+SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}
 
 CACHE_DIR="$SCRIPT_DIR/cache"
 WORK_DIR="$SCRIPT_DIR/work"
@@ -24,6 +24,9 @@ PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
+SIGNING_DIR="$WORK_DIR/signing"
+SIGNING_CONFIG="$SIGNING_DIR/config.json"
+GENERATED_ENTITLEMENTS="$SIGNING_DIR/sileo-development-entitlements.plist"
 
 die() {
     print -u2 -- "error: $*"
@@ -34,11 +37,44 @@ sha256_of() {
     shasum -a 256 "$1" | awk '{print $1}'
 }
 
-for tool in awk codesign curl dpkg-deb file find ldid nm plutil rg security shasum tar xcrun zstd; do
+json_field() {
+    python3 - "$1" "$2" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())[sys.argv[2]]
+if not isinstance(value, str) or not value:
+    raise SystemExit(f"missing string field {sys.argv[2]}")
+print(value)
+PY
+}
+
+for tool in awk codesign curl dpkg-deb file find ldid nm plutil python3 rg security shasum tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
 [[ -f "$SILEO_DEB" ]] || die "missing opa334 Sileo package: $SILEO_DEB"
+
+mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR" "$SIGNING_DIR"
+SIGNING_ARGS=(
+    --bundle-id org.coolstar.SileoStore
+    --output-json "$SIGNING_CONFIG"
+    --output-entitlements "$GENERATED_ENTITLEMENTS"
+)
+[[ -z "$SILEO_DEVELOPMENT_IDENTITY" ]] || \
+    SIGNING_ARGS+=(--identity "$SILEO_DEVELOPMENT_IDENTITY")
+[[ -z "$SILEO_PROVISIONING_PROFILE" ]] || \
+    SIGNING_ARGS+=(--profile "$SILEO_PROVISIONING_PROFILE")
+[[ -z "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
+    SIGNING_ARGS+=(--entitlements "$SILEO_DEVELOPMENT_ENTITLEMENTS")
+python3 "$SCRIPT_DIR/configure_signing.py" "${SIGNING_ARGS[@]}"
+SILEO_DEVELOPMENT_IDENTITY=$(json_field "$SIGNING_CONFIG" identitySha1)
+SILEO_PROVISIONING_PROFILE=$(json_field "$SIGNING_CONFIG" profile)
+SILEO_DEVELOPMENT_ENTITLEMENTS=$(json_field "$SIGNING_CONFIG" entitlements)
+SILEO_APPLICATION_IDENTIFIER=$(plutil -extract application-identifier raw -o - \
+    "$SILEO_DEVELOPMENT_ENTITLEMENTS")
+
 [[ -f "$SILEO_PROVISIONING_PROFILE" ]] || \
     die "missing Sileo provisioning profile: $SILEO_PROVISIONING_PROFILE"
 [[ -f "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
@@ -46,8 +82,6 @@ done
 security find-identity -v -p codesigning | \
     rg -q "$SILEO_DEVELOPMENT_IDENTITY" || \
     die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
-
-mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
 if [[ ! -f "$BOOTSTRAP_ARCHIVE" ]]; then
     curl --fail --location --retry 3 --output "$BOOTSTRAP_ARCHIVE" "$BOOTSTRAP_URL"
 fi
@@ -117,7 +151,7 @@ if ldid -e "$APP_DIR/Sileo" | rg -q \
     die "Sileo retains privileged runtime entitlements"
 fi
 ldid -e "$APP_DIR/Sileo" | rg -q \
-    '<string>7LGY4NE2VM.org.coolstar.SileoStore</string>' || \
+    -F -- "<string>$SILEO_APPLICATION_IDENTIFIER</string>" || \
     die "Sileo development application identifier is missing"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 dpkg-deb -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null

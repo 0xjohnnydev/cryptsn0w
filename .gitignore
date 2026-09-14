@@ -1,6 +1,7 @@
 build/
 cache/
 .venv/
+/Dopamine-upstream/
 __pycache__/
 *.pyc
 .DS_Store

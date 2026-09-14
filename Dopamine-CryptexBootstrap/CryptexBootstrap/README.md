@@ -34,73 +34,77 @@ This constructor path is necessary because iOS rejects an `execve` transition
 from a provisioned launcher into a second Sileo image, even when the target is
 Apple Development-signed, trust-cached, and inside the same app bundle.
 
-## Host build
+## One-command setup
 
-The default signing values match the local John Franks development profile.
-They can be replaced without editing the scripts:
+Run this from the root of the private workspace, not from a manually copied
+overlay:
 
 ```sh
-export CODEX_SILEO_DEVELOPMENT_IDENTITY=<certificate-SHA1>
+./Dopamine-CryptexBootstrap/setup.sh --install
+```
+
+The setup script checks the SRD `cryptexctl.research` installation and full
+iPhoneOS SDK, installs missing build utilities through an existing Homebrew,
+creates the pinned Python virtual environment, fetches the pinned
+opa334/Dopamine tree, and discovers an unexpired Apple Development profile
+whose certificate and application identifier match Sileo. It then performs
+the required order automatically:
+
+[REDACTED: Related request, payload, or installation details omitted.]
+
+The default device guard permits only a paired physical iPhone18,2 on iOS 27.0
+(24A435). Pass `--device UDID` when more than one eligible device is attached.
+The explicit `--allow-unverified-device` escape hatch is available for porting,
+but that configuration has not been validated by this project.
+
+The host-only forms are:
+
+```sh
+./Dopamine-CryptexBootstrap/setup.sh          # prepare and signing preflight
+./Dopamine-CryptexBootstrap/setup.sh --build  # build without touching a device
+```
+
+No administrator tunnel daemon is required. The install path uses
+pymobiledevice3's in-process userspace RemoteXPC transport.
+
+## Signing
+
+Signing is automatic when Xcode has installed a valid development certificate
+and profile compatible with `org.coolstar.SileoStore`. The selector verifies
+the profile is unexpired, includes `get-task-allow`, contains the installed
+certificate, and covers the bundle identifier. It derives the minimal app
+entitlements from that profile rather than checking in machine-specific team
+values.
+
+On a host with multiple identities, these optional overrides narrow selection:
+
+```sh
+export CODEX_SILEO_DEVELOPMENT_IDENTITY=<certificate-SHA1-or-unique-name>
 export CODEX_SILEO_PROVISIONING_PROFILE=/absolute/path/profile.mobileprovision
 export CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS=/absolute/path/entitlements.plist
 ```
 
-Build the generic Cryptex and then the provisioned Sileo app from the
-repository root. Do not reverse these commands:
+The custom entitlement file is still checked against the selected profile's
+application identifier, team, and `get-task-allow` fields.
+
+## Advanced manual build
+
+After `setup.sh` has prepared `Dopamine-upstream`, the lower-level driver is:
 
 ```sh
-./CryptexBootstrap/build_cryptex.sh
-./CryptexBootstrap/build_sileo_launcher.sh
+.venv/bin/python Dopamine-upstream/CryptexBootstrap/deploy.py build
 ```
+
+It invokes `build_cryptex.sh` before `build_sileo_launcher.sh`, generates a
+fresh numeric Cryptex version, and gives the IPA and its JSON summary matching
+versioned names. Do not reverse the two underlying build scripts.
 
 Despite its legacy filename, `build_sileo_launcher.sh` now emits the direct
 Sileo main executable with the constructor broker; it does not build an exec
 launcher. Set `CODEX_SILEO_LAUNCHER_IPA` and
 `CODEX_SILEO_LAUNCHER_SUMMARY` to fresh paths for additional builds.
 
-The Cryptex build verifies the pinned Procursus and opa334 Sileo SHA-256
-values, validates the generic `999.*` identity, dumps every trust-cache cdhash,
-and records the development identity/profile hashes in
-`out/build-summary.json`. The app build verifies the entire signed bundle and
-records its component hashes in `out/sileo-brokered-v36.json`.
-
-Before installation, verify the two helper hashes match the
-`rootHelperSha256` value in the launcher summary:
-
-```sh
-shasum -a 256 \
-  CryptexBootstrap/work/sileo-package/var/jb/Applications/Sileo.app/giveMeRoot
-unzip -p CryptexBootstrap/out/Sileo.brokered-v36.ipa \
-  Payload/Sileo.app/giveMeRoot | shasum -a 256
-jq -r .rootHelperSha256 CryptexBootstrap/out/sileo-brokered-v36.json
-```
-
-## Install order
-
-Install the provisioned app before mounting a new Cryptex version so the root
-job resolves the current Bundle and Data container UUIDs:
-
-```sh
-PYTHON=/path/to/pymobiledevice3-venv/bin/python
-UDID=00008150-0018252C1130C01C
-
-"$PYTHON" -m pymobiledevice3 apps install --developer --tunnel "$UDID" \
-  CryptexBootstrap/out/Sileo.brokered-v36.ipa
-```
-
 [REDACTED: Related request, payload, or installation details omitted.]
-
-```sh
-[REDACTED: Related request, payload, or installation details omitted.]
-```
-
-Run the guarded installer once with `--validate-only`; proceed with
-`--replace-installed` only when the live preflight identifies exactly one
-older version of this non-Apple Cryptex:
-
-```sh
-[REDACTED: Related request, payload, or installation details omitted.]
-```
 
 The root installer performs a non-mutating `apt-get check` before launching
 Sileo. Treat `aptDependencyCheckExit=0`, `sileoSystemRootBrokerReady=true`,
