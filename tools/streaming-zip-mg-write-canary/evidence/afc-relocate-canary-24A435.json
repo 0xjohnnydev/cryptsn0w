@@ -1,0 +1,50 @@
+{
+  "archiveBytes": 1225,
+  "archiveSHA256": "[redacted-blob]",
+  "canarySHA256": "[redacted-blob]",
+  "cleanup": {
+    "destinationAbsent": true,
+    "failures": [],
+    "sourceAbsent": true
+  },
+  "destination": "codex-sz-dst-24A435-d6125135df1c",
+  "device": {
+    "build": "24A435",
+    "productType": "iPhone18,2",
+    "productVersion": "27.0",
+    "transport": "CoreDevice userspace localNetwork tunnel"
+  },
+  "error": "[Errno 7] Opcode: RENAME_PATH failed with status: 7: None",
+  "errorType": "AfcException",
+  "linkTarget": "inside",
+  "mobileGestaltTouched": false,
+  "outcome": "not-confirmed",
+  "pausedState": {
+    "insideDirectoryPresent": true,
+    "linkTarget": "inside",
+    "linkType": "S_IFLNK",
+    "replacementTarget": "../codex-sz-dst-24A435-d6125135df1c",
+    "replacementType": "S_IFLNK"
+  },
+  "prefixBytes": 503,
+  "preflight": {
+    "destinationAbsent": true,
+    "sourceAbsent": true
+  },
+  "replacementOriginalPath": "deep/replacement",
+  "replacementTarget": "../codex-sz-dst-24A435-d6125135df1c",
+  "schema": 1,
+  "scope": "/var/mobile/Media only",
+  "serviceName": "com.apple.streaming_zip_conduit.shim.remote",
+  "source": "codex-sz-src-24A435-d6125135df1c",
+  "suffixBytes": 722,
+  "swappedLinkTarget": "../codex-sz-dst-24A435-d6125135df1c",
+  "test": "StreamingZipAFCSymlinkSwapComposition",
+  "transport": {
+    "autopair": false,
+    "existingPairing": true,
+    "inProcessRSD": true,
+    "mobdev2AddressesTried": 1,
+    "path": "mobdev2 TCP lockdown -> CoreDevice proxy -> in-process userspace tunnel"
+  }
+}

@@ -4,4 +4,16 @@ cache/
 __pycache__/
 *.pyc
 .DS_Store
-
+*.ipa
+*.dmg
+*.cxbd/
+*.mobileprovision
+*.p12
+*.key
+*.ndjson
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
