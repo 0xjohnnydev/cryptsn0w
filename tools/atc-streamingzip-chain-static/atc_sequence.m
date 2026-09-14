@@ -1,0 +1,194 @@
+#import <Foundation/Foundation.h>
+#include <signal.h>
+#include <unistd.h>
+
+typedef void *ATHostConnectionRef;
+
+extern ATHostConnectionRef ATHostConnectionCreate(CFStringRef deviceIdentifier);
+extern void ATHostConnectionRelease(ATHostConnectionRef connection);
+extern void ATHostConnectionSendHostInfo(ATHostConnectionRef connection,
+                                         CFDictionaryRef hostInfo);
+extern void ATHostConnectionSendSyncRequest(ATHostConnectionRef connection,
+                                            CFArrayRef dataclasses,
+                                            CFDictionaryRef anchors,
+                                            CFDictionaryRef hostInfo);
+extern void ATHostConnectionSendMetadataSyncFinished(
+    ATHostConnectionRef connection,
+    CFDictionaryRef syncTypes,
+    CFDictionaryRef anchors);
+extern void ATHostConnectionSendAssetCompleted(ATHostConnectionRef connection,
+                                               CFStringRef assetIdentifier,
+                                               CFStringRef dataclass,
+                                               CFStringRef assetPath);
+extern CFDictionaryRef ATHostConnectionReadMessage(ATHostConnectionRef connection);
+extern CFStringRef ATCFMessageGetName(CFDictionaryRef message);
+extern CFTypeRef ATCFMessageGetParam(CFDictionaryRef message, CFStringRef key);
+
+static void TimeoutHandler(int signalNumber) {
+    (void)signalNumber;
+    const char message[] = "{\"ok\":false,\"error\":\"timeout\"}\n";
+    (void)write(STDOUT_FILENO, message, sizeof(message) - 1);
+    _exit(124);
+}
+
+static void PrintJSON(NSDictionary *object) {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
+    if (!data) return;
+    (void)write(STDOUT_FILENO, data.bytes, data.length);
+    (void)write(STDOUT_FILENO, "\n", 1);
+}
+
+static NSDictionary *HostInfo(void) {
+    return @{
+        @"Type": @"iTunes",
+        @"Version": @"13.7.0.161",
+        @"MacOSVersion": [[NSProcessInfo processInfo] operatingSystemVersionString],
+        @"SyncHostName": @"24A435 ordered canary host",
+        @"LibraryID": [[NSUUID UUID] UUIDString],
+        @"SyncedDataclasses": @[ @"Book" ],
+        @"SyncedAssetTypes": @[ @"Book" ],
+        @"Wakeable": @NO,
+    };
+}
+
+static BOOL ManifestContains(NSDictionary *manifest, NSString *identifier) {
+    NSArray *books = [manifest[@"Book"] isKindOfClass:[NSArray class]]
+        ? manifest[@"Book"] : nil;
+    for (id entry in books) {
+        if ([entry isKindOfClass:[NSDictionary class]] &&
+            [entry[@"AssetID"] isEqual:identifier] &&
+            [entry[@"IsDownload"] boolValue]) return YES;
+    }
+    return NO;
+}
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        if (argc < 4 || argc % 2 != 0) {
+            PrintJSON(@{ @"ok": @NO, @"error": @"usage: udid identifier destination [...]" });
+            return 64;
+        }
+
+        NSUInteger pairCount = (NSUInteger)(argc - 2) / 2;
+        if (pairCount > 12) {
+            PrintJSON(@{ @"ok": @NO, @"error": @"too many assets" });
+            return 64;
+        }
+
+        NSString *deviceIdentifier = [NSString stringWithUTF8String:argv[1]];
+        NSMutableArray<NSDictionary *> *assets = [NSMutableArray array];
+        for (int index = 2; index < argc; index += 2) {
+            NSString *identifier = [NSString stringWithUTF8String:argv[index]];
+            NSString *destination = [NSString stringWithUTF8String:argv[index + 1]];
+            if (!identifier.length || !destination.length) {
+                PrintJSON(@{ @"ok": @NO, @"error": @"empty argument" });
+                return 64;
+            }
+            [assets addObject:@{ @"identifier": identifier,
+                                 @"destination": destination }];
+        }
+        if (!deviceIdentifier.length) {
+            PrintJSON(@{ @"ok": @NO, @"error": @"empty device identifier" });
+            return 64;
+        }
+
+        signal(SIGALRM, TimeoutHandler);
+        alarm((unsigned int)MIN(180, 60 + pairCount * 8));
+        ATHostConnectionRef connection =
+            ATHostConnectionCreate((__bridge CFStringRef)deviceIdentifier);
+        if (!connection) {
+            PrintJSON(@{ @"ok": @NO, @"error": @"connection create failed" });
+            return 2;
+        }
+
+        BOOL sawSyncAllowed = NO;
+        for (NSUInteger index = 0; index < 8 && !sawSyncAllowed; index++) {
+            CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
+            if (!raw) continue;
+            NSString *name = (__bridge NSString *)ATCFMessageGetName(raw);
+            sawSyncAllowed = [name isEqual:@"SyncAllowed"];
+            CFRelease(raw);
+        }
+        if (!sawSyncAllowed) {
+            ATHostConnectionRelease(connection);
+            PrintJSON(@{ @"ok": @NO, @"error": @"SyncAllowed not observed" });
+            return 3;
+        }
+
+        NSDictionary *hostInfo = HostInfo();
+        ATHostConnectionSendHostInfo(connection, (__bridge CFDictionaryRef)hostInfo);
+        usleep(200000);
+        ATHostConnectionSendSyncRequest(connection,
+                                        (__bridge CFArrayRef)@[ @"Book" ],
+                                        (__bridge CFDictionaryRef)@{},
+                                        (__bridge CFDictionaryRef)hostInfo);
+
+        BOOL sawReady = NO;
+        for (NSUInteger index = 0; index < 12 && !sawReady; index++) {
+            CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
+            if (!raw) continue;
+            NSString *name = (__bridge NSString *)ATCFMessageGetName(raw);
+            sawReady = [name isEqual:@"ReadyForSync"];
+            CFRelease(raw);
+        }
+        if (!sawReady) {
+            ATHostConnectionRelease(connection);
+            PrintJSON(@{ @"ok": @NO, @"error": @"ReadyForSync not observed" });
+            return 4;
+        }
+
+        ATHostConnectionSendMetadataSyncFinished(
+            connection,
+            (__bridge CFDictionaryRef)@{ @"Book": @1 },
+            (__bridge CFDictionaryRef)@{});
+
+        NSDictionary *manifest = nil;
+        for (NSUInteger index = 0; index < 20 && !manifest; index++) {
+            CFDictionaryRef raw = ATHostConnectionReadMessage(connection);
+            if (!raw) continue;
+            NSString *name = (__bridge NSString *)ATCFMessageGetName(raw);
+            if ([name isEqual:@"AssetManifest"]) {
+                id value = (__bridge id)ATCFMessageGetParam(raw, CFSTR("AssetManifest"));
+                if ([value isKindOfClass:[NSDictionary class]]) manifest = [value copy];
+            } else if ([name isEqual:@"SyncFailed"] ||
+                       [name isEqual:@"SyncFinished"]) {
+                CFRelease(raw);
+                break;
+            }
+            CFRelease(raw);
+        }
+
+        NSMutableArray<NSString *> *missing = [NSMutableArray array];
+        for (NSDictionary *asset in assets) {
+            NSString *identifier = asset[@"identifier"];
+            if (!ManifestContains(manifest, identifier)) [missing addObject:identifier];
+        }
+        if (missing.count) {
+            ATHostConnectionRelease(connection);
+            PrintJSON(@{ @"ok": @NO,
+                         @"error": @"expected assets absent from manifest",
+                         @"bookAssetCount": @([manifest[@"Book"] count]),
+                         @"missingCount": @(missing.count) });
+            return 5;
+        }
+
+        for (NSUInteger index = 0; index < assets.count; index++) {
+            NSDictionary *asset = assets[index];
+            ATHostConnectionSendAssetCompleted(
+                connection,
+                (__bridge CFStringRef)asset[@"identifier"],
+                CFSTR("Book"),
+                (__bridge CFStringRef)asset[@"destination"]);
+            if (index + 1 < assets.count) usleep(900000);
+        }
+        sleep(2);
+        ATHostConnectionRelease(connection);
+        alarm(0);
+        PrintJSON(@{ @"ok": @YES,
+                     @"syncAllowed": @YES,
+                     @"readyForSync": @YES,
+                     @"bookAssetCount": @([manifest[@"Book"] count]),
+                     @"fileCompleteMessages": @(assets.count) });
+        return 0;
+    }
+}

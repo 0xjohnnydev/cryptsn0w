@@ -1,0 +1,46 @@
+{
+  "archiveBytes": 818,
+  "archiveSHA256": "[redacted-blob]",
+  "canarySHA256": "[redacted-blob]",
+  "cleanup": {
+    "destinationAbsent": true,
+    "failures": [],
+    "sourceAbsent": true
+  },
+  "destination": "codex-sz-dst-24A435-121f6364210d",
+  "device": {
+    "build": "24A435",
+    "productType": "iPhone18,2",
+    "productVersion": "27.0",
+    "transport": "CoreDevice userspace localNetwork tunnel"
+  },
+  "error": "[Errno 15] Opcode: MAKE_LINK failed with status: 15: None",
+  "errorType": "AfcException",
+  "linkTarget": "inside",
+  "mobileGestaltTouched": false,
+  "outcome": "not-confirmed",
+  "pausedState": {
+    "insideDirectoryPresent": true,
+    "linkTarget": "inside",
+    "linkType": "S_IFLNK"
+  },
+  "prefixBytes": 306,
+  "preflight": {
+    "destinationAbsent": true,
+    "sourceAbsent": true
+  },
+  "schema": 1,
+  "scope": "/var/mobile/Media only",
+  "serviceName": "com.apple.streaming_zip_conduit.shim.remote",
+  "source": "codex-sz-src-24A435-121f6364210d",
+  "suffixBytes": 512,
+  "swappedLinkTarget": "../codex-sz-dst-24A435-121f6364210d",
+  "test": "StreamingZipAFCSymlinkSwapComposition",
+  "transport": {
+    "autopair": false,
+    "existingPairing": true,
+    "inProcessRSD": true,
+    "mobdev2AddressesTried": 1,
+    "path": "mobdev2 TCP lockdown -> CoreDevice proxy -> in-process userspace tunnel"
+  }
+}

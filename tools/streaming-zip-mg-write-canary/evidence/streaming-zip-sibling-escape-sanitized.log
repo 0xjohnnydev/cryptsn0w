@@ -1,0 +1,23 @@
+# Exact relevant sequence from the live os_trace stream; private values and
+# process/network identifiers are omitted. Unrelated device log entries were
+# discarded in memory and never written here.
+
+streaming_zip_conduit | NOTICE | initialized with path: <private> options: <private>
+streaming_zip_conduit | NOTICE | preparing
+StreamingUnzipService | NOTICE | Initialized with path <private> ; hashed chunk size 0 ; hashes (null)
+streaming_zip_conduit | NOTICE | calling prepare completion block with offset 0, error (null)
+streaming_zip_conduit | DEBUG | lockdown_recv returned 756
+StreamingUnzipService | DEBUG | Got block of length 756 at offset 0
+StreamingUnzipService | DEBUG | Updating stream state from ReadNextRecordSignature to IncompleteLFRecord
+StreamingUnzipService | DEBUG | Updating stream state from IncompleteLFRecord to CompleteLFData
+StreamingUnzipService | DEBUG | Updating stream state from CompleteLFData to ReadNextRecordSignature
+StreamingUnzipService | DEBUG | File <private> is metadata file, so keeping in memory
+StreamingUnzipService | DEBUG | Got stream metadata: <private>
+StreamingUnzipService | DEBUG | Updating stream state from CompleteLFData to ReadNextRecordSignature
+StreamingUnzipService | DEBUG | File <private> is a symlink (mode = 0120777), so keeping in memory
+StreamingUnzipService | DEBUG | Updating stream state from IncompleteLFData to CompleteLFData
+StreamingUnzipService | ERROR | Invalid symlink: <private> -> <private> : (null)
+StreamingUnzipService | DEBUG | Updating stream state from CompleteLFData to Error
+streaming_zip_conduit | ERROR | Stream extractor got error: Error Domain=SZExtractorErrorDomain Code=5 UserInfo={NSFilePath=<private>, SZExtractorSourceFileLineErrorKey=1489, SZExtractorFunctionNameErrorKey=<private>, NSLocalizedDescription=<private>}
+streaming_zip_conduit | DEBUG | Transferred 756 archived bytes
+streaming_zip_conduit | ERROR | finish called on extractor that had already returned an error
