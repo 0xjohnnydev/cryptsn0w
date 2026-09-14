@@ -1202,6 +1202,130 @@ static bool files_are_equal(NSString *left, NSString *right) {
     return equal;
 }
 
+static bool install_dopamine_default_sources(NSString *source,
+                                             bool *didUpdate,
+                                             NSString **errorText) {
+    if (didUpdate != NULL) {
+        *didUpdate = false;
+    }
+    NSError *readError = nil;
+    NSData *expected = [NSData dataWithContentsOfFile:source
+                                              options:NSDataReadingMappedIfSafe
+                                                error:&readError];
+    if (expected == nil || expected.length == 0 || expected.length > 64 * 1024) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"default APT source payload is invalid: %@",
+                                 readError];
+        }
+        return false;
+    }
+
+    NSString *directory = @"/var/jb/etc/apt/sources.list.d";
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:directory
+      withIntermediateDirectories:YES
+                       attributes:@{
+                           NSFilePosixPermissions : @0755,
+                           NSFileOwnerAccountID : @0,
+                           NSFileGroupOwnerAccountID : @0,
+                       }
+                            error:&directoryError]) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"default APT source directory failed: %@",
+                                 directoryError];
+        }
+        return false;
+    }
+
+    NSString *destination =
+        [directory stringByAppendingPathComponent:@"dopamine-default.sources"];
+    struct stat destinationStatus;
+    if (lstat([destination fileSystemRepresentation], &destinationStatus) ==
+        0) {
+        if (!S_ISREG(destinationStatus.st_mode)) {
+            if (errorText != NULL) {
+                *errorText = @"managed default APT source is not a regular file";
+            }
+            return false;
+        }
+        NSError *currentError = nil;
+        NSData *current = [NSData dataWithContentsOfFile:destination
+                                                 options:0
+                                                   error:&currentError];
+        if (current == nil) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"default APT source read failed: %@",
+                                     currentError];
+            }
+            return false;
+        }
+        if ([current isEqualToData:expected]) {
+            log_message("dopamineDefaultSources=current path=%s",
+                        [destination UTF8String]);
+            return true;
+        }
+    } else if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"default APT source status failed: %s",
+                                 strerror(errno)];
+        }
+        return false;
+    }
+
+    NSString *temporary = [directory
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".dopamine-default-%@",
+                                       [[NSUUID UUID] UUIDString]]];
+    NSError *writeError = nil;
+    if (![expected writeToFile:temporary
+                       options:NSDataWritingWithoutOverwriting
+                         error:&writeError] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0644,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:temporary
+                    error:&writeError]) {
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"default APT source staging failed: %@",
+                                 writeError];
+        }
+        return false;
+    }
+    if (rename([temporary fileSystemRepresentation],
+               [destination fileSystemRepresentation]) != 0) {
+        int savedError = errno;
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"default APT source activation failed: %s",
+                                 strerror(savedError)];
+        }
+        return false;
+    }
+    if (!files_are_equal(source, destination)) {
+        if (errorText != NULL) {
+            *errorText = @"default APT source verification failed";
+        }
+        return false;
+    }
+    if (didUpdate != NULL) {
+        *didUpdate = true;
+    }
+    log_message("dopamineDefaultSources=updated path=%s bytes=%lu",
+                [destination UTF8String], (unsigned long)expected.length);
+    return true;
+}
+
 static bool replace_file_with_backup(NSString *source, NSString *destination,
                                      NSString *backup, NSString **errorText) {
     struct stat sourceStatus;
@@ -1888,6 +2012,9 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:@"trusted/Sileo.app"];
         NSString *sourceTrustedLaunchctl =
             [sourceProcursus stringByAppendingPathComponent:@"usr/bin/launchctl"];
+        NSString *sourceDefaultSources =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"dopamine-default.sources"];
         BOOL isDirectory = NO;
         if (![[NSFileManager defaultManager] fileExistsAtPath:sourceProcursus
                                                  isDirectory:&isDirectory] ||
@@ -1900,6 +2027,12 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedLaunchctl]) {
             return fail(@"cryptex payload is incomplete", nil);
+        }
+        struct stat defaultSourcesStatus;
+        if (lstat([sourceDefaultSources fileSystemRepresentation],
+                  &defaultSourcesStatus) != 0 ||
+            !S_ISREG(defaultSourcesStatus.st_mode)) {
+            return fail(@"default APT source payload is missing", nil);
         }
 
         NSString *manifestHash = boot_manifest_hash();
@@ -2115,6 +2248,14 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        bool defaultSourcesUpdated = false;
+        NSString *defaultSourcesError = nil;
+        if (!install_dopamine_default_sources(sourceDefaultSources,
+                                              &defaultSourcesUpdated,
+                                              &defaultSourcesError)) {
+            return fail(defaultSourcesError, nil);
+        }
+
         bool unsupportedKernelPackagesRemoved = false;
         NSString *kernelPackageError = nil;
         if (!repair_unsupported_kernel_packages(
@@ -2123,9 +2264,19 @@ int main(int argc, char *argv[]) {
         }
 
         if (!apt_package_lists_are_populated()) {
+            NSString *procursusSources =
+                @"/var/jb/etc/apt/sources.list.d/procursus.sources";
+            if (access([procursusSources fileSystemRepresentation], R_OK) !=
+                0) {
+                return fail(@"Procursus APT source is unavailable", nil);
+            }
             char *apt_update_arguments[] = {
                 "/var/jb/usr/bin/apt-get", "update", "-o",
-                "Dpkg::Use-Pty=0", NULL};
+                "Dpkg::Use-Pty=0", "-o",
+                "Dir::Etc::sourcelist=/var/jb/etc/apt/sources.list.d/"
+                "procursus.sources",
+                "-o", "Dir::Etc::sourceparts=-", NULL};
+            log_message("aptUpdateScope=procursus");
             int apt_update_status =
                 run_and_wait(apt_update_arguments[0], apt_update_arguments);
             log_message("aptUpdateExit=%d", apt_update_status);

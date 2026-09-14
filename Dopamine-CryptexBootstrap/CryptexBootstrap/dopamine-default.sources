@@ -1,0 +1,19 @@
+Types: deb
+URIs: https://repo.chariz.com/
+Suites: ./
+Components:
+
+Types: deb
+URIs: https://havoc.app/
+Suites: ./
+Components:
+
+Types: deb
+URIs: http://apt.thebigboss.org/repofiles/cydia/
+Suites: stable
+Components: main
+
+Types: deb
+URIs: https://ellekit.space/
+Suites: ./
+Components:

@@ -163,6 +163,36 @@ def compatible_devices(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
     return sorted(matches, key=lambda item: (item["name"], item["udid"]))
 
 
+def compatible_usbmux_devices(devices: Any) -> list[dict[str, str]]:
+    if not isinstance(devices, list):
+        return []
+    matches: list[dict[str, str]] = []
+    for device in devices:
+        if not isinstance(device, dict):
+            continue
+        udid = device.get("UniqueDeviceID") or device.get("Identifier")
+        connection_type = device.get("ConnectionType")
+        if not (
+            device.get("ProductType") == PRODUCT
+            and device.get("ProductVersion") == VERSION
+            and device.get("BuildVersion") == BUILD
+            and isinstance(connection_type, str)
+            and connection_type.casefold() == "usb"
+            and isinstance(udid, str)
+            and udid
+        ):
+            continue
+        matches.append(
+            {
+                "name": device.get("DeviceName") or PRODUCT,
+                "model": PRODUCT,
+                "transport": "USB",
+                "udid": udid,
+            }
+        )
+    return sorted(matches, key=lambda item: (item["name"], item["udid"]))
+
+
 def resolve_device(requested: str | None) -> str:
     command = [
         "xcrun",
@@ -184,6 +214,30 @@ def resolve_device(requested: str | None) -> str:
         timeout=12,
     )
     devices = compatible_devices(json.loads(completed.stdout)["result"]["devices"])
+    try:
+        usbmux_completed = subprocess.run(
+            [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+        )
+        usbmux_devices = compatible_usbmux_devices(
+            json.loads(usbmux_completed.stdout)
+        )
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ):
+        usbmux_devices = []
+    devices_by_udid = {device["udid"].casefold(): device for device in devices}
+    for device in usbmux_devices:
+        devices_by_udid.setdefault(device["udid"].casefold(), device)
+    devices = sorted(
+        devices_by_udid.values(), key=lambda item: (item["name"], item["udid"])
+    )
     if requested is not None:
         for device in devices:
             if device["udid"].casefold() == requested.casefold():

@@ -38,3 +38,10 @@ guard and selection options.
 The sibling `tools/cryptexd-static` directory supplies the strictly verified
 generic Cryptex1 personalizer. Device-bound tickets, signed Cryptex bundles,
 IPAs, provisioning profiles, caches, and logs stay in ignored output trees.
+
+The on-device repair path maintains Dopamine's standard Chariz, Havoc,
+BigBoss, and ElleKit entries in
+`/var/jb/etc/apt/sources.list.d/dopamine-default.sources`. Procursus remains the
+bootstrap feed. The installer restores Procursus metadata whenever the base APT
+index is missing, and Sileo refreshes the complete repository set when it opens.
+Custom repository files remain available beside it.

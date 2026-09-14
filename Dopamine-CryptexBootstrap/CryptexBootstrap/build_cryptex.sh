@@ -19,7 +19,9 @@ WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
 BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
+DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 IMAGE_ROOT="$WORK_DIR/image-root"
+EMBEDDED_DEFAULT_SOURCES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/dopamine-default.sources"
 PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
@@ -55,6 +57,7 @@ for tool in awk codesign curl dpkg-deb file find ldid nm plutil python3 rg secur
 done
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
 [[ -f "$SILEO_DEB" ]] || die "missing opa334 Sileo package: $SILEO_DEB"
+[[ -f "$DEFAULT_SOURCES" ]] || die "missing Dopamine default APT sources"
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR" "$SIGNING_DIR"
 SIGNING_ARGS=(
@@ -179,6 +182,9 @@ ldid -S"$SCRIPT_DIR/installer-entitlements.plist" -Cadhoc \
     "$IMAGE_ROOT/usr/local/bin/codex-dopamine-bootstrap"
 cp "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" \
     "$IMAGE_ROOT/Library/LaunchDaemons/"
+cp "$DEFAULT_SOURCES" \
+    "$EMBEDDED_DEFAULT_SOURCES"
+chmod 0644 "$EMBEDDED_DEFAULT_SOURCES"
 
 "$CRYPTEXCTL" create \
     --use-cryptex1-format \
@@ -206,7 +212,8 @@ python3 - "$SUMMARY" "$BUNDLE" "$IDENTIFIER" "$VERSION" \
     "$BOOTSTRAP_ARCHIVE" "$SILEO_DEB" "$REPACKED_SILEO" \
     "$TRUSTCACHE" "$TRUSTCACHE_DUMP" "$ENTRY_COUNT" \
     "$SILEO_DEVELOPMENT_IDENTITY" "$SILEO_PROVISIONING_PROFILE" \
-    "$SILEO_DEVELOPMENT_ENTITLEMENTS" <<'PY'
+    "$SILEO_DEVELOPMENT_ENTITLEMENTS" "$DEFAULT_SOURCES" \
+    "$EMBEDDED_DEFAULT_SOURCES" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -228,6 +235,8 @@ import sys
     sileo_development_identity,
     sileo_provisioning_profile,
     sileo_development_entitlements,
+    default_sources,
+    embedded_default_sources,
 ) = sys.argv[1:]
 
 def sha256(path: str) -> str:
@@ -236,6 +245,26 @@ def sha256(path: str) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+expected_default_source_uris = [
+    "https://repo.chariz.com/",
+    "https://havoc.app/",
+    "http://apt.thebigboss.org/repofiles/cydia/",
+    "https://ellekit.space/",
+]
+default_source_lines = pathlib.Path(default_sources).read_text().splitlines()
+default_source_uris = [
+    line.removeprefix("URIs: ")
+    for line in default_source_lines
+    if line.startswith("URIs: ")
+]
+if default_source_uris != expected_default_source_uris:
+    raise SystemExit(
+        "Dopamine default APT source list mismatch: "
+        f"expected {expected_default_source_uris}, got {default_source_uris}"
+    )
+if sha256(default_sources) != sha256(embedded_default_sources):
+    raise SystemExit("embedded default APT source payload mismatch")
 
 lines = pathlib.Path(trustcache_dump).read_text().splitlines()
 cdhashes = [
@@ -282,6 +311,13 @@ summary = {
         "repackedSileo": {
             "path": repacked_sileo,
             "sha256": sha256(repacked_sileo),
+        },
+        "defaultAptSources": {
+            "path": default_sources,
+            "sha256": sha256(default_sources),
+            "embeddedPath": embedded_default_sources,
+            "embeddedSha256": sha256(embedded_default_sources),
+            "uris": default_source_uris,
         },
     },
     "sileoDevelopmentSigning": {
