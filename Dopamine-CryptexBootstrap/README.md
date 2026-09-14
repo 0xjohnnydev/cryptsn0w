@@ -40,3 +40,10 @@ For a machine with multiple signing identities, optional overrides are
 guard and selection options.
 
 [REDACTED: Related request, payload, or installation details omitted.]
+
+The on-device repair path maintains Dopamine's standard Chariz, Havoc,
+BigBoss, and ElleKit entries in
+`/var/jb/etc/apt/sources.list.d/dopamine-default.sources`. Procursus remains the
+bootstrap feed. The installer restores Procursus metadata whenever the base APT
+index is missing, and Sileo refreshes the complete repository set when it opens.
+Custom repository files remain available beside it.

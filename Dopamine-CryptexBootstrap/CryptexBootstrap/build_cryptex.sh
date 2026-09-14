@@ -19,7 +19,9 @@ WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
 BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
+DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 IMAGE_ROOT="$WORK_DIR/image-root"
+EMBEDDED_DEFAULT_SOURCES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/dopamine-default.sources"
 PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
@@ -55,6 +57,7 @@ for tool in awk codesign curl dpkg-deb file find ldid nm plutil python3 rg secur
 done
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
 [[ -f "$SILEO_DEB" ]] || die "missing opa334 Sileo package: $SILEO_DEB"
+[[ -f "$DEFAULT_SOURCES" ]] || die "missing Dopamine default APT sources"
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR" "$SIGNING_DIR"
 SIGNING_ARGS=(
@@ -179,6 +182,9 @@ ldid -S"$SCRIPT_DIR/installer-entitlements.plist" -Cadhoc \
     "$IMAGE_ROOT/usr/local/bin/codex-dopamine-bootstrap"
 cp "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" \
     "$IMAGE_ROOT/Library/LaunchDaemons/"
+cp "$DEFAULT_SOURCES" \
+    "$EMBEDDED_DEFAULT_SOURCES"
+chmod 0644 "$EMBEDDED_DEFAULT_SOURCES"
 
 # [REDACTED] Packaging, payload selection, and validation details omitted.
 printf '%s\n' 'TSS/Cryptex personalization and installation details are redacted from this educational source release.' >&2

@@ -156,6 +156,62 @@ def connected_devices() -> list[dict[str, str]]:
                 "wired": "USB",
             }.get(connection.get("transportType"), "connected"),
         }
+
+    # CoreDevice and usbmux maintain separate pairing state. On SRD-style
+    # configurations CoreDevice may report a USB-attached, lockdown-accessible
+    # phone as disconnected/unpaired even while MobileDevice can use it. The
+    # install path uses pymobiledevice3, so merge its authoritative USB view.
+    usbmux_command = [
+        sys.executable,
+        "-m",
+        "pymobiledevice3",
+        "usbmux",
+        "list",
+    ]
+    try:
+        usbmux_completed = subprocess.run(
+            usbmux_command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=12,
+        )
+        usbmux_payload = json.loads(usbmux_completed.stdout)
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+    ):
+        usbmux_payload = []
+    if isinstance(usbmux_payload, list):
+        for raw in usbmux_payload:
+            if not isinstance(raw, dict):
+                continue
+            udid = raw.get("UniqueDeviceID") or raw.get("Identifier")
+            connection_type = raw.get("ConnectionType")
+            product = raw.get("ProductType")
+            if not (
+                isinstance(udid, str)
+                and udid
+                and isinstance(product, str)
+                and product
+                and isinstance(connection_type, str)
+                and connection_type.casefold() == "usb"
+            ):
+                continue
+            devices.setdefault(
+                udid.casefold(),
+                {
+                    "udid": udid,
+                    "name": raw.get("DeviceName") or product,
+                    "model": product,
+                    "product": product,
+                    "version": raw.get("ProductVersion") or "unknown",
+                    "build": raw.get("BuildVersion") or "unknown",
+                    "transport": "USB",
+                },
+            )
     return sorted(devices.values(), key=lambda item: (item["name"], item["udid"]))
 
 

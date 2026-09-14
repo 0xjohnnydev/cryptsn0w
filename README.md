@@ -215,6 +215,21 @@ Procursus tree remains at `/var/jb`; reconnect and remount a fresh Cryptex with:
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
+## Default Sileo repositories
+
+The bootstrap configures the standard Dopamine repository set:
+
+- Procursus
+- Chariz (`https://repo.chariz.com/`)
+- Havoc (`https://havoc.app/`)
+- BigBoss (`http://apt.thebigboss.org/repofiles/cydia/`)
+- ElleKit (`https://ellekit.space/`)
+
+The four Dopamine sources are maintained in
+`/var/jb/etc/apt/sources.list.d/dopamine-default.sources`. Fresh bootstrap and
+repair runs verify that file, then Sileo refreshes the repositories when it
+opens. Custom repository files remain alongside the managed defaults.
+
 ## Root SSH proof of concept
 
 The separate root-SSH lane builds its own minimal Cryptex payload, installs it,
