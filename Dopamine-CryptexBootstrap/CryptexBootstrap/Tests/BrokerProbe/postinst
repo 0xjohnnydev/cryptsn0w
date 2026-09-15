@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+marker_directory=/var/jb/var/lib/codex-broker-probe
+marker_path="$marker_directory/postinst.txt"
+exec_marker_path="$marker_directory/arbitrary-exec.txt"
+exec_probe=/var/jb/usr/libexec/codex-broker-probe/ArbitraryExecProbe
+
+mkdir -p "$marker_directory"
+"$exec_probe" "$exec_marker_path"
+test -s "$exec_marker_path"
+printf 'postinst-uid=%s gid=%s package=com.openai.codex.broker-probe version=1.0.14 runtime-admission=pinned-load arbitrary-exec=passed\n' \
+    "$(id -u)" "$(id -g)" >"$marker_path"
+chmod 0644 "$marker_path"
+
+printf 'codex-broker-probe postinst complete; arbitrary executable admission passed before dpkg\n'
+exit 0

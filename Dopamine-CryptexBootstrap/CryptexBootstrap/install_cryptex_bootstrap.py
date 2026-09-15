@@ -21,7 +21,7 @@ from typing import Any
 from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
 from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
 # [REDACTED] Related personalization helper imports omitted.
-from pymobiledevice3.services.cryptexd import CryptexdService
+# [REDACTED] Related personalization helper imports omitted.
 from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 

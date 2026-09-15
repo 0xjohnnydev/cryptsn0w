@@ -1,0 +1,4 @@
+frida==17.17.0
+frida-tools==14.10.4
+prompt-toolkit==3.0.52
+typing_extensions==4.16.0

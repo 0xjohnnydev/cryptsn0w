@@ -1,0 +1,78 @@
+diff --git a/gum/backend-darwin/gumdarwin-priv.h b/gum/backend-darwin/gumdarwin-priv.h
+index 732e9ef..42abded 100644
+--- a/gum/backend-darwin/gumdarwin-priv.h
++++ b/gum/backend-darwin/gumdarwin-priv.h
+@@ -271,7 +271,7 @@ G_GNUC_INTERNAL void _gum_page_plan_builder_free (GumPagePlanBuilder * self);
+ G_GNUC_INTERNAL void _gum_page_plan_builder_add_page (GumPagePlanBuilder * self,
+     gpointer target_page);
+ G_GNUC_INTERNAL void _gum_page_plan_builder_add_pages (
+-    GumPagePlanBuilder * self, gpointer base, gsize n_pages);
++    GumPagePlanBuilder * self, gpointer base, gsize n_pages, gboolean force);
+ G_GNUC_INTERNAL gboolean _gum_page_plan_builder_post (
+     GumPagePlanBuilder * self);
+ 
+diff --git a/gum/backend-darwin/gummemory-darwin.c b/gum/backend-darwin/gummemory-darwin.c
+index 2dcef6b..a92da2e 100644
+--- a/gum/backend-darwin/gummemory-darwin.c
++++ b/gum/backend-darwin/gummemory-darwin.c
+@@ -880,13 +880,14 @@ void
+ _gum_page_plan_builder_add_page (GumPagePlanBuilder * self,
+                                  gpointer target_page)
+ {
+-  _gum_page_plan_builder_add_pages (self, target_page, 1);
++  _gum_page_plan_builder_add_pages (self, target_page, 1, FALSE);
+ }
+ 
+ void
+ _gum_page_plan_builder_add_pages (GumPagePlanBuilder * self,
+                                   gpointer base,
+-                                  gsize n_pages)
++                                  gsize n_pages,
++                                  gboolean force)
+ {
+   GArray * blocks = self->page_blocks;
+   gsize page_size;
+@@ -900,7 +901,7 @@ _gum_page_plan_builder_add_pages (GumPagePlanBuilder * self,
+     GumPageBlock * current;
+     guint8 byte;
+ 
+-    if (gum_memory_is_codesign_out_of_the_way (page))
++    if (!force && gum_memory_is_codesign_out_of_the_way (page))
+       continue;
+ 
+     current = (blocks->len != 0)
+diff --git a/gum/gumcodeallocator.c b/gum/gumcodeallocator.c
+index d07811a..43ef6d8 100644
+--- a/gum/gumcodeallocator.c
++++ b/gum/gumcodeallocator.c
+@@ -20,6 +20,7 @@
+ #endif
+ #ifdef HAVE_DARWIN
+ # include "backend-darwin/gumdarwin-priv.h"
++# include "gum/gumdarwin.h"
+ #endif
+ 
+ #include <string.h>
+@@ -228,6 +229,22 @@ gum_code_allocator_commit (GumCodeAllocator * self)
+     {
+       gum_mprotect (pages->data, pages->size, GUM_PAGE_RX);
+     }
++
++#ifdef HAVE_DARWIN
++    if (gum_darwin_is_debugger_mapping_enforced ())
++    {
++      GumPagePlanBuilder plan;
++      gboolean success;
++
++      _gum_page_plan_builder_init (&plan);
++      _gum_page_plan_builder_add_pages (&plan, pages->pc,
++          pages->size / gum_query_page_size (), TRUE);
++      success = _gum_page_plan_builder_post (&plan);
++      _gum_page_plan_builder_free (&plan);
++
++      g_warn_if_fail (success);
++    }
++#endif
+   }
+   g_slist_free (self->uncommitted_pages);
+   self->uncommitted_pages = NULL;

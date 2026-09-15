@@ -30,9 +30,22 @@ INSTALL_SCRIPT = SCRIPT_DIR / "install_cryptex_bootstrap.py"
 PERSONALIZE_SCRIPT = HELPER_DIR / "personalize_generic_cryptex1.py"
 BUILD_SUMMARY = SCRIPT_DIR / "out" / "build-summary.json"
 
-EXPECTED_PRODUCT = "iPhone18,2"
-EXPECTED_VERSION = "27.0"
-EXPECTED_BUILD = "24A435"
+SUPPORTED_TARGETS = (
+    {
+        "udid": "00008150-0018252C1130C01C",
+        "product": "iPhone18,2",
+        "version": "27.0",
+        "build": "24A435",
+        "sileoBundleIdentifier": "org.coolstar.SileoStore",
+    },
+    {
+        "udid": "00008101-001C39641A9B001E",
+        "product": "iPhone13,1",
+        "version": "27.0",
+        "build": "24A437",
+        "sileoBundleIdentifier": "com.johnnyfranks.codex.profilebootstrap12mini",
+    },
+)
 APP_HELPER_MEMBER = "Payload/Sileo.app/giveMeRoot"
 
 
@@ -216,10 +229,31 @@ def connected_devices() -> list[dict[str, str]]:
 
 
 def is_verified_device(device: dict[str, str]) -> bool:
-    return (
-        device["product"] == EXPECTED_PRODUCT
-        and device["version"] == EXPECTED_VERSION
-        and device["build"] == EXPECTED_BUILD
+    return any(
+        device["udid"].casefold() == target["udid"].casefold()
+        and device["product"] == target["product"]
+        and device["version"] == target["version"]
+        and device["build"] == target["build"]
+        for target in SUPPORTED_TARGETS
+    )
+
+
+def configure_target_build_environment(device: dict[str, str]) -> None:
+    os.environ.setdefault("CODEX_TARGET_UDID", device["udid"])
+    for target in SUPPORTED_TARGETS:
+        if device["udid"].casefold() == target["udid"].casefold():
+            os.environ.setdefault(
+                "CODEX_SILEO_BUNDLE_IDENTIFIER",
+                target["sileoBundleIdentifier"],
+            )
+            return
+
+
+def supported_target_description() -> str:
+    return ", ".join(
+        f"{target['product']} / iOS {target['version']} "
+        f"({target['build']}) / {target['udid']}"
+        for target in SUPPORTED_TARGETS
     )
 
 
@@ -251,10 +285,7 @@ def choose_device(
         qualifier = (
             "connected, paired physical device"
             if allow_unverified
-            else (
-                f"connected, paired {EXPECTED_PRODUCT} on iOS "
-                f"{EXPECTED_VERSION} ({EXPECTED_BUILD})"
-            )
+            else f"connected, paired supported device: {supported_target_description()}"
         )
         raise DeployError(f"no {qualifier} found")
     if len(devices) == 1:
@@ -391,7 +422,7 @@ def main() -> int:
         action="store_true",
         help=(
             "allow a connected paired physical device other than the validated "
-            f"{EXPECTED_PRODUCT} / {EXPECTED_VERSION} ({EXPECTED_BUILD}) target"
+            f"targets: {supported_target_description()}"
         ),
     )
     parser.add_argument(
@@ -410,6 +441,7 @@ def main() -> int:
         return 0
 
     device = choose_device(args.device, args.allow_unverified_device)
+    configure_target_build_environment(device)
     if not is_verified_device(device):
         note("WARNING: continuing on a device outside the validated target matrix")
     install_pair(args, device)

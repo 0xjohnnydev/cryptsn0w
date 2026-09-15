@@ -1,6 +1,8 @@
 build/
 cache/
 .venv/
+/out/
+/:-
 /Dopamine-upstream/
 __pycache__/
 *.pyc

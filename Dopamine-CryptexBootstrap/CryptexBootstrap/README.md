@@ -52,10 +52,10 @@ the required order automatically:
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-The default device guard permits only a paired physical iPhone18,2 on iOS 27.0
-(24A435). Pass `--device UDID` when more than one eligible device is attached.
-The explicit `--allow-unverified-device` escape hatch is available for porting,
-but that configuration has not been validated by this project.
+The default device guard permits only paired physical iPhone18,2 / iOS 27.0
+(24A435) and iPhone13,1 / iOS 27.0 (24A437) targets. Pass `--device UDID` when
+more than one eligible device is attached. The explicit
+`--allow-unverified-device` escape hatch is available for reviewed porting work.
 
 The host-only forms are:
 
@@ -115,10 +115,20 @@ The stock Procursus archive includes the chain
 detects that dormant package chain and removes it only after checking that no
 package outside the exact removal set depends on it.
 
-Installation is nonpersistent at the cryptexd layer. Rebooting or unmounting
-the Cryptex clears its trust cache and root broker while `/var/jb` and the
-managed preboot payload persist. Rerun `setup.sh --install` after reboot to
-remount the matched Cryptex before using Sileo.
+[REDACTED: Related request, payload, or installation details omitted.]
+
+## Latest iPhone 12 mini acceptance
+
+Cryptex version `1.0.20260915200055.800872` installed successfully with a
+validated 459-entry trust cache. The runtime worker self-test, root-broker
+`whoami`, package configuration, and `apt-get check` exited 0; the guarded
+ElleKit loader also verified its SpringBoard injection with status 0. PID 1 is
+excluded by explicit guards.
+
+BrokerProbe 1.0.14 subsequently failed three update attempts before unpack or
+`postinst` because the installed image's obsolete APT pre-install client
+returned 100. The checked-in policy now removes that hook, but this revision has
+not yet been rebuilt and installed for a passing BrokerProbe run.
 
 ## Runtime model
 

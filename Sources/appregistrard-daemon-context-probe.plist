@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>action</key>
+    <integer>1</integer>
+    <key>bundleURL</key>
+    <dict>
+        <key>relative</key>
+        <string>file:///private/var/mobile/Media/PublicStaging/AppRegistrarProbe-direct-1D1E360D.app/AppRegistrarProbe.app</string>
+    </dict>
+    <key>id</key>
+    <string>7F04F8AE-55A5-4375-9FAB-F3ADDA7E9B22</string>
+    <key>requestURL</key>
+    <dict>
+        <key>relative</key>
+        <string>file:///private/var/installd/Library/Caches/TrustCacheRequests/7F04F8AE-55A5-4375-9FAB-F3ADDA7E9B22.plist</string>
+    </dict>
+</dict>
+</plist>

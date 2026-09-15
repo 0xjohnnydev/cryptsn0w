@@ -2,11 +2,14 @@
 #import <mach-o/dyld.h>
 #import <mach-o/dyld_images.h>
 #import <mach/mach.h>
+#import <mach/vm_attributes.h>
+#import <os/log.h>
 #import <spawn.h>
 
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,10 +24,74 @@ extern int posix_spawnattr_set_ptrauth_task_port_np(
     posix_spawnattr_t *restrict attributes, mach_port_t taskPort);
 
 static const char *const kDefaultDylib =
-    "/var/jb/usr/lib/ellekit/pspawn.dylib";
+    "/var/jb/usr/lib/ellekit/libinjector.dylib";
 static const char *const kPtrauthChild = "--ptrauth-child";
-static const char *const kInspect = "--inspect";
-static const char *const kPreflight = "--preflight";
+static const char *const kInspectPid = "--inspect-pid";
+static const char *const kPreflightPid = "--preflight-pid";
+static const char *const kCheckPidImage = "--check-pid-image";
+static const char *const kInjectPid = "--inject-pid";
+static const char *const kPageProbePid = "--page-probe-pid";
+
+#define CODEX_PT_DETACH 11
+#define CODEX_PT_ATTACHEXC 14
+#define CODEX_CS_OPS_STATUS 0
+#define CODEX_CS_HARD 0x00000100U
+#define CODEX_CS_KILL 0x00000200U
+#define CODEX_CS_DEBUGGED 0x10000000U
+
+extern int csops(pid_t pid, unsigned int operation, void *address,
+                 size_t size);
+extern int ptrace(int request, pid_t pid, caddr_t address, int data);
+extern int proc_pidpath(int pid, void *buffer, uint32_t bufferSize);
+extern kern_return_t mach_vm_allocate(vm_map_t target,
+                                      mach_vm_address_t *address,
+                                      mach_vm_size_t size, int flags);
+extern kern_return_t mach_vm_deallocate(vm_map_t target,
+                                        mach_vm_address_t address,
+                                        mach_vm_size_t size);
+extern kern_return_t mach_vm_protect(vm_map_t target,
+                                     mach_vm_address_t address,
+                                     mach_vm_size_t size,
+                                     boolean_t setMaximum,
+                                     vm_prot_t protection);
+extern kern_return_t mach_vm_write(vm_map_t target,
+                                   mach_vm_address_t address,
+                                   vm_offset_t data,
+                                   mach_msg_type_number_t size);
+extern kern_return_t mach_vm_read_overwrite(vm_map_read_t target,
+                                            mach_vm_address_t address,
+                                            mach_vm_size_t size,
+                                            mach_vm_address_t data,
+                                            mach_vm_size_t *outSize);
+extern kern_return_t mach_vm_remap(
+    vm_map_t targetTask, mach_vm_address_t *targetAddress,
+    mach_vm_size_t size, mach_vm_offset_t mask, int flags,
+    vm_map_t sourceTask, mach_vm_address_t sourceAddress, boolean_t copy,
+    vm_prot_t *currentProtection, vm_prot_t *maximumProtection,
+    vm_inherit_t inheritance);
+
+extern void prepareForMagic(task_t task, vm_address_t allImageInfoAddress);
+extern kern_return_t createRemotePthread(task_t task,
+                                         vm_address_t allImageInfoAddress,
+                                         thread_act_t *remotePthreadOut);
+extern kern_return_t arbCall(task_t task, thread_act_t targetThread,
+                             uint64_t *returnValue, bool willReturn,
+                             vm_address_t function, int argumentCount, ...);
+
+static void unified_loader_log(const char *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    char *message = NULL;
+    int length = vasprintf(&message, format, arguments);
+    va_end(arguments);
+    if (length < 0 || message == NULL) {
+        return;
+    }
+    os_log_t log = os_log_create("com.openai.codex.dopamine.bootstrap",
+                                 "ellekit-loader");
+    os_log_with_type(log, OS_LOG_TYPE_DEFAULT, "%{public}s", message);
+    free(message);
+}
 
 #if __arm64e__
 static int wait_for_child(pid_t child) {
@@ -198,6 +265,251 @@ static int preflight_remote_symbols(task_t task, vm_address_t allImageInfo) {
                : 77;
 }
 
+static bool path_has_prefix(const char *path, const char *prefix) {
+    size_t length = strlen(prefix);
+    return strncmp(path, prefix, length) == 0;
+}
+
+static bool supported_target_path(const char *path) {
+    return strcmp(path,
+                  "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+               0 ||
+           path_has_prefix(path,
+                           "/private/var/containers/Bundle/Application/") ||
+           path_has_prefix(path, "/var/containers/Bundle/Application/") ||
+           path_has_prefix(path, "/private/var/staged_system_apps/") ||
+           path_has_prefix(path, "/Applications/") ||
+           path_has_prefix(path, "/var/jb/Applications/");
+}
+
+static bool read_supported_target(pid_t pid, char path[PATH_MAX]) {
+    path[0] = '\0';
+    return pid > 1 && proc_pidpath(pid, path, PATH_MAX) > 0 &&
+           strcmp(path, "/sbin/launchd") != 0 &&
+           strcmp(path, "/usr/libexec/launchd") != 0 &&
+           strcmp(strrchr(path, '/') != NULL ? strrchr(path, '/') + 1 : path,
+                  "launchd") != 0 &&
+           supported_target_path(path);
+}
+
+static bool soften_target(pid_t pid, const char *expectedPath) {
+    uint32_t before = 0;
+    uint32_t after = 0;
+    if (csops(pid, CODEX_CS_OPS_STATUS, &before, sizeof(before)) == 0 &&
+        (before & CODEX_CS_DEBUGGED) != 0 &&
+        (before & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0) {
+        unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
+                           "after=0x%08x alreadySoftened=true",
+                           pid, before, before);
+        return true;
+    }
+
+    errno = 0;
+    if (ptrace(CODEX_PT_ATTACHEXC, pid, NULL, 0) != 0) {
+        fprintf(stderr,
+                "compat-loader: pid=%d codesign attach failed: %s\n", pid,
+                strerror(errno));
+        unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
+                           "attach=false errno=%d",
+                           pid, before, errno);
+        return false;
+    }
+    int detachResult = -1;
+    int detachError = 0;
+    for (unsigned int attempt = 0; attempt < 500; ++attempt) {
+        errno = 0;
+        detachResult = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
+        detachError = detachResult == 0 ? 0 : errno;
+        if (detachResult == 0 ||
+            (detachError != EBUSY && detachError != EINTR)) {
+            break;
+        }
+        usleep(10 * 1000);
+    }
+    if (detachResult != 0) {
+        fprintf(stderr,
+                "compat-loader: pid=%d codesign detach failed: %s\n", pid,
+                strerror(detachError));
+        unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
+                           "detach=false errno=%d",
+                           pid, before, detachError);
+        return false;
+    }
+
+    char currentPath[PATH_MAX];
+    bool sameProcess = read_supported_target(pid, currentPath) &&
+                       strcmp(currentPath, expectedPath) == 0;
+    bool softened = csops(pid, CODEX_CS_OPS_STATUS, &after, sizeof(after)) ==
+                        0 &&
+                    (after & CODEX_CS_DEBUGGED) != 0 &&
+                    (after & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    printf("compat-loader: pid=%d codesign before=0x%08x after=0x%08x "
+           "sameProcess=%s softened=%s\n",
+           pid, before, after, sameProcess ? "true" : "false",
+           softened ? "true" : "false");
+    unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
+                       "after=0x%08x sameProcess=%s softened=%s",
+                       pid, before, after,
+                       sameProcess ? "true" : "false",
+                       softened ? "true" : "false");
+    return sameProcess && softened;
+}
+
+static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
+                          vm_address_t allImageInfoAddress) {
+    static const uint32_t kReturn42[] = {
+        0xd503245f, /* bti c */
+        0x52800540, /* mov w0, #42 */
+        0xd65f03c0, /* ret */
+    };
+    const mach_vm_size_t pageSize = (mach_vm_size_t)getpagesize();
+    mach_vm_address_t executeAddress = 0;
+    mach_vm_address_t writeAddress = 0;
+    thread_act_t remoteThread = MACH_PORT_NULL;
+    vm_prot_t currentProtection = VM_PROT_NONE;
+    vm_prot_t maximumProtection = VM_PROT_NONE;
+    uint8_t prepareByte = 0x69;
+    uint32_t readback[sizeof(kReturn42) / sizeof(kReturn42[0])] = {0};
+    mach_vm_size_t readSize = 0;
+    bool usedCopy = false;
+    uint64_t callReturn = UINT64_MAX;
+    kern_return_t allocateResult = KERN_INVALID_ARGUMENT;
+    kern_return_t executeProtectResult = KERN_INVALID_ARGUMENT;
+    kern_return_t prepareWriteResult = KERN_INVALID_ARGUMENT;
+    kern_return_t remapResult = KERN_INVALID_ARGUMENT;
+    kern_return_t writeProtectResult = KERN_INVALID_ARGUMENT;
+    kern_return_t codeWriteResult = KERN_INVALID_ARGUMENT;
+    kern_return_t flushResult = KERN_INVALID_ARGUMENT;
+    kern_return_t readResult = KERN_INVALID_ARGUMENT;
+    kern_return_t threadResult = KERN_INVALID_ARGUMENT;
+    kern_return_t callResult = KERN_INVALID_ARGUMENT;
+    int status = 88;
+
+    if (pageSize == 0 || pageSize > 64U * 1024U ||
+        (pageSize & (pageSize - 1U)) != 0) {
+        fprintf(stderr, "compat-loader: page probe rejected page size 0x%llx\n",
+                (unsigned long long)pageSize);
+        return 81;
+    }
+
+    allocateResult = mach_vm_allocate(task, &executeAddress, pageSize,
+                                      VM_FLAGS_ANYWHERE);
+    if (allocateResult != KERN_SUCCESS) {
+        status = 82;
+        goto finished;
+    }
+
+    /* Match the iOS 26+ debugger JIT protocol: allocate RX, then perform a
+     * bounded debugger write to associate the page with this task port. */
+    executeProtectResult = mach_vm_protect(
+        task, executeAddress, pageSize, FALSE,
+        VM_PROT_READ | VM_PROT_EXECUTE);
+    if (executeProtectResult != KERN_SUCCESS) {
+        status = 83;
+        goto finished;
+    }
+    prepareWriteResult = mach_vm_write(
+        task, executeAddress, (vm_offset_t)(uintptr_t)&prepareByte,
+        (mach_msg_type_number_t)sizeof(prepareByte));
+    if (prepareWriteResult != KERN_SUCCESS) {
+        status = 84;
+        goto finished;
+    }
+
+    remapResult = mach_vm_remap(
+        task, &writeAddress, pageSize, 0, VM_FLAGS_ANYWHERE, task,
+        executeAddress, FALSE, &currentProtection, &maximumProtection,
+        VM_INHERIT_NONE);
+    if (remapResult != KERN_SUCCESS) {
+        status = 85;
+        goto finished;
+    }
+    writeProtectResult = mach_vm_protect(
+        task, writeAddress, pageSize, FALSE,
+        VM_PROT_READ | VM_PROT_WRITE);
+    if (writeProtectResult != KERN_SUCCESS) {
+        usedCopy = true;
+        writeProtectResult = mach_vm_protect(
+            task, writeAddress, pageSize, FALSE,
+            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    }
+    if (writeProtectResult != KERN_SUCCESS) {
+        status = 86;
+        goto finished;
+    }
+
+    codeWriteResult = mach_vm_write(
+        task, writeAddress, (vm_offset_t)(uintptr_t)kReturn42,
+        (mach_msg_type_number_t)sizeof(kReturn42));
+    if (codeWriteResult != KERN_SUCCESS) {
+        status = 87;
+        goto finished;
+    }
+    vm_machine_attribute_val_t cacheValue = MATTR_VAL_CACHE_FLUSH;
+    flushResult = vm_machine_attribute(
+        task, (vm_address_t)executeAddress, (vm_size_t)pageSize,
+        MATTR_CACHE, &cacheValue);
+    readResult = mach_vm_read_overwrite(
+        task, executeAddress, sizeof(readback),
+        (mach_vm_address_t)(uintptr_t)readback, &readSize);
+    if (flushResult != KERN_SUCCESS || readResult != KERN_SUCCESS ||
+        readSize != sizeof(readback) ||
+        memcmp(readback, kReturn42, sizeof(kReturn42)) != 0) {
+        status = 87;
+        goto finished;
+    }
+
+    char currentPath[PATH_MAX];
+    if (!read_supported_target(pid, currentPath) ||
+        strcmp(currentPath, expectedPath) != 0) {
+        status = 89;
+        goto finished;
+    }
+
+    prepareForMagic(task, allImageInfoAddress);
+    threadResult = createRemotePthread(task, allImageInfoAddress,
+                                       &remoteThread);
+    if (threadResult != KERN_SUCCESS || !MACH_PORT_VALID(remoteThread)) {
+        status = 90;
+        goto finished;
+    }
+    callResult = arbCall(task, remoteThread, &callReturn, true,
+                         (vm_address_t)executeAddress, 0);
+    status = callResult == KERN_SUCCESS && callReturn == 42 ? 0 : 91;
+
+finished:
+    printf("compat-loader: page-probe pid=%d status=%d page=0x%llx "
+           "write=0x%llx pageSize=0x%llx allocateKr=%d rxKr=%d "
+           "prepareWriteKr=%d remapKr=%d current=0x%x maximum=0x%x "
+           "writeProtectKr=%d usedCopy=%s codeWriteKr=%d flushKr=%d "
+           "readKr=%d readSize=0x%llx threadKr=%d callKr=%d return=%llu\n",
+           pid, status, (unsigned long long)executeAddress,
+           (unsigned long long)writeAddress, (unsigned long long)pageSize,
+           allocateResult, executeProtectResult, prepareWriteResult,
+           remapResult, currentProtection, maximumProtection,
+           writeProtectResult, usedCopy ? "true" : "false",
+           codeWriteResult, flushResult, readResult,
+           (unsigned long long)readSize, threadResult, callResult,
+           (unsigned long long)callReturn);
+    unified_loader_log(
+        "elleKitPageProbe pid=%d status=%d allocate=%d rx=%d prepare=%d "
+        "remap=%d writeProtect=%d codeWrite=%d flush=%d call=%d return=%llu",
+        pid, status, allocateResult, executeProtectResult,
+        prepareWriteResult, remapResult, writeProtectResult, codeWriteResult,
+        flushResult, callResult, (unsigned long long)callReturn);
+    if (MACH_PORT_VALID(remoteThread)) {
+        (void)thread_terminate(remoteThread);
+        (void)mach_port_deallocate(mach_task_self(), remoteThread);
+    }
+    if (writeAddress != 0) {
+        (void)mach_vm_deallocate(task, writeAddress, pageSize);
+    }
+    if (executeAddress != 0) {
+        (void)mach_vm_deallocate(task, executeAddress, pageSize);
+    }
+    return status;
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         setlinebuf(stdout);
@@ -206,26 +518,35 @@ int main(int argc, char *argv[]) {
         bool isPtrauthChild =
             argc > 1 && strcmp(argv[argc - 1], kPtrauthChild) == 0;
         int userArgumentCount = argc - (isPtrauthChild ? 1 : 0);
-        if (userArgumentCount < 1 || userArgumentCount > 2) {
+        bool inspectOnly = userArgumentCount == 3 &&
+                           strcmp(argv[1], kInspectPid) == 0;
+        bool preflightOnly = userArgumentCount == 3 &&
+                             strcmp(argv[1], kPreflightPid) == 0;
+        bool checkPidImage = userArgumentCount == 4 &&
+                             strcmp(argv[1], kCheckPidImage) == 0;
+        bool injectPid = userArgumentCount == 4 &&
+                         strcmp(argv[1], kInjectPid) == 0;
+        bool pageProbePid = userArgumentCount == 3 &&
+                            strcmp(argv[1], kPageProbePid) == 0;
+        if (!inspectOnly && !preflightOnly && !checkPidImage && !injectPid &&
+            !pageProbePid) {
             fprintf(stderr,
-                    "usage: %s [--inspect|--preflight|absolute-dylib-path]\n",
+                    "usage: %s --inspect-pid pid|--preflight-pid pid|"
+                    "--check-pid-image pid absolute-image-path|"
+                    "--inject-pid pid absolute-dylib-path|"
+                    "--page-probe-pid pid\n",
                     argv[0]);
             return 64;
         }
-        bool inspectOnly = userArgumentCount == 2 &&
-                           strcmp(argv[1], kInspect) == 0;
-        bool preflightOnly = userArgumentCount == 2 &&
-                             strcmp(argv[1], kPreflight) == 0;
-        const char *requestedPath = userArgumentCount == 2 && !inspectOnly &&
-                                            !preflightOnly
-                                        ? argv[1]
-                                        : kDefaultDylib;
-        if (!inspectOnly && !preflightOnly && requestedPath[0] != '/') {
+        bool dylibOperation = checkPidImage || injectPid;
+        const char *requestedPath =
+            dylibOperation ? argv[3] : kDefaultDylib;
+        if (dylibOperation && requestedPath[0] != '/') {
             fprintf(stderr, "compat-loader: dylib path must be absolute\n");
             return 65;
         }
         char resolvedPath[PATH_MAX] = {0};
-        if (!inspectOnly && !preflightOnly &&
+        if (dylibOperation &&
             (realpath(requestedPath, resolvedPath) == NULL ||
              access(resolvedPath, R_OK) != 0)) {
             fprintf(stderr, "compat-loader: cannot read %s: %s\n",
@@ -237,75 +558,150 @@ int main(int argc, char *argv[]) {
             return 67;
         }
 
-        task_t launchdTask = MACH_PORT_NULL;
-        kern_return_t result =
-            task_for_pid(mach_task_self(), 1, &launchdTask);
-        if (result != KERN_SUCCESS || !MACH_PORT_VALID(launchdTask)) {
+        char *end = NULL;
+        errno = 0;
+        long value = strtol(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0' || value <= 1 ||
+            value > INT_MAX) {
+            fprintf(stderr, "compat-loader: invalid/forbidden target pid: %s\n",
+                    argv[2]);
+            return 64;
+        }
+        pid_t targetPid = (pid_t)value;
+        char targetPath[PATH_MAX];
+        if (!read_supported_target(targetPid, targetPath)) {
             fprintf(stderr,
-                    "compat-loader: task_for_pid(1) failed: %s (%d)\n",
-                    mach_error_string(result), result);
+                    "compat-loader: pid=%d is not an admitted app target\n",
+                    targetPid);
+            return 78;
+        }
+        bool runtimeMutation = injectPid || pageProbePid;
+        bool softened = true;
+        if (runtimeMutation && !isPtrauthChild) {
+            softened = soften_target(targetPid, targetPath);
+        }
+        if (runtimeMutation && !isPtrauthChild && !softened) {
+            fprintf(stderr,
+                    "compat-loader: pid=%d debugged admission unavailable; "
+                    "continuing with trusted-library task-port lane\n",
+                    targetPid);
+        }
+
+        task_t targetTask = MACH_PORT_NULL;
+        kern_return_t result =
+            task_for_pid(mach_task_self(), targetPid, &targetTask);
+        if (result != KERN_SUCCESS || !MACH_PORT_VALID(targetTask)) {
+            fprintf(stderr,
+                    "compat-loader: task_for_pid(%d) failed: %s (%d)\n",
+                    targetPid, mach_error_string(result), result);
+            unified_loader_log("elleKitTaskPort pid=%d result=%d valid=false",
+                               targetPid, result);
             return 68;
         }
 
 #if __arm64e__
-        if (!isPtrauthChild) {
-            int childResult = spawn_ptrauth_child(argc, argv, launchdTask);
-            mach_port_deallocate(mach_task_self(), launchdTask);
+        if (!isPtrauthChild && runtimeMutation) {
+            int childResult = spawn_ptrauth_child(argc, argv, targetTask);
+            mach_port_deallocate(mach_task_self(), targetTask);
             return childResult;
         }
 #endif
 
         task_dyld_info_data_t dyldInfo = {0};
         mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-        result = task_info(launchdTask, TASK_DYLD_INFO,
+        result = task_info(targetTask, TASK_DYLD_INFO,
                            (task_info_t)&dyldInfo, &count);
         if (result != KERN_SUCCESS || dyldInfo.all_image_info_addr == 0) {
-            fprintf(stderr, "compat-loader: TASK_DYLD_INFO failed: %s (%d)\n",
-                    mach_error_string(result), result);
-            mach_port_deallocate(mach_task_self(), launchdTask);
+            fprintf(stderr,
+                    "compat-loader: TASK_DYLD_INFO for pid %d failed: %s "
+                    "(%d)\n",
+                    targetPid, mach_error_string(result), result);
+            mach_port_deallocate(mach_task_self(), targetTask);
             return 69;
         }
 
+        if (checkPidImage) {
+            bool loaded = image_is_loaded(targetTask,
+                                          dyldInfo.all_image_info_addr,
+                                          requestedPath);
+            if (!loaded && strcmp(requestedPath, resolvedPath) != 0) {
+                loaded = image_is_loaded(targetTask,
+                                         dyldInfo.all_image_info_addr,
+                                         resolvedPath);
+            }
+            printf("compat-loader: pid=%d image loaded=%s path=%s "
+                   "resolved=%s\n",
+                   targetPid, loaded ? "true" : "false", requestedPath,
+                   resolvedPath);
+            mach_port_deallocate(mach_task_self(), targetTask);
+            return loaded ? 0 : 75;
+        }
+
         if (inspectOnly) {
-            int inspectResult = inspect_dyld_info(launchdTask, &dyldInfo);
-            mach_port_deallocate(mach_task_self(), launchdTask);
+            int inspectResult = inspect_dyld_info(targetTask, &dyldInfo);
+            mach_port_deallocate(mach_task_self(), targetTask);
             return inspectResult;
         }
         if (preflightOnly) {
             int preflightResult = preflight_remote_symbols(
-                launchdTask, dyldInfo.all_image_info_addr);
-            mach_port_deallocate(mach_task_self(), launchdTask);
+                targetTask, dyldInfo.all_image_info_addr);
+            mach_port_deallocate(mach_task_self(), targetTask);
             return preflightResult;
         }
 
+        if (pageProbePid) {
+            int preflightResult = preflight_remote_symbols(
+                targetTask, dyldInfo.all_image_info_addr);
+            int pageProbeResult =
+                preflightResult == 0
+                    ? run_page_probe(targetTask, targetPid, targetPath,
+                                     dyldInfo.all_image_info_addr)
+                    : preflightResult;
+            mach_port_deallocate(mach_task_self(), targetTask);
+            return pageProbeResult;
+        }
+
         int preflightResult = preflight_remote_symbols(
-            launchdTask, dyldInfo.all_image_info_addr);
+            targetTask, dyldInfo.all_image_info_addr);
         if (preflightResult != 0) {
             fprintf(stderr,
                     "compat-loader: remote-call preflight failed; refusing "
                     "injection\n");
-            mach_port_deallocate(mach_task_self(), launchdTask);
+            mach_port_deallocate(mach_task_self(), targetTask);
             return preflightResult;
         }
 
-        if (!image_is_loaded(launchdTask, dyldInfo.all_image_info_addr,
+        if (!image_is_loaded(targetTask, dyldInfo.all_image_info_addr,
                              resolvedPath)) {
-            printf("compat-loader: injecting %s into launchd\n", resolvedPath);
-            injectDylibViaRop(launchdTask, 1, resolvedPath,
+            char currentPath[PATH_MAX];
+            if (!read_supported_target(targetPid, currentPath) ||
+                strcmp(currentPath, targetPath) != 0) {
+                mach_port_deallocate(mach_task_self(), targetTask);
+                return 80;
+            }
+            printf("compat-loader: injecting %s into pid %d path=%s\n",
+                   resolvedPath, targetPid, targetPath);
+            injectDylibViaRop(targetTask, targetPid, resolvedPath,
                               dyldInfo.all_image_info_addr);
             usleep(250 * 1000);
             count = TASK_DYLD_INFO_COUNT;
-            result = task_info(launchdTask, TASK_DYLD_INFO,
+            result = task_info(targetTask, TASK_DYLD_INFO,
                                (task_info_t)&dyldInfo, &count);
         }
 
         bool loaded = result == KERN_SUCCESS &&
-                      image_is_loaded(launchdTask,
+                      image_is_loaded(targetTask,
                                       dyldInfo.all_image_info_addr,
                                       resolvedPath);
-        printf("compat-loader: launchd image loaded=%s path=%s\n",
+        printf("compat-loader: pid=%d image loaded=%s path=%s\n", targetPid,
                loaded ? "true" : "false", resolvedPath);
-        mach_port_deallocate(mach_task_self(), launchdTask);
-        return loaded ? 0 : 75;
+        unified_loader_log("elleKitImageAdmission pid=%d loaded=%s path=%s",
+                           targetPid, loaded ? "true" : "false",
+                           resolvedPath);
+        mach_port_deallocate(mach_task_self(), targetTask);
+        if (!loaded) {
+            return 75;
+        }
+        return 0;
     }
 }

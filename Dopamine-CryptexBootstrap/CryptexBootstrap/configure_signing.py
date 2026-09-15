@@ -137,6 +137,7 @@ def application_pattern(profile: dict[str, Any]) -> tuple[str, str]:
 def candidate_for_profile(
     path: Path,
     bundle_id: str,
+    device_udid: str | None,
     identities: dict[str, str],
     allowed_identities: set[str],
 ) -> list[Candidate]:
@@ -152,6 +153,15 @@ def candidate_for_profile(
         return []
     _, pattern = application_pattern(profile)
     if not fnmatch.fnmatchcase(bundle_id, pattern):
+        return []
+    provisioned_devices = profile.get("ProvisionedDevices")
+    if device_udid is not None and not (
+        isinstance(provisioned_devices, list)
+        and any(
+            isinstance(item, str) and item.casefold() == device_udid.casefold()
+            for item in provisioned_devices
+        )
+    ):
         return []
 
     certificate_hashes = {
@@ -178,6 +188,7 @@ def select_candidate(
     profile: Path | None,
     identity: str | None,
     bundle_id: str,
+    device_udid: str | None,
 ) -> Candidate:
     identities = installed_identities()
     allowed = identity_filter(identity, identities)
@@ -186,7 +197,9 @@ def select_candidate(
     for path in profile_paths(profile):
         try:
             candidates.extend(
-                candidate_for_profile(path, bundle_id, identities, allowed)
+                candidate_for_profile(
+                    path, bundle_id, device_udid, identities, allowed
+                )
             )
         except (
             OSError,
@@ -205,9 +218,10 @@ def select_candidate(
             if decode_failures
             else ""
         )
+        target = f" and device {device_udid}" if device_udid is not None else ""
         raise SigningError(
-            f"no unexpired development profile for {bundle_id} matches an "
-            f"installed certificate{detail}"
+            f"no unexpired development profile for {bundle_id}{target} matches "
+            f"an installed certificate{detail}"
         )
     candidates.sort(
         key=lambda item: (item.exact_bundle_match, item.expiration, item.profile.name),
@@ -263,6 +277,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle-id", default="org.coolstar.SileoStore")
     parser.add_argument(
+        "--device",
+        default=os.environ.get("CODEX_TARGET_UDID"),
+        help="require the selected profile to contain this device UDID",
+    )
+    parser.add_argument(
         "--identity",
         default=os.environ.get("CODEX_SILEO_DEVELOPMENT_IDENTITY"),
     )
@@ -283,7 +302,9 @@ def main() -> int:
     parser.add_argument("--output-entitlements", required=True, type=Path)
     args = parser.parse_args()
 
-    candidate = select_candidate(args.profile, args.identity, args.bundle_id)
+    candidate = select_candidate(
+        args.profile, args.identity, args.bundle_id, args.device
+    )
     if args.entitlements is not None:
         source = args.entitlements.expanduser().resolve()
         if not source.is_file():
