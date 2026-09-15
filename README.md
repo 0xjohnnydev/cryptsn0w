@@ -7,6 +7,35 @@ for educational reference.
 Private iOS 27 security-research workspace for the validated iPhone18,2
 (24A435) and iPhone13,1 / iPhone 12 mini (24A437) lanes.
 
+## Status checklist
+
+Proven:
+
+- [x] Install and validate a persistent-requested Cryptex with a 459-entry
+  static trust cache on the iPhone 12 mini.
+- [x] Start the Sileo root broker and complete brokered `whoami`, package
+  configuration, and `apt-get check` with exit 0.
+- [x] Load the already trust-cached ElleKit injector into SpringBoard through
+  privileged task-port access and ROP into SpringBoard's existing dyld code.
+- [x] Execute newly generated native code in a debugger-authorized process and
+  run patched Frida Interceptor/NativeFunction over native USB/RSD.
+- [x] Reproduce the executable-page primitive in the installed on-device worker
+  without requiring the Mac.
+- [x] Exclude launchd/PID 1 through explicit PID and executable-path guards.
+
+Not yet proven:
+
+- [ ] Complete a clean-reboot acceptance pass for Cryptex remount, trust-cache
+  availability, daemon startup, worker self-test, and Sileo launch.
+- [ ] Rebuild and install the no-APT-preinstall-hook revision, then pass
+  BrokerProbe through unpack, `postinst`, executable launch, and tweak loading.
+- [ ] Reliably run arbitrary package Mach-Os through the fixed worker without
+  adding each payload to the trust cache.
+- [ ] Load a completely unsigned arbitrary dylib into SpringBoard or another
+  protected process; the successful SpringBoard payload was trust-cached.
+- [ ] Provide transparent system-wide `execve`, complete Mach-O semantics, or
+  arbitrary new entitlements for loaded payloads.
+
 [REDACTED: Related request, payload, or installation details omitted.]
 
 ## Validated configuration
