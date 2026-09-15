@@ -47,6 +47,8 @@ struct codex_virtual_job {
     pid_t pid;
     uint32_t argument_count;
     char *arguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 1U];
+    uint32_t environment_count;
+    char *environment[CODEX_ROOT_BROKER_MAX_ENVIRONMENT + 1U];
     uint32_t descriptor_count;
     int descriptors[CODEX_ROOT_BROKER_MAX_FDS];
     int descriptor_numbers[CODEX_ROOT_BROKER_MAX_FDS];
@@ -136,12 +138,15 @@ static int codex_access(const char *path, int mode) {
 }
 
 static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
+                               char *const environment[],
+                               uint32_t environmentCount,
                                const int descriptors[],
                                const int descriptorNumbers[],
                                uint32_t descriptorCount,
                                int32_t *statusOut) {
     if (argumentCount == 0 ||
         argumentCount > CODEX_ROOT_BROKER_MAX_ARGUMENTS ||
+        environmentCount > CODEX_ROOT_BROKER_MAX_ENVIRONMENT ||
         descriptorCount == 0 || descriptorCount > CODEX_ROOT_BROKER_MAX_FDS) {
         errno = E2BIG;
         return false;
@@ -149,6 +154,13 @@ static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
     for (uint32_t index = 0; index < argumentCount; ++index) {
         size_t argumentLength = strnlen(arguments[index], PATH_MAX * 4U);
         if (argumentLength == PATH_MAX * 4U) {
+            errno = E2BIG;
+            return false;
+        }
+    }
+    for (uint32_t index = 0; index < environmentCount; ++index) {
+        size_t environmentLength = strnlen(environment[index], 64U);
+        if (environmentLength == 64U) {
             errno = E2BIG;
             return false;
         }
@@ -174,10 +186,15 @@ static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
 
     xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
     xpc_object_t argumentArray = xpc_array_create(NULL, 0);
+    xpc_object_t environmentArray = xpc_array_create(NULL, 0);
     xpc_object_t descriptorArray = xpc_array_create(NULL, 0);
     for (uint32_t index = 0; index < argumentCount; ++index) {
         xpc_array_set_string(argumentArray, XPC_ARRAY_APPEND,
                              arguments[index]);
+    }
+    for (uint32_t index = 0; index < environmentCount; ++index) {
+        xpc_array_set_string(environmentArray, XPC_ARRAY_APPEND,
+                             environment[index]);
     }
     for (uint32_t index = 0; index < descriptorCount; ++index) {
         xpc_array_set_int64(descriptorArray, XPC_ARRAY_APPEND,
@@ -187,6 +204,7 @@ static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
         if (keyLength < 0 || (size_t)keyLength >= sizeof(key)) {
             xpc_connection_cancel(connection);
             xpc_release(descriptorArray);
+            xpc_release(environmentArray);
             xpc_release(argumentArray);
             xpc_release(message);
             xpc_release(connection);
@@ -196,6 +214,7 @@ static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
         xpc_dictionary_set_fd(message, key, descriptors[index]);
     }
     xpc_dictionary_set_value(message, "arguments", argumentArray);
+    xpc_dictionary_set_value(message, "control-environment", environmentArray);
     xpc_dictionary_set_value(message, "descriptor-numbers", descriptorArray);
     xpc_object_t reply =
         xpc_connection_send_message_with_reply_sync(connection, message);
@@ -227,6 +246,7 @@ static bool run_broker_request(char *const arguments[], uint32_t argumentCount,
     }
     xpc_connection_cancel(connection);
     xpc_release(descriptorArray);
+    xpc_release(environmentArray);
     xpc_release(argumentArray);
     xpc_release(message);
     xpc_release(connection);
@@ -444,7 +464,7 @@ static int verify_root_broker(os_log_t log) {
     int descriptors[] = {outputPipe[1]};
     int descriptorNumbers[] = {STDOUT_FILENO};
     int32_t status = 0;
-    bool ran = run_broker_request(arguments, 1, descriptors,
+    bool ran = run_broker_request(arguments, 1, NULL, 0, descriptors,
                                   descriptorNumbers, 1, &status);
     close(outputPipe[1]);
     if (!ran) {
@@ -639,6 +659,9 @@ static void free_virtual_job(struct codex_virtual_job *job) {
     for (uint32_t index = 0; index < job->argument_count; ++index) {
         free(job->arguments[index]);
     }
+    for (uint32_t index = 0; index < job->environment_count; ++index) {
+        free(job->environment[index]);
+    }
     for (uint32_t index = 0; index < job->descriptor_count; ++index) {
         if (job->descriptors[index] >= 0) {
             close(job->descriptors[index]);
@@ -680,6 +703,7 @@ static void *run_virtual_job(void *context) {
     pid_t jobPid = job->pid;
     int32_t status = 127 << 8;
     bool ran = run_broker_request(job->arguments, job->argument_count,
+                                  job->environment, job->environment_count,
                                   job->descriptors, job->descriptor_numbers,
                                   job->descriptor_count, &status);
     for (uint32_t index = 0; index < job->descriptor_count; ++index) {
@@ -806,6 +830,28 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
         ++job->argument_count;
     }
     job->arguments[job->argument_count] = NULL;
+
+    for (uint32_t index = 0; envp != NULL && envp[index] != NULL; ++index) {
+        const char *entry = envp[index];
+        bool isControlEnvironment =
+            strncmp(entry, "SILEO=", strlen("SILEO=")) == 0 ||
+            strncmp(entry, "CYDIA=", strlen("CYDIA=")) == 0;
+        if (!isControlEnvironment) {
+            continue;
+        }
+        if (job->environment_count >= CODEX_ROOT_BROKER_MAX_ENVIRONMENT ||
+            strnlen(entry, 64U) == 64U) {
+            free_virtual_job(job);
+            return E2BIG;
+        }
+        job->environment[job->environment_count] = strdup(entry);
+        if (job->environment[job->environment_count] == NULL) {
+            free_virtual_job(job);
+            return ENOMEM;
+        }
+        ++job->environment_count;
+    }
+    job->environment[job->environment_count] = NULL;
 
     for (int descriptor = 0; descriptor <= 2; ++descriptor) {
         if (fcntl(descriptor, F_GETFD) >= 0 &&

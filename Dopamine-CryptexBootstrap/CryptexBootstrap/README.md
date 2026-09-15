@@ -1,10 +1,10 @@
 # Dopamine 3.x generic-Cryptex bootstrap lane
 
 This directory adapts opa334's Dopamine 3.x Procursus/Sileo bootstrap to the
-generic Cryptex1 path demonstrated on the paired iPhone18,2 running 24A435.
-It supplies a generic Cryptex1 trust cache, a managed rootless Procursus tree,
-the Sileo root broker, and a provisioned Sileo app. Procursus executables run
-while the matching nonpersistent Cryptex trust cache is mounted.
+generic Cryptex1 path demonstrated on iPhone18,2 / 24A435 and iPhone13,1
+(iPhone 12 mini) / 24A437. It supplies a generic Cryptex1 trust cache, a managed
+rootless Procursus tree, the Sileo root broker, a fixed runtime-admission worker,
+and a provisioned Sileo app.
 
 ## Working layout
 
@@ -60,12 +60,13 @@ the required order automatically:
 5. Capture a fresh nonce and device identity, then request and validate a
    current Cryptex1 ticket.
 6. Validate the complete signed bundle against live device state before
-   replacing at most one older copy of this non-Apple Cryptex.
+   requesting a persistent install and replacing at most one older copy of this
+   non-Apple Cryptex.
 
-The default device guard permits only a paired physical iPhone18,2 on iOS 27.0
-(24A435). Pass `--device UDID` when more than one eligible device is attached.
-The explicit `--allow-unverified-device` escape hatch is available for porting,
-but that configuration has not been validated by this project.
+The default device guard permits only paired physical iPhone18,2 / iOS 27.0
+(24A435) and iPhone13,1 / iOS 27.0 (24A437) targets. Pass `--device UDID` when
+more than one eligible device is attached. The explicit
+`--allow-unverified-device` escape hatch is available for reviewed porting work.
 
 The host-only forms are:
 
@@ -129,17 +130,35 @@ The stock Procursus archive includes the chain
 detects that dormant package chain and removes it only after checking that no
 package outside the exact removal set depends on it.
 
-Installation is nonpersistent at the cryptexd layer. Rebooting or unmounting
-the Cryptex clears its trust cache and root broker while `/var/jb` and the
-managed preboot payload persist. Rerun `setup.sh --install` after reboot to
-remount the matched Cryptex before using Sileo.
+The installer requests cryptexd's persistent DDI settings. The latest recorded
+iPhone 12 mini install completed with `persistence=2` and
+`noncePersistence=1`. A separate clean-reboot acceptance pass has not yet been
+captured, so those settings are evidence of configured persistence, not yet a
+claim of fully verified boot recovery.
+
+## Latest iPhone 12 mini acceptance
+
+Cryptex version `1.0.20260915200055.800872` installed successfully with a
+validated 459-entry trust cache. The runtime worker self-test, root-broker
+`whoami`, package configuration, and `apt-get check` exited 0; the guarded
+ElleKit loader also verified its SpringBoard injection with status 0. PID 1 is
+excluded by explicit guards.
+
+BrokerProbe 1.0.14 subsequently failed three update attempts before unpack or
+`postinst` because the installed image's obsolete APT pre-install client
+returned 100. The checked-in policy now removes that hook, but this revision has
+not yet been rebuilt and installed for a passing BrokerProbe run.
 
 ## Runtime model
 
-The runtime consists of the managed Procursus tree, provisioned Sileo app,
-root broker, and a static Cryptex trust cache. Rebuild and repersonalize the
-Cryptex after installing packages that add ad-hoc Mach-O files, then execute
-those files under the refreshed trust cache.
+The runtime consists of the managed Procursus tree, provisioned Sileo app, root
+broker, a fixed interposer/debugger-softened worker, and a static Cryptex trust
+cache for the stable infrastructure. Direct executable launches are attempted
+first; non-baseline/admission-failing package Mach-Os are routed through the
+fixed worker's bounded `--macho` path. Rebuild and repersonalize when the fixed
+trusted infrastructure or baseline changes, not once per package payload. Full
+Mach-O compatibility and the corrected package-install path remain explicit
+acceptance work rather than proven transparent system-wide `execve` behavior.
 
 Sileo's Featured cards can reference optional repositories in addition to the
 standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's

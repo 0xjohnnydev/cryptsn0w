@@ -95,6 +95,8 @@ from pymobiledevice3.restore.tss import (  # noqa: E402
     cryptex1_udid,
 )
 from pymobiledevice3.services.cryptexd import (  # noqa: E402
+    DDI_NONCE_PERSISTENCE,
+    DDI_PERSISTENCE,
     CryptexdService,
     unwrap_nonce,
 )
@@ -700,7 +702,7 @@ async def install(
                 "Cryptex1,PreauthorizationVersion"
             ],
         }
-        note("Installing the nonpersistent generic Cryptex...")
+        note("Installing the persistent generic Cryptex...")
         await service.install(
             image=read_payload(directory, identity, "Cryptex1,GenericDmg"),
             trustcache=read_payload(
@@ -715,8 +717,8 @@ async def install(
             ),
             cryptex1_properties=properties,
             image_type_index=10,
-            persistence=0,
-            nonce_persistence=0,
+            persistence=DDI_PERSISTENCE,
+            nonce_persistence=DDI_NONCE_PERSISTENCE,
             auth=0,
         )
         after = await service.copy_installed()
@@ -744,8 +746,8 @@ async def install(
         "personalization": personalization,
         "installArguments": {
             "imageTypeIndex": 10,
-            "persistence": 0,
-            "noncePersistence": 0,
+            "persistence": DDI_PERSISTENCE,
+            "noncePersistence": DDI_NONCE_PERSISTENCE,
             "auth": 0,
         },
         "replaced": replaced,

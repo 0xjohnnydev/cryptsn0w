@@ -14,7 +14,7 @@ python: .venv/.ready
 
 payload: build/build-summary.json
 
-build/build-summary.json: build.sh Sources/rootd.m Sources/runtime-entitlements.plist Sources/rootd.plist Sources/sshd_config
+build/build-summary.json: build.sh Sources/rootd.m Sources/runtime-entitlements.plist Sources/rootd.plist Sources/sshd_config Sources/debugger-cow-probe.c Sources/debugger-cow-probe-entitlements.plist
 	./build.sh
 
 verify: all

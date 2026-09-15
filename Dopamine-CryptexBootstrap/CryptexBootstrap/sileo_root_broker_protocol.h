@@ -8,8 +8,11 @@
 #define CODEX_ROOT_BROKER_MAX_ARGUMENTS 256U
 #define CODEX_ROOT_BROKER_MAX_PAYLOAD (64U * 1024U)
 #define CODEX_ROOT_BROKER_MAX_FDS 6U
+#define CODEX_ROOT_BROKER_MAX_ENVIRONMENT 2U
 #define CODEX_ROOT_BROKER_MACH_SERVICE                                      \
     "com.openai.codex.dopamine.sileo-root-broker"
+#define CODEX_RUNTIME_TRUST_BROKER_VERB                                     \
+    "@codex-runtime-trust-debs-v1"
 
 struct codex_root_broker_header {
     uint32_t magic;

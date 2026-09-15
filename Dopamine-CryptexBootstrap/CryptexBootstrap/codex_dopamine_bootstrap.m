@@ -1,6 +1,9 @@
 #import <Foundation/Foundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <IOKit/IOKitLib.h>
 #import <mach-o/dyld.h>
+#import <mach-o/fat.h>
+#import <mach-o/loader.h>
 #import <os/log.h>
 
 #include "sileo_root_broker_protocol.h"
@@ -11,6 +14,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -34,11 +38,82 @@ extern char *sandbox_extension_issue_mach(const char *extension_class,
                                           const char *name, uint32_t flags);
 extern const uint32_t SANDBOX_EXTENSION_CANONICAL;
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffer_size);
+extern int proc_listallpids(void *buffer, int buffer_size);
+extern int csops(pid_t pid, unsigned int operation, void *address,
+                 size_t size);
 extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
                                        const char *service_name,
                                        mach_port_t *service_port);
+extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
+                                void *buffer, size_t buffersize);
 
 #define CODEX_PROC_PIDPATH_MAX 4096
+#define CODEX_MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK 5
+#define CODEX_MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES 7
+#define CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES 8
+#define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 64
+#define CODEX_CS_OPS_STATUS 0
+#define CODEX_CS_PLATFORM_BINARY 0x04000000U
+
+typedef struct codex_memorystatus_memlimit_properties {
+    int32_t memlimit_active;
+    uint32_t memlimit_active_attr;
+    int32_t memlimit_inactive;
+    uint32_t memlimit_inactive_attr;
+} codex_memorystatus_memlimit_properties_t;
+
+typedef struct codex_jetsam_adjustment {
+    int initial_status;
+    int initial_errno;
+    codex_memorystatus_memlimit_properties_t initial;
+    int set_status;
+    int set_errno;
+    int fallback_status;
+    int fallback_errno;
+    int effective_status;
+    int effective_errno;
+    codex_memorystatus_memlimit_properties_t effective;
+} codex_jetsam_adjustment_t;
+
+static codex_jetsam_adjustment_t adjust_self_jetsam_limit(void) {
+    codex_jetsam_adjustment_t result = {0};
+    pid_t self = getpid();
+
+    errno = 0;
+    result.initial_status = memorystatus_control(
+        CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES, self, 0,
+        &result.initial, sizeof(result.initial));
+    result.initial_errno = errno;
+
+    codex_memorystatus_memlimit_properties_t requested = {
+        .memlimit_active = CODEX_BOOTSTRAP_MEMORY_LIMIT_MB,
+        .memlimit_active_attr = 0,
+        .memlimit_inactive = CODEX_BOOTSTRAP_MEMORY_LIMIT_MB,
+        .memlimit_inactive_attr = 0,
+    };
+    errno = 0;
+    result.set_status = memorystatus_control(
+        CODEX_MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES, self, 0, &requested,
+        sizeof(requested));
+    result.set_errno = errno;
+
+    result.fallback_status = 0;
+    result.fallback_errno = 0;
+    if (result.set_status != 0) {
+        errno = 0;
+        result.fallback_status = memorystatus_control(
+            CODEX_MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK, self,
+            CODEX_BOOTSTRAP_MEMORY_LIMIT_MB, NULL, 0);
+        result.fallback_errno = errno;
+    }
+
+    errno = 0;
+    result.effective_status = memorystatus_control(
+        CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES, self, 0,
+        &result.effective, sizeof(result.effective));
+    result.effective_errno = errno;
+    return result;
+}
 
 static const char *const kLogPath =
     "/var/tmp/codex-dopamine-cryptex-bootstrap.log";
@@ -49,7 +124,10 @@ static const char *const kFailurePath =
 static const char *const kVarJb = "/var/jb";
 static NSString *const kInstallerIdentifier =
     @"com.openai.codex.dopamine.bootstrap";
-static NSString *const kSileoIdentifier = @"org.coolstar.SileoStore";
+#ifndef CODEX_SILEO_BUNDLE_IDENTIFIER
+#define CODEX_SILEO_BUNDLE_IDENTIFIER @"org.coolstar.SileoStore"
+#endif
+static NSString *const kSileoIdentifier = CODEX_SILEO_BUNDLE_IDENTIFIER;
 static NSString *const kBundleContainerRoot =
     @"/var/containers/Bundle/Application";
 static NSString *const kRootBrokerLabel =
@@ -59,6 +137,16 @@ static NSString *const kRootBrokerExecutable =
 static NSString *const kRootBrokerPlist =
     @"/var/jb/Library/LaunchDaemons/com.openai.codex.dopamine."
      "sileo-root-broker.plist";
+static NSString *const kExecWorkerExecutable =
+    @"/var/jb/usr/libexec/codex-exec-worker";
+static NSString *const kExecInterposerLibrary =
+    @"/var/jb/usr/lib/codex-exec-interposer.dylib";
+static NSString *const kRuntimeTrustClientExecutable =
+    @"/var/jb/usr/libexec/codex-runtime-trust-client";
+static NSString *const kElleKitInjectorExecutable =
+    @"/var/jb/usr/libexec/codex-ellekit-loader";
+static NSString *const kElleKitInjectorDylib =
+    @"/var/jb/usr/lib/ellekit/libinjector.dylib";
 
 @interface NSObject (CodexLaunchServices)
 + (id)applicationProxyForIdentifier:(NSString *)identifier;
@@ -68,6 +156,11 @@ static NSString *const kRootBrokerPlist =
 
 static int gLog = STDERR_FILENO;
 static os_log_t gUnifiedLog;
+
+static int run_and_wait(const char *executable, char *const arguments[]);
+static int run_and_wait_bounded(const char *executable,
+                                char *const arguments[],
+                                unsigned int timeoutMilliseconds);
 
 static void log_message(const char *format, ...) {
     va_list arguments;
@@ -200,6 +293,20 @@ static NSString *executable_path(void) {
     }
     free(buffer);
     return result;
+}
+
+static bool executable_paths_match(NSString *expected, NSString *actual) {
+    if (expected == nil || actual == nil) {
+        return false;
+    }
+    if ([expected isEqual:actual]) {
+        return true;
+    }
+    char expectedPath[PATH_MAX] = {0};
+    char actualPath[PATH_MAX] = {0};
+    return realpath([expected fileSystemRepresentation], expectedPath) != NULL &&
+           realpath([actual fileSystemRepresentation], actualPath) != NULL &&
+           strcmp(expectedPath, actualPath) == 0;
 }
 
 static bool path_is_absent(const char *path) {
@@ -581,6 +688,37 @@ static bool descriptor_numbers_contain(const int numbers[], uint32_t count,
     return false;
 }
 
+static bool valid_control_environment(const char *entry,
+                                      const int descriptorNumbers[],
+                                      uint32_t descriptorCount) {
+    if (entry == NULL) {
+        return false;
+    }
+    const char *value = NULL;
+    if (strncmp(entry, "SILEO=", strlen("SILEO=")) == 0) {
+        value = entry + strlen("SILEO=");
+    } else if (strncmp(entry, "CYDIA=", strlen("CYDIA=")) == 0) {
+        value = entry + strlen("CYDIA=");
+    } else {
+        return false;
+    }
+    errno = 0;
+    char *separator = NULL;
+    long descriptor = strtol(value, &separator, 10);
+    if (errno != 0 || separator == value || separator == NULL ||
+        *separator != ' ' || descriptor < 0 || descriptor > INT_MAX ||
+        !descriptor_numbers_contain(descriptorNumbers, descriptorCount,
+                                    (int)descriptor)) {
+        return false;
+    }
+    const char *versionText = separator + 1;
+    errno = 0;
+    char *end = NULL;
+    long version = strtol(versionText, &end, 10);
+    return errno == 0 && end != versionText && end != NULL && *end == '\0' &&
+           version >= 1 && version <= INT_MAX;
+}
+
 static void close_ancillary_rights(struct msghdr *message) {
     for (struct cmsghdr *entry = CMSG_FIRSTHDR(message); entry != NULL;
          entry = CMSG_NXTHDR(message, entry)) {
@@ -722,10 +860,224 @@ static bool resolve_broker_command(const char *requested,
            S_ISREG(status.st_mode) && access(resolved, X_OK) == 0;
 }
 
+static bool broker_command_is_macho(const char *path) {
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    uint32_t magic = 0;
+    ssize_t amount = descriptor >= 0 ? read(descriptor, &magic, sizeof(magic))
+                                     : -1;
+    if (descriptor >= 0) {
+        close(descriptor);
+    }
+    return amount == sizeof(magic) &&
+           (magic == MH_MAGIC_64 || magic == MH_CIGAM_64 ||
+            magic == FAT_MAGIC || magic == FAT_CIGAM);
+}
+
+static bool path_contains_macho(NSString *path) {
+    struct stat status;
+    const char *fileSystemPath = [path fileSystemRepresentation];
+    if (stat(fileSystemPath, &status) != 0) {
+        return false;
+    }
+    if (S_ISREG(status.st_mode)) {
+        return broker_command_is_macho(fileSystemPath);
+    }
+    if (!S_ISDIR(status.st_mode)) {
+        return false;
+    }
+    NSDirectoryEnumerator<NSString *> *enumerator =
+        [[NSFileManager defaultManager] enumeratorAtPath:path];
+    for (NSString *relativePath in enumerator) {
+        NSString *candidate = [path stringByAppendingPathComponent:relativePath];
+        if (lstat([candidate fileSystemRepresentation], &status) == 0 &&
+            S_ISREG(status.st_mode) &&
+            broker_command_is_macho([candidate fileSystemRepresentation])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool runtime_admission_infrastructure_ready(const char *reason) {
+    bool worker =
+        access([kExecWorkerExecutable fileSystemRepresentation], X_OK) == 0;
+    bool interposer =
+        access([kExecInterposerLibrary fileSystemRepresentation], R_OK) == 0;
+    bool injector =
+        access([kElleKitInjectorExecutable fileSystemRepresentation], X_OK) == 0;
+    log_message("runtimeAdmissionInfrastructure reason=%s worker=%s "
+                "interposer=%s injector=%s backend=debugged-worker",
+                reason, worker ? "ready" : "missing",
+                interposer ? "ready" : "missing",
+                injector ? "ready" : "missing");
+    return worker && interposer && injector;
+}
+
+static bool broker_command_is_named(const char *resolvedCommand,
+                                    const char *name) {
+    if (resolvedCommand == NULL || name == NULL) {
+        return false;
+    }
+    const char *lastSlash = strrchr(resolvedCommand, '/');
+    const char *baseName = lastSlash != NULL ? lastSlash + 1 : resolvedCommand;
+    return strcmp(baseName, name) == 0;
+}
+
+static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
+                                    const char *reason) {
+    if (paths.count == 0) {
+        return true;
+    }
+    char stagingTemplate[] = "/var/tmp/codex-runtime-trust.XXXXXX";
+    char *stagingPath = mkdtemp(stagingTemplate);
+    if (stagingPath == NULL) {
+        log_message("runtimeTrustDebStageFailed reason=%s error=%s", reason,
+                    strerror(errno));
+        return false;
+    }
+    NSString *staging = [NSString stringWithUTF8String:stagingPath];
+    bool success = true;
+    NSUInteger extracted = 0;
+    for (NSString *path in paths) {
+        struct stat status;
+        if (![path hasPrefix:@"/"] || ![path hasSuffix:@".deb"] ||
+            lstat([path fileSystemRepresentation], &status) != 0 ||
+            !S_ISREG(status.st_mode)) {
+            log_message("runtimeAdmissionDebRejected reason=%s path=%s",
+                        reason, [path UTF8String]);
+            success = false;
+            break;
+        }
+        char *arguments[] = {
+            "/var/jb/usr/bin/dpkg-deb", "-x",
+            (char *)[path fileSystemRepresentation], stagingPath, NULL};
+        int extractStatus =
+            run_and_wait_bounded(arguments[0], arguments, 30000);
+        log_message("runtimeTrustDebExtract path=%s status=%d",
+                    [path UTF8String], extractStatus);
+        if (extractStatus != 0) {
+            success = false;
+            break;
+        }
+        ++extracted;
+    }
+    bool containsMachO = success && extracted != 0 &&
+                         path_contains_macho(staging);
+    /*
+     * iOS 27 can reject post-boot trust-cache loads after successful Generic
+     * Cryptex personalization.  Package payloads therefore stay out of the
+     * immutable trust cache: fixed Procursus parents carry the interposer and
+     * route non-baseline executables into the fixed debugger-softened worker.
+     * Keep extracting here so malformed archives are rejected before dpkg,
+     * but do not make package installation depend on a per-payload cdhash.
+     */
+    int admissionStatus = success && extracted != 0 ? 0 : 1;
+    if (success && extracted != 0) {
+        NSString *recordDirectory =
+            @"/var/jb/var/lib/codex-runtime-admission";
+        NSError *recordError = nil;
+        BOOL directoryReady = [[NSFileManager defaultManager]
+            createDirectoryAtPath:recordDirectory
+      withIntermediateDirectories:YES
+                       attributes:@{
+                           NSFilePosixPermissions : @0755,
+                           NSFileOwnerAccountID : @0,
+                           NSFileGroupOwnerAccountID : @0,
+                       }
+                            error:&recordError];
+        NSDictionary *record = @{
+            @"Backend" : @"debugged-worker-v1",
+            @"AdmissionMode" : @"fixed-loader-no-payload-trust-cache",
+            @"Reason" : [NSString stringWithUTF8String:reason],
+            @"Archives" : paths,
+            @"ArchiveCount" : @(extracted),
+            @"ContainsMachO" : @(containsMachO),
+            @"AdmissionStatus" : @(admissionStatus),
+            @"RecordedAt" : [NSDate date],
+        };
+        NSString *recordPath = [recordDirectory
+            stringByAppendingPathComponent:@"last-transaction.plist"];
+        BOOL recorded = directoryReady &&
+                        [record writeToFile:recordPath atomically:YES];
+        log_message("runtimeAdmissionDebRecord path=%s recorded=%s error=%s",
+                    [recordPath UTF8String], recorded ? "true" : "false",
+                    recordError != nil
+                        ? [[recordError description] UTF8String]
+                        : "none");
+    }
+    NSError *cleanupError = nil;
+    if (![[NSFileManager defaultManager] removeItemAtPath:staging
+                                                    error:&cleanupError]) {
+        log_message("runtimeTrustDebCleanup path=%s error=%s",
+                    [staging UTF8String],
+                    [[cleanupError description] UTF8String]);
+    }
+    log_message("runtimeAdmissionDebResult reason=%s archives=%lu macho=%s "
+                "admissionStatus=%d backend=debugged-worker-v1 "
+                "payloadTrustCache=false status=%s",
+                reason, (unsigned long)extracted,
+                containsMachO ? "true" : "false", admissionStatus,
+                success ? "success" : "failed");
+    return success;
+}
+
+static bool runtime_trust_deb_arguments(char *const arguments[],
+                                        const char *reason) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSUInteger index = 1;
+         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[index] != NULL;
+         ++index) {
+        NSString *path = [NSString stringWithUTF8String:arguments[index]];
+        if ([path hasSuffix:@".deb"]) {
+            [paths addObject:path];
+        }
+    }
+    return runtime_trust_deb_paths(paths, reason);
+}
+
+static bool runtime_trust_debs_from_standard_input(void) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    char *line = NULL;
+    size_t capacity = 0;
+    ssize_t length = 0;
+    while ((length = getline(&line, &capacity, stdin)) >= 0) {
+        while (length > 0 &&
+               (line[length - 1] == '\n' || line[length - 1] == '\r')) {
+            line[--length] = '\0';
+        }
+        if (length > 0 && line[0] == '/') {
+            [paths addObject:[NSString stringWithUTF8String:line]];
+        }
+    }
+    free(line);
+    return runtime_trust_deb_paths(paths, "apt-pre-install");
+}
+
+static bool broker_spawn_error_is_admission_failure(int error) {
+    if (error == EACCES || error == EPERM || error == ENOEXEC) {
+        return true;
+    }
+#ifdef EBADARCH
+    if (error == EBADARCH) {
+        return true;
+    }
+#endif
+    return false;
+}
+
 static int32_t run_root_broker_command(
     int server, int client, char *const arguments[], int descriptors[],
     const int descriptorNumbers[], uint32_t descriptorCount,
+    char *const controlEnvironment[], uint32_t controlEnvironmentCount,
     NSString *jailbreakRoot, const char *resolvedCommand) {
+    if (broker_command_is_named(resolvedCommand, "dpkg") &&
+        !runtime_trust_deb_arguments(arguments, "dpkg-pre-install")) {
+        log_message("sileoRootBrokerPreAdmission=false command=%s "
+                    "backend=debugged-worker-v1",
+                    resolvedCommand);
+        return 72 << 8;
+    }
     int temporary[CODEX_ROOT_BROKER_MAX_FDS];
     for (uint32_t index = 0; index < CODEX_ROOT_BROKER_MAX_FDS; ++index) {
         temporary[index] = -1;
@@ -799,20 +1151,51 @@ static int32_t run_root_broker_command(
             return 127 << 8;
         }
     }
-    char *environment[] = {
-        "SILEO=1",
-        "CYDIA=1",
-        pathEnvironment,
-        shellEnvironment,
-        libraryEnvironment,
-        "HOME=/var/root",
-        "TMPDIR=/var/tmp",
-        NULL,
-    };
+    char *environment[CODEX_ROOT_BROKER_MAX_ENVIRONMENT + 8U] = {0};
+    uint32_t environmentCount = 0;
+    for (uint32_t index = 0; index < controlEnvironmentCount; ++index) {
+        environment[environmentCount++] = controlEnvironment[index];
+    }
+    environment[environmentCount++] = pathEnvironment;
+    environment[environmentCount++] = shellEnvironment;
+    environment[environmentCount++] = libraryEnvironment;
+    environment[environmentCount++] =
+        "CODEX_RUNTIME_ADMISSION=debugged-worker-v1";
+    environment[environmentCount++] = "HOME=/var/root";
+    environment[environmentCount++] = "TMPDIR=/var/tmp";
+    environment[environmentCount] = NULL;
 
     pid_t child = 0;
+    bool runtimeFallback = false;
     int spawnResult = posix_spawn(&child, resolvedCommand, &actions, NULL,
                                   arguments, environment);
+    if (spawnResult != 0 &&
+        broker_spawn_error_is_admission_failure(spawnResult) &&
+        strcmp(resolvedCommand,
+               [kExecWorkerExecutable fileSystemRepresentation]) != 0 &&
+        broker_command_is_macho(resolvedCommand)) {
+        char *runtimeArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U] = {0};
+        runtimeArguments[0] =
+            (char *)[kExecWorkerExecutable fileSystemRepresentation];
+        runtimeArguments[1] = "--macho";
+        uint32_t index = 0;
+        while (index < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+               arguments[index] != NULL) {
+            runtimeArguments[index + 2U] = arguments[index];
+            ++index;
+        }
+        runtimeArguments[index + 2U] = NULL;
+        int directError = spawnResult;
+        spawnResult = posix_spawn(
+            &child, [kExecWorkerExecutable fileSystemRepresentation],
+            &actions, NULL, runtimeArguments, environment);
+        runtimeFallback = spawnResult == 0;
+        log_message("sileoRootBrokerRuntimeFallback command=%s "
+                    "directError=%s workerError=%s selected=%s",
+                    resolvedCommand, strerror(directError),
+                    spawnResult == 0 ? "none" : strerror(spawnResult),
+                    runtimeFallback ? "true" : "false");
+    }
     posix_spawn_file_actions_destroy(&actions);
     for (uint32_t index = 0; index < descriptorCount; ++index) {
         close(temporary[index]);
@@ -827,6 +1210,10 @@ static int32_t run_root_broker_command(
         if (errno != EINTR) {
             return 125 << 8;
         }
+    }
+    if (runtimeFallback) {
+        log_message("sileoRootBrokerRuntimeResult command=%s status=%d",
+                    resolvedCommand, status);
     }
     return status;
 }
@@ -880,7 +1267,8 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
             status = run_root_broker_command(
                 server, client, request.arguments, request.descriptors,
                 request.header.descriptor_numbers,
-                request.header.descriptor_count, jailbreakRoot, resolved);
+                request.header.descriptor_count, NULL, 0, jailbreakRoot,
+                resolved);
         }
         bool replied = write_all(client, &status, sizeof(status));
         if (received) {
@@ -896,13 +1284,176 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
     }
 }
 
+static bool is_ellekit_target_process(pid_t pid, const char *path) {
+    static const char *const jailbreakApplications =
+        "/var/jb/Applications/";
+    static const char *const privateApplicationContainers =
+        "/private/var/containers/Bundle/Application/";
+    static const char *const applicationContainers =
+        "/var/containers/Bundle/Application/";
+    static const char *const sileoExecutableSuffix = "/Sileo.app/Sileo";
+    static const char *const uiTestRunnerPathComponent = "-Runner.app/";
+    size_t pathLength = strlen(path);
+    size_t sileoSuffixLength = strlen(sileoExecutableSuffix);
+    bool sileoProcess =
+        pathLength >= sileoSuffixLength &&
+        strcmp(path + pathLength - sileoSuffixLength,
+               sileoExecutableSuffix) == 0;
+    if (sileoProcess || strstr(path, uiTestRunnerPathComponent) != NULL) {
+        // Sileo has its own launch-time constructor and broker bridge. Loading
+        // ElleKit's generic injector afterward is redundant and destabilizes
+        // the app once its package-manager worker threads are running. XCTest
+        // runner hosts likewise manage their own injected test bundle and can
+        // crash if a second late loader mutates the process.
+        return false;
+    }
+    if (strcmp(path,
+               "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+        0) {
+        return true;
+    }
+    if (strncmp(path, jailbreakApplications,
+                strlen(jailbreakApplications)) == 0) {
+        return true;
+    }
+    bool applicationContainer =
+        strncmp(path, privateApplicationContainers,
+                strlen(privateApplicationContainers)) == 0 ||
+        strncmp(path, applicationContainers,
+                strlen(applicationContainers)) == 0;
+    uint32_t flags = 0;
+    return applicationContainer &&
+           csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+           (flags & CODEX_CS_PLATFORM_BINARY) == 0;
+}
+
+static void serve_ellekit_per_process_injector(bool springBoardOnly) {
+    NSMutableDictionary<NSNumber *, NSDictionary *> *states =
+        [NSMutableDictionary dictionary];
+    const char *lane = springBoardOnly ? "springboard" : "applications";
+    unsigned long long scan = 0;
+    log_message("elleKitPerProcessInjectorServing=true lane=%s "
+                "pid1Guard=true", lane);
+    for (;;) {
+        @autoreleasepool {
+            if (access([kElleKitInjectorExecutable fileSystemRepresentation],
+                       X_OK) != 0 ||
+                access([kElleKitInjectorDylib fileSystemRepresentation],
+                       R_OK) != 0 ||
+                access([kExecInterposerLibrary fileSystemRepresentation],
+                       R_OK) != 0) {
+                usleep(1000 * 1000);
+                continue;
+            }
+            int capacity = proc_listallpids(NULL, 0);
+            if (capacity <= 0 || capacity > 1024 * 1024) {
+                usleep(500 * 1000);
+                continue;
+            }
+            capacity += 32;
+            pid_t *pids = calloc((size_t)capacity, sizeof(*pids));
+            if (pids == NULL) {
+                usleep(500 * 1000);
+                continue;
+            }
+            int count = proc_listallpids(pids,
+                                         capacity * (int)sizeof(*pids));
+            if (count < 0) {
+                free(pids);
+                usleep(500 * 1000);
+                continue;
+            }
+            if (count > capacity) {
+                count = capacity;
+            }
+            NSMutableSet<NSNumber *> *live = [NSMutableSet set];
+            NSUInteger targetCount = 0;
+            NSUInteger pendingCount = 0;
+            for (int index = 0; index < count; ++index) {
+                pid_t pid = pids[index];
+                if (pid <= 1 || pid == getpid()) {
+                    continue;
+                }
+                char path[CODEX_PROC_PIDPATH_MAX] = {0};
+                if (proc_pidpath(pid, path, sizeof(path)) <= 0 ||
+                    strcmp(path, "/sbin/launchd") == 0 ||
+                    !is_ellekit_target_process(pid, path)) {
+                    continue;
+                }
+                bool springBoardProcess =
+                    strcmp(path,
+                           "/System/Library/CoreServices/"
+                           "SpringBoard.app/SpringBoard") == 0;
+                if (springBoardProcess != springBoardOnly) {
+                    continue;
+                }
+                ++targetCount;
+                NSNumber *key = @(pid);
+                [live addObject:key];
+                NSDictionary *state = states[key];
+                NSString *pathValue = [NSString stringWithUTF8String:path];
+                NSUInteger attempts =
+                    [state[@"path"] isEqual:pathValue]
+                        ? [state[@"attempts"] unsignedIntegerValue]
+                        : 0;
+                bool complete = [state[@"complete"] boolValue];
+                if (complete || attempts >= 3) {
+                    continue;
+                }
+                ++pendingCount;
+                char pidText[32];
+                snprintf(pidText, sizeof(pidText), "%d", pid);
+                char *elleKitArguments[] = {
+                    (char *)[kElleKitInjectorExecutable
+                        fileSystemRepresentation],
+                    "--inject-pid", pidText,
+                    (char *)[kElleKitInjectorDylib fileSystemRepresentation],
+                    NULL};
+                int elleKitStatus = run_and_wait_bounded(
+                    elleKitArguments[0], elleKitArguments, 30000);
+                int status = elleKitStatus == 0 ? 0 : 1;
+                ++attempts;
+                states[key] = @{
+                    @"path" : pathValue,
+                    @"attempts" : @(attempts),
+                    @"complete" : @(status == 0),
+                };
+                log_message("elleKitPerProcessInjection lane=%s pid=%d "
+                            "path=%s attempt=%lu elleKitStatus=%d status=%d",
+                            lane, pid, path, (unsigned long)attempts,
+                            elleKitStatus, status);
+            }
+            free(pids);
+            for (NSNumber *key in [states.allKeys copy]) {
+                if (![live containsObject:key]) {
+                    [states removeObjectForKey:key];
+                }
+            }
+            ++scan;
+            if (scan == 1 || scan % 80 == 0) {
+                log_message("elleKitPerProcessInjectorHeartbeat lane=%s "
+                            "scan=%llu targets=%lu pending=%lu states=%lu "
+                            "safeMode=%s",
+                            lane, scan, (unsigned long)targetCount,
+                            (unsigned long)pendingCount,
+                            (unsigned long)states.count,
+                            access("/var/mobile/.eksafemode", F_OK) == 0
+                                ? "true"
+                                : "false");
+            }
+        }
+        usleep(250 * 1000);
+    }
+}
+
 static xpc_connection_t gSileoXpcListener;
 
 static void handle_sileo_xpc_request(xpc_connection_t peer,
                                      xpc_object_t message, pid_t peerPid,
                                      NSString *expectedMain,
                                      NSString *expectedHelper,
-                                     NSString *jailbreakRoot) {
+                                     NSString *jailbreakRoot,
+                                     bool runtimeTrustClient) {
     xpc_object_t reply = xpc_dictionary_create_reply(message);
     if (reply == NULL) {
         return;
@@ -912,13 +1463,19 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
     if (peerPid > 1 && proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0) {
         NSString *path = [NSString stringWithUTF8String:peerPath];
-        accepted = [expectedMain isEqual:path] || [expectedHelper isEqual:path];
+        bool sileoClient = executable_paths_match(expectedMain, path) ||
+                           executable_paths_match(expectedHelper, path);
+        accepted = sileoClient ||
+            (runtimeTrustClient &&
+             executable_paths_match(kRuntimeTrustClientExecutable, path));
     }
 
     char *arguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 1U] = {0};
+    char *controlEnvironment[CODEX_ROOT_BROKER_MAX_ENVIRONMENT + 1U] = {0};
     int descriptors[CODEX_ROOT_BROKER_MAX_FDS];
     int descriptorNumbers[CODEX_ROOT_BROKER_MAX_FDS];
     uint32_t argumentCount = 0;
+    uint32_t controlEnvironmentCount = 0;
     uint32_t descriptorCount = 0;
     for (uint32_t index = 0; index < CODEX_ROOT_BROKER_MAX_FDS; ++index) {
         descriptors[index] = -1;
@@ -926,20 +1483,29 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     bool valid = accepted && xpc_get_type(message) == XPC_TYPE_DICTIONARY;
     xpc_object_t argumentArray =
         valid ? xpc_dictionary_get_value(message, "arguments") : NULL;
+    xpc_object_t environmentArray =
+        valid ? xpc_dictionary_get_value(message, "control-environment")
+              : NULL;
     xpc_object_t descriptorArray =
         valid ? xpc_dictionary_get_value(message, "descriptor-numbers")
               : NULL;
     if (argumentArray == NULL || xpc_get_type(argumentArray) != XPC_TYPE_ARRAY ||
+        environmentArray == NULL ||
+        xpc_get_type(environmentArray) != XPC_TYPE_ARRAY ||
         descriptorArray == NULL ||
         xpc_get_type(descriptorArray) != XPC_TYPE_ARRAY) {
         valid = false;
     }
     if (valid) {
         size_t count = xpc_array_get_count(argumentArray);
+        size_t environmentCount = xpc_array_get_count(environmentArray);
         size_t fdCount = xpc_array_get_count(descriptorArray);
         valid = count > 0 && count <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+                environmentCount <= CODEX_ROOT_BROKER_MAX_ENVIRONMENT &&
                 fdCount > 0 && fdCount <= CODEX_ROOT_BROKER_MAX_FDS;
         argumentCount = valid ? (uint32_t)count : 0;
+        controlEnvironmentCount =
+            valid ? (uint32_t)environmentCount : 0;
         descriptorCount = valid ? (uint32_t)fdCount : 0;
     }
     for (uint32_t index = 0; valid && index < argumentCount; ++index) {
@@ -949,6 +1515,15 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
             break;
         }
         arguments[index] = (char *)value;
+    }
+    for (uint32_t index = 0; valid && index < controlEnvironmentCount;
+         ++index) {
+        const char *value = xpc_array_get_string(environmentArray, index);
+        if (value == NULL || strnlen(value, 64U) == 64U) {
+            valid = false;
+            break;
+        }
+        controlEnvironment[index] = (char *)value;
     }
     for (uint32_t index = 0; valid && index < descriptorCount; ++index) {
         int64_t value = xpc_array_get_int64(descriptorArray, index);
@@ -969,19 +1544,63 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
             break;
         }
     }
+    for (uint32_t index = 0; valid && index < controlEnvironmentCount;
+         ++index) {
+        if (!valid_control_environment(controlEnvironment[index],
+                                       descriptorNumbers, descriptorCount)) {
+            valid = false;
+            break;
+        }
+        for (uint32_t previous = 0; previous < index; ++previous) {
+            bool duplicateSileo =
+                strncmp(controlEnvironment[index], "SILEO=", 6) == 0 &&
+                strncmp(controlEnvironment[previous], "SILEO=", 6) == 0;
+            bool duplicateCydia =
+                strncmp(controlEnvironment[index], "CYDIA=", 6) == 0 &&
+                strncmp(controlEnvironment[previous], "CYDIA=", 6) == 0;
+            if (duplicateSileo || duplicateCydia) {
+                valid = false;
+                break;
+            }
+        }
+    }
+    NSMutableArray<NSString *> *trustPaths = [NSMutableArray array];
+    bool runtimeTrustRequest =
+        valid && runtimeTrustClient && controlEnvironmentCount == 0 &&
+        strcmp(arguments[0], CODEX_RUNTIME_TRUST_BROKER_VERB) == 0;
+    for (uint32_t index = 1; runtimeTrustRequest && index < argumentCount;
+         ++index) {
+        NSString *path = [NSString stringWithUTF8String:arguments[index]];
+        if (![path hasPrefix:@"/"] || ![path hasSuffix:@".deb"]) {
+            runtimeTrustRequest = false;
+            break;
+        }
+        [trustPaths addObject:path];
+    }
     char resolved[PATH_MAX] = {0};
-    bool allowed =
-        valid && resolve_broker_command(arguments[0], jailbreakRoot, resolved,
-                                        sizeof(resolved));
+    bool allowed = valid &&
+        (runtimeTrustRequest ||
+         (!runtimeTrustClient &&
+          resolve_broker_command(arguments[0], jailbreakRoot, resolved,
+                                 sizeof(resolved))));
     log_message("sileoXpcBrokerRequestStart pid=%d accepted=%s valid=%s "
                 "allowed=%s command=%s",
                 peerPid, accepted ? "true" : "false",
                 valid ? "true" : "false", allowed ? "true" : "false",
-                resolved[0] != '\0' ? resolved : "none");
+                runtimeTrustRequest
+                    ? CODEX_RUNTIME_TRUST_BROKER_VERB
+                    : (resolved[0] != '\0' ? resolved : "none"));
     if (allowed) {
-        status = run_root_broker_command(-1, -1, arguments, descriptors,
-                                         descriptorNumbers, descriptorCount,
-                                         jailbreakRoot, resolved);
+        if (runtimeTrustRequest) {
+            bool registered = runtime_trust_deb_paths(
+                trustPaths, "apt-pre-install-client");
+            status = registered ? 0 : (1 << 8);
+        } else {
+            status = run_root_broker_command(
+                -1, -1, arguments, descriptors, descriptorNumbers,
+                descriptorCount, controlEnvironment,
+                controlEnvironmentCount, jailbreakRoot, resolved);
+        }
     }
     for (uint32_t index = 0; index < descriptorCount; ++index) {
         if (descriptors[index] >= 0) {
@@ -994,10 +1613,14 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     xpc_dictionary_set_bool(reply, "allowed", allowed);
     xpc_connection_send_message(peer, reply);
     log_message("sileoXpcBrokerRequest pid=%d accepted=%s valid=%s allowed=%s "
-                "command=%s status=%d",
+                "command=%s status=%d controlEnvironment=%u",
                 peerPid, accepted ? "true" : "false",
                 valid ? "true" : "false", allowed ? "true" : "false",
-                resolved[0] != '\0' ? resolved : "none", status);
+                runtimeTrustRequest
+                    ? CODEX_RUNTIME_TRUST_BROKER_VERB
+                    : (resolved[0] != '\0' ? resolved : "none"),
+                status,
+                controlEnvironmentCount);
 }
 
 static bool start_sileo_xpc_broker(NSString *registeredPath,
@@ -1033,12 +1656,17 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
         pid_t peerPid = getPid != NULL ? getPid(peer) : -1;
         uid_t peerUser = xpc_connection_get_euid(peer);
         char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
-        bool accepted = peerUser == 501 && peerPid > 1 &&
-            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0 &&
-            ([expectedMain
-                 isEqual:[NSString stringWithUTF8String:peerPath]] ||
-             [expectedHelper
-                 isEqual:[NSString stringWithUTF8String:peerPath]]);
+        bool pathAvailable = peerPid > 1 &&
+            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0;
+        NSString *path = pathAvailable
+            ? [NSString stringWithUTF8String:peerPath]
+            : nil;
+        bool sileoClient = peerUser == 501 &&
+            (executable_paths_match(expectedMain, path) ||
+             executable_paths_match(expectedHelper, path));
+        bool runtimeTrustClient = peerUser == 0 &&
+            executable_paths_match(kRuntimeTrustClientExecutable, path);
+        bool accepted = sileoClient || runtimeTrustClient;
         if (!accepted) {
             log_message("sileoXpcBrokerRejected pid=%d uid=%u path=%s",
                         peerPid, peerUser,
@@ -1048,8 +1676,9 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
         }
         xpc_connection_set_event_handler(peer, ^(xpc_object_t message) {
             if (xpc_get_type(message) == XPC_TYPE_DICTIONARY) {
-                handle_sileo_xpc_request(peer, message, peerPid, expectedMain,
-                                         expectedHelper, jailbreakRoot);
+                handle_sileo_xpc_request(
+                    peer, message, peerPid, expectedMain, expectedHelper,
+                    jailbreakRoot, runtimeTrustClient);
             }
         });
         xpc_connection_resume(peer);
@@ -1259,6 +1888,48 @@ static bool files_are_equal(NSString *left, NSString *right) {
     return equal;
 }
 
+static NSString *sha256_for_regular_file(NSString *path) {
+    int file = open([path fileSystemRepresentation],
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat status;
+    if (file < 0 || fstat(file, &status) != 0 ||
+        !S_ISREG(status.st_mode)) {
+        if (file >= 0) {
+            close(file);
+        }
+        return nil;
+    }
+
+    CC_SHA256_CTX context;
+    bool hashed = CC_SHA256_Init(&context) == 1;
+    unsigned char buffer[64 * 1024];
+    while (hashed) {
+        ssize_t length;
+        do {
+            length = read(file, buffer, sizeof(buffer));
+        } while (length < 0 && errno == EINTR);
+        if (length < 0) {
+            hashed = false;
+            break;
+        }
+        if (length == 0) {
+            break;
+        }
+        hashed = CC_SHA256_Update(&context, buffer, (CC_LONG)length) == 1;
+    }
+    close(file);
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    if (!hashed || CC_SHA256_Final(digest, &context) != 1) {
+        return nil;
+    }
+    NSMutableString *hex =
+        [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2U];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; ++index) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
 static bool install_dopamine_default_sources(NSString *source,
                                              bool *didUpdate,
                                              NSString **errorText) {
@@ -1389,8 +2060,8 @@ static bool install_dopamine_default_sources(NSString *source,
 
 static bool install_managed_apt_file(NSString *source, NSString *directory,
                                      NSString *filename, off_t maximumSize,
-                                     const char *logName, bool *didUpdate,
-                                     NSString **errorText) {
+                                     mode_t mode, const char *logName,
+                                     bool *didUpdate, NSString **errorText) {
     if (didUpdate != NULL) {
         *didUpdate = false;
     }
@@ -1462,7 +2133,7 @@ static bool install_managed_apt_file(NSString *source, NSString *directory,
         if (files_are_equal(source, destination)) {
             if (![[NSFileManager defaultManager]
                     setAttributes:@{
-                        NSFilePosixPermissions : @0644,
+                        NSFilePosixPermissions : @(mode),
                         NSFileOwnerAccountID : @0,
                         NSFileGroupOwnerAccountID : @0,
                     }
@@ -1498,7 +2169,7 @@ static bool install_managed_apt_file(NSString *source, NSString *directory,
                          error:&fileError] ||
         ![[NSFileManager defaultManager]
             setAttributes:@{
-                NSFilePosixPermissions : @0644,
+                NSFilePosixPermissions : @(mode),
                 NSFileOwnerAccountID : @0,
                 NSFileGroupOwnerAccountID : @0,
             }
@@ -1527,7 +2198,7 @@ static bool install_managed_apt_file(NSString *source, NSString *directory,
         lstat([destination fileSystemRepresentation], &destinationStatus) !=
             0 ||
         destinationStatus.st_uid != 0 || destinationStatus.st_gid != 0 ||
-        (destinationStatus.st_mode & 07777) != 0644) {
+        (destinationStatus.st_mode & 07777) != mode) {
         if (errorText != NULL) {
             *errorText = @"managed APT payload verification failed";
         }
@@ -1662,6 +2333,210 @@ static bool restore_replaced_file(NSString *destination, NSString *backup) {
         return false;
     }
     [[NSFileManager defaultManager] removeItemAtPath:failed error:nil];
+    return true;
+}
+
+static bool refresh_procursus_runtime_executables(
+    NSString *normalizedRoot, NSString *baselineManifest,
+    NSUInteger *didUpdate, NSUInteger *alreadyCurrent,
+    NSUInteger *diverged, NSString **errorText) {
+    if (didUpdate != NULL) {
+        *didUpdate = 0;
+    }
+    if (alreadyCurrent != NULL) {
+        *alreadyCurrent = 0;
+    }
+    if (diverged != NULL) {
+        *diverged = 0;
+    }
+
+    NSDictionary *manifest =
+        [NSDictionary dictionaryWithContentsOfFile:baselineManifest];
+    NSDictionary *executables = manifest[@"Executables"];
+    bool manifestVersionOne = [manifest[@"Version"] isEqual:@1];
+    bool manifestVersionTwo = [manifest[@"Version"] isEqual:@2];
+    if ((!manifestVersionOne && !manifestVersionTwo) ||
+        ![executables isKindOfClass:[NSDictionary class]] ||
+        executables.count == 0) {
+        if (errorText != NULL) {
+            *errorText = @"Procursus runtime baseline manifest is invalid";
+        }
+        return false;
+    }
+
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSCharacterSet *nonHex = [[NSCharacterSet
+        characterSetWithCharactersInString:@"0123456789abcdef"]
+        invertedSet];
+    NSArray<NSString *> *paths =
+        [[executables allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    for (id candidatePath in paths) {
+        if (![candidatePath isKindOfClass:[NSString class]]) {
+            if (errorText != NULL) {
+                *errorText = @"Procursus runtime baseline path is not text";
+            }
+            return false;
+        }
+        NSString *relativePath = (NSString *)candidatePath;
+        id candidateDigests = executables[relativePath];
+        NSArray *acceptedDigests = nil;
+        if (manifestVersionOne &&
+            [candidateDigests isKindOfClass:[NSString class]]) {
+            acceptedDigests = @[ candidateDigests ];
+        } else if (manifestVersionTwo &&
+                   [candidateDigests isKindOfClass:[NSArray class]]) {
+            acceptedDigests = (NSArray *)candidateDigests;
+        }
+        if (acceptedDigests.count == 0 || acceptedDigests.count > 64) {
+            if (errorText != NULL) {
+                *errorText =
+                    @"Procursus runtime baseline digest history is invalid";
+            }
+            return false;
+        }
+        NSArray<NSString *> *components = [relativePath pathComponents];
+        bool safePath = relativePath.length > 0 &&
+            ![relativePath hasPrefix:@"/"] &&
+            [[relativePath stringByStandardizingPath] isEqual:relativePath] &&
+            components.count > 0;
+        for (NSString *component in components) {
+            if ([component isEqualToString:@"."] ||
+                [component isEqualToString:@".."] ||
+                [component containsString:@"/"]) {
+                safePath = false;
+                break;
+            }
+        }
+        bool safeDigests = true;
+        for (id candidateDigest in acceptedDigests) {
+            if (![candidateDigest isKindOfClass:[NSString class]] ||
+                [(NSString *)candidateDigest length] != 64 ||
+                [(NSString *)candidateDigest
+                    rangeOfCharacterFromSet:nonHex].location != NSNotFound) {
+                safeDigests = false;
+                break;
+            }
+        }
+        if (!safePath || !safeDigests) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"invalid Procursus runtime baseline "
+                                     @"entry: %@",
+                                     relativePath];
+            }
+            return false;
+        }
+
+        NSString *normalized =
+            [normalizedRoot stringByAppendingPathComponent:relativePath];
+        NSString *destination =
+            [@"/var/jb" stringByAppendingPathComponent:relativePath];
+        struct stat normalizedStatus;
+        struct stat destinationStatus;
+        if (lstat([normalized fileSystemRepresentation], &normalizedStatus) !=
+                0 ||
+            !S_ISREG(normalizedStatus.st_mode) ||
+            (normalizedStatus.st_mode & 0111) == 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"normalized Procursus runtime "
+                                     @"executable is unavailable: %@",
+                                     relativePath];
+            }
+            return false;
+        }
+        if (lstat([destination fileSystemRepresentation],
+                  &destinationStatus) != 0) {
+            if (errno != ENOENT) {
+                if (errorText != NULL) {
+                    *errorText = [NSString
+                        stringWithFormat:@"installed Procursus runtime "
+                                         @"status failed for %@: %s",
+                                         destination, strerror(errno)];
+                }
+                return false;
+            }
+            log_message("procursusRuntimeExecutable=absent path=%s",
+                        [destination UTF8String]);
+            if (diverged != NULL) {
+                ++*diverged;
+            }
+            continue;
+        }
+        if (!S_ISREG(destinationStatus.st_mode)) {
+            log_message("procursusRuntimeExecutable=nonregular path=%s",
+                        [destination UTF8String]);
+            if (diverged != NULL) {
+                ++*diverged;
+            }
+            continue;
+        }
+        if (files_are_equal(normalized, destination)) {
+            if (alreadyCurrent != NULL) {
+                ++*alreadyCurrent;
+            }
+            continue;
+        }
+
+        NSString *installedDigest = sha256_for_regular_file(destination);
+        if (installedDigest == nil) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"could not hash installed Procursus "
+                                     @"runtime executable: %@",
+                                     destination];
+            }
+            return false;
+        }
+        if (![acceptedDigests containsObject:installedDigest]) {
+            log_message("procursusRuntimeExecutable=diverged path=%s",
+                        [destination UTF8String]);
+            if (diverged != NULL) {
+                ++*diverged;
+            }
+            continue;
+        }
+
+        NSString *backup =
+            [[destination stringByDeletingLastPathComponent]
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@".codex-runtime-backup-%@",
+                                               [[NSUUID UUID] UUIDString]]];
+        NSString *replacementError = nil;
+        if (!replace_file_with_backup(normalized, destination, backup,
+                                      &replacementError)) {
+            if (errorText != NULL) {
+                *errorText = replacementError;
+            }
+            return false;
+        }
+        if (!files_are_equal(normalized, destination)) {
+            bool restored = restore_replaced_file(destination, backup);
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"Procursus runtime executable refresh "
+                                     @"failed for %@ (rollback=%@)",
+                                     destination,
+                                     restored ? @"complete" : @"failed"];
+            }
+            return false;
+        }
+        NSError *removeError = nil;
+        if (![manager removeItemAtPath:backup error:&removeError]) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"Procursus runtime backup cleanup "
+                                     @"failed: %@",
+                                     removeError];
+            }
+            return false;
+        }
+        log_message("procursusRuntimeExecutable=updated path=%s",
+                    [destination UTF8String]);
+        if (didUpdate != NULL) {
+            ++*didUpdate;
+        }
+    }
     return true;
 }
 
@@ -1889,6 +2764,89 @@ static int run_and_wait(const char *executable, char *const arguments[]) {
         return 128 + WTERMSIG(status);
     }
     return 255;
+}
+
+static int run_and_wait_bounded(const char *executable,
+                                char *const arguments[],
+                                unsigned int timeoutMilliseconds) {
+    pid_t child = 0;
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes = NULL;
+    int result = posix_spawn_file_actions_init(&actions);
+    if (result != 0) {
+        return 255;
+    }
+    posix_spawn_file_actions_adddup2(&actions, gLog, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, gLog, STDERR_FILENO);
+    result = posix_spawnattr_init(&attributes);
+    if (result == 0) {
+        result = posix_spawnattr_setpgroup(&attributes, 0);
+    }
+    if (result == 0) {
+        result = posix_spawnattr_setflags(&attributes,
+                                          POSIX_SPAWN_SETPGROUP);
+    }
+    if (result == 0) {
+        result = posix_spawn(&child, executable, &actions, &attributes,
+                             arguments, environ);
+    }
+    posix_spawn_file_actions_destroy(&actions);
+    if (result == 0) {
+        posix_spawnattr_destroy(&attributes);
+    } else {
+        if (attributes != NULL) {
+            posix_spawnattr_destroy(&attributes);
+        }
+        log_message("bounded spawn failed executable=%s error=%s",
+                    executable, strerror(result));
+        return 255;
+    }
+
+    const useconds_t pollInterval = 10 * 1000;
+    unsigned int elapsed = 0;
+    int status = 0;
+    for (;;) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            if (WIFEXITED(status)) {
+                return WEXITSTATUS(status);
+            }
+            if (WIFSIGNALED(status)) {
+                log_message("bounded child signaled executable=%s signal=%d",
+                            executable, WTERMSIG(status));
+                return 128 + WTERMSIG(status);
+            }
+            return 255;
+        }
+        if (waited < 0 && errno != EINTR) {
+            log_message("bounded waitpid failed pid=%d error=%s", child,
+                        strerror(errno));
+            return 255;
+        }
+        if (elapsed >= timeoutMilliseconds) {
+            // The child is a dedicated process-group leader. Terminate only
+            // that loader group; the target process is never a member.
+            log_message("bounded child timeout executable=%s pid=%d "
+                        "timeoutMs=%u pid1Guard=true",
+                        executable, child, timeoutMilliseconds);
+            if (child > 1) {
+                (void)kill(-child, SIGTERM);
+                for (unsigned int grace = 0; grace < 25; ++grace) {
+                    waited = waitpid(child, &status, WNOHANG);
+                    if (waited == child) {
+                        return 124;
+                    }
+                    usleep(pollInterval);
+                }
+                (void)kill(-child, SIGKILL);
+            }
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+            }
+            return 124;
+        }
+        usleep(pollInterval);
+        elapsed += 10;
+    }
 }
 
 static NSString *dpkg_control_field(NSString *paragraph, NSString *field) {
@@ -2348,6 +3306,7 @@ static int fail(NSString *reason, NSString *partialRoot) {
 }
 
 int main(int argc, char *argv[]) {
+    codex_jetsam_adjustment_t jetsam = adjust_self_jetsam_limit();
     @autoreleasepool {
         gUnifiedLog = os_log_create("com.openai.codex.dopamine.bootstrap",
                                     "installer");
@@ -2355,6 +3314,17 @@ int main(int argc, char *argv[]) {
         if (gLog < 0) {
             gLog = STDERR_FILENO;
         }
+        log_message(
+            "selfJetsam initialStatus=%d initialErrno=%d initialActiveMB=%d "
+            "initialInactiveMB=%d setStatus=%d setErrno=%d "
+            "fallbackStatus=%d fallbackErrno=%d effectiveStatus=%d "
+            "effectiveErrno=%d effectiveActiveMB=%d effectiveInactiveMB=%d",
+            jetsam.initial_status, jetsam.initial_errno,
+            jetsam.initial.memlimit_active, jetsam.initial.memlimit_inactive,
+            jetsam.set_status, jetsam.set_errno, jetsam.fallback_status,
+            jetsam.fallback_errno, jetsam.effective_status,
+            jetsam.effective_errno, jetsam.effective.memlimit_active,
+            jetsam.effective.memlimit_inactive);
         if (argc == 4 &&
             strcmp(argv[1], "--sileo-root-broker") == 0) {
             log_message("event=sileo-root-broker-start uid=%u euid=%u pid=%d",
@@ -2378,8 +3348,42 @@ int main(int argc, char *argv[]) {
             log_message("sileoRootBrokerModeReady=true path=%s root=%s",
                         [registeredPath UTF8String],
                         [jailbreakRoot UTF8String]);
+            bool startupAdmission =
+                runtime_admission_infrastructure_ready("broker-start");
+            log_message("runtimeAdmissionStartup=%s backend=debugged-worker",
+                        startupAdmission ? "success" : "failed");
+            log_message("runtimePayloadAdmissionStartup=%s "
+                        "backend=debugged-worker-v1 "
+                        "payloadTrustCache=false",
+                        startupAdmission ? "success" : "failed");
+            dispatch_queue_t springBoardInjectionQueue =
+                dispatch_queue_create(
+                "com.openai.codex.dopamine.ellekit-springboard",
+                DISPATCH_QUEUE_SERIAL);
+            dispatch_async(springBoardInjectionQueue, ^{
+                serve_ellekit_per_process_injector(true);
+            });
+            dispatch_queue_t applicationInjectionQueue =
+                dispatch_queue_create(
+                "com.openai.codex.dopamine.ellekit-applications",
+                DISPATCH_QUEUE_SERIAL);
+            dispatch_async(applicationInjectionQueue, ^{
+                serve_ellekit_per_process_injector(false);
+            });
             dispatch_main();
             __builtin_unreachable();
+        }
+        if (argc == 2 &&
+            strcmp(argv[1], "--trust-debs-stdin") == 0) {
+            NSString *managedRoot = managed_jailbreak_root();
+            if (geteuid() != 0 || managedRoot == nil) {
+                log_message("runtimeTrustAptHookValidation=false");
+                return 1;
+            }
+            bool trusted = runtime_trust_debs_from_standard_input();
+            log_message("runtimeTrustAptHook=%s",
+                        trusted ? "success" : "failed");
+            return trusted ? 0 : 1;
         }
         if (argc != 1) {
             log_message("result=failed reason=invalid invocation");
@@ -2427,6 +3431,33 @@ int main(int argc, char *argv[]) {
         NSString *sourceRepositoryCompatibility =
             [payloadRoot stringByAppendingPathComponent:
                              @"apt/99dopamine-repository-compat"];
+        NSString *sourceRuntimeTrustAptConfig =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"apt/98codex-runtime-trust"];
+        NSString *sourceAptListNormalizer =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"normalize-apt-lists.sh"];
+        NSString *sourceBaseCdhashes =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"base-cdhashes.txt"];
+        NSString *sourceProcursusRuntimeBaseline =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"procursus-runtime-baseline.plist"];
+        NSString *sourceElleKitCompatLoader =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-ellekit-loader"];
+        NSString *sourceExecWorker =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-exec-worker"];
+        NSString *sourceExecInterposer =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/codex-exec-interposer.dylib"];
+        NSString *sourceRuntimeTrust =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-runtime-trust"];
+        NSString *sourceRuntimeTrustClient =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-runtime-trust-client"];
         NSString *sourceKeyringDirectory =
             [payloadRoot stringByAppendingPathComponent:@"keyrings"];
         NSString *sourceElleKitKey =
@@ -2476,6 +3507,51 @@ int main(int argc, char *argv[]) {
                   &repositoryCompatibilityStatus) != 0 ||
             !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
             return fail(@"repository compatibility payload is missing", nil);
+        }
+        if (lstat([sourceRuntimeTrustAptConfig fileSystemRepresentation],
+                  &repositoryCompatibilityStatus) != 0 ||
+            !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
+            return fail(@"runtime admission APT policy is missing", nil);
+        }
+        struct stat aptListNormalizerStatus;
+        if (lstat([sourceAptListNormalizer fileSystemRepresentation],
+                  &aptListNormalizerStatus) != 0 ||
+            !S_ISREG(aptListNormalizerStatus.st_mode)) {
+            return fail(@"APT package-list normalizer is missing", nil);
+        }
+        struct stat baseCdhashesStatus;
+        if (lstat([sourceBaseCdhashes fileSystemRepresentation],
+                  &baseCdhashesStatus) != 0 ||
+            !S_ISREG(baseCdhashesStatus.st_mode) ||
+            baseCdhashesStatus.st_size <= 0 ||
+            baseCdhashesStatus.st_size > 1024 * 1024) {
+            return fail(@"runtime admission baseline is missing", nil);
+        }
+        struct stat procursusRuntimeBaselineStatus;
+        if (lstat([sourceProcursusRuntimeBaseline fileSystemRepresentation],
+                  &procursusRuntimeBaselineStatus) != 0 ||
+            !S_ISREG(procursusRuntimeBaselineStatus.st_mode) ||
+            procursusRuntimeBaselineStatus.st_size <= 0 ||
+            procursusRuntimeBaselineStatus.st_size > 1024 * 1024) {
+            return fail(@"Procursus runtime baseline manifest is missing", nil);
+        }
+        struct stat injectionHelperStatus;
+        if (lstat([sourceElleKitCompatLoader fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceExecWorker fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceExecInterposer fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceRuntimeTrust fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceRuntimeTrustClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode)) {
+            return fail(@"runtime admission helpers are missing", nil);
         }
         struct stat repositoryKeyStatus;
         if (lstat([sourceElleKitKey fileSystemRepresentation],
@@ -2621,6 +3697,52 @@ int main(int argc, char *argv[]) {
                         [destinationProcursus UTF8String]);
         }
 
+        NSUInteger procursusRuntimeUpdated = 0;
+        NSUInteger procursusRuntimeCurrent = 0;
+        NSUInteger procursusRuntimeDiverged = 0;
+        NSString *procursusRuntimeError = nil;
+        if (!refresh_procursus_runtime_executables(
+                sourceProcursus, sourceProcursusRuntimeBaseline,
+                &procursusRuntimeUpdated, &procursusRuntimeCurrent,
+                &procursusRuntimeDiverged, &procursusRuntimeError)) {
+            return fail(procursusRuntimeError, nil);
+        }
+        log_message("procursusRuntimeExecutables updated=%lu current=%lu "
+                    "diverged=%lu",
+                    (unsigned long)procursusRuntimeUpdated,
+                    (unsigned long)procursusRuntimeCurrent,
+                    (unsigned long)procursusRuntimeDiverged);
+
+        bool earlyExecWorkerUpdated = false;
+        bool earlyExecInterposerUpdated = false;
+        bool earlyRuntimeBaselineUpdated = false;
+        NSString *earlyRuntimeAdmissionError = nil;
+        if (!install_managed_apt_file(
+                sourceExecWorker, @"/var/jb/usr/libexec",
+                @"codex-exec-worker", 16 * 1024 * 1024, 0755,
+                "runtimeExecWorkerEarly", &earlyExecWorkerUpdated,
+                &earlyRuntimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceExecInterposer, @"/var/jb/usr/lib",
+                @"codex-exec-interposer.dylib", 16 * 1024 * 1024, 0755,
+                "runtimeExecInterposerEarly", &earlyExecInterposerUpdated,
+                &earlyRuntimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceBaseCdhashes,
+                @"/var/jb/usr/share/codex-runtime-admission",
+                @"base-cdhashes.txt", 1024 * 1024, 0644,
+                "runtimeAdmissionBaselineEarly", &earlyRuntimeBaselineUpdated,
+                &earlyRuntimeAdmissionError)) {
+            return fail(earlyRuntimeAdmissionError, nil);
+        }
+        setenv("CODEX_RUNTIME_ADMISSION", "debugged-worker-v1", 1);
+        unsetenv("DYLD_INSERT_LIBRARIES");
+        log_message("runtimeAdmissionTransport=pinned-load workerUpdated=%s "
+                    "interposerUpdated=%s baselineUpdated=%s",
+                    earlyExecWorkerUpdated ? "true" : "false",
+                    earlyExecInterposerUpdated ? "true" : "false",
+                    earlyRuntimeBaselineUpdated ? "true" : "false");
+
         NSString *rootlessLaunchctl = @"/var/jb/usr/bin/launchctl";
         NSString *rootlessLaunchctlBackup = nil;
         BOOL launchctlMatches =
@@ -2754,21 +3876,36 @@ int main(int argc, char *argv[]) {
 
         bool elleKitKeyUpdated = false;
         bool bigBossKeyUpdated = false;
+        bool aptListNormalizerUpdated = false;
         bool repositoryCompatibilityUpdated = false;
+        bool runtimeTrustAptConfigUpdated = false;
         NSString *repositoryMetadataError = nil;
         if (!install_managed_apt_file(
                 sourceElleKitKey, @"/var/jb/etc/apt/trusted.gpg.d",
-                @"dopamine-ellekit.gpg", 64 * 1024, "repositoryKeyring",
+                @"dopamine-ellekit.gpg", 64 * 1024, 0644,
+                "repositoryKeyring",
                 &elleKitKeyUpdated, &repositoryMetadataError) ||
             !install_managed_apt_file(
                 sourceBigBossKey, @"/var/jb/etc/apt/trusted.gpg.d",
-                @"dopamine-bigboss.gpg", 64 * 1024, "repositoryKeyring",
+                @"dopamine-bigboss.gpg", 64 * 1024, 0644,
+                "repositoryKeyring",
                 &bigBossKeyUpdated, &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceAptListNormalizer, @"/var/jb/usr/libexec",
+                @"codex-normalize-apt-lists", 64 * 1024, 0644,
+                "aptListNormalizer", &aptListNormalizerUpdated,
+                &repositoryMetadataError) ||
             !install_managed_apt_file(
                 sourceRepositoryCompatibility,
                 @"/var/jb/etc/apt/apt.conf.d",
-                @"99dopamine-repository-compat", 64 * 1024,
+                @"99dopamine-repository-compat", 64 * 1024, 0644,
                 "repositoryCompatibility", &repositoryCompatibilityUpdated,
+                &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceRuntimeTrustAptConfig,
+                @"/var/jb/etc/apt/apt.conf.d",
+                @"98codex-runtime-trust", 64 * 1024, 0644,
+                "runtimeTrustAptHook", &runtimeTrustAptConfigUpdated,
                 &repositoryMetadataError)) {
             return fail(repositoryMetadataError, nil);
         }
@@ -2780,6 +3917,56 @@ int main(int argc, char *argv[]) {
                                               &defaultSourcesError)) {
             return fail(defaultSourcesError, nil);
         }
+
+        bool elleKitInjectorUpdated = false;
+        bool execWorkerUpdated = false;
+        bool execInterposerUpdated = false;
+        bool runtimeTrustUpdated = false;
+        bool runtimeTrustClientUpdated = false;
+        bool runtimeBaselineUpdated = false;
+        NSString *runtimeAdmissionError = nil;
+        if (!install_managed_apt_file(
+                sourceElleKitCompatLoader, @"/var/jb/usr/libexec",
+                @"codex-ellekit-loader", 16 * 1024 * 1024, 0755,
+                "elleKitPerProcessInjector", &elleKitInjectorUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceExecWorker, @"/var/jb/usr/libexec",
+                @"codex-exec-worker", 16 * 1024 * 1024, 0755,
+                "runtimeExecWorker", &execWorkerUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceExecInterposer, @"/var/jb/usr/lib",
+                @"codex-exec-interposer.dylib", 16 * 1024 * 1024, 0755,
+                "runtimeExecInterposer", &execInterposerUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceRuntimeTrust, @"/var/jb/usr/libexec",
+                @"codex-runtime-trust", 16 * 1024 * 1024, 0755,
+                "runtimeTrustHelper", &runtimeTrustUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceRuntimeTrustClient, @"/var/jb/usr/libexec",
+                @"codex-runtime-trust-client", 1024 * 1024, 0755,
+                "runtimeTrustClient", &runtimeTrustClientUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceBaseCdhashes,
+                @"/var/jb/usr/share/codex-runtime-admission",
+                @"base-cdhashes.txt", 1024 * 1024, 0644,
+                "runtimeAdmissionBaseline", &runtimeBaselineUpdated,
+                &runtimeAdmissionError)) {
+            return fail(runtimeAdmissionError, nil);
+        }
+        log_message("runtimeAdmissionBaseline updated=%s path=%s",
+                    runtimeBaselineUpdated ? "true" : "false",
+                    "/var/jb/usr/share/codex-runtime-admission/"
+                    "base-cdhashes.txt");
+        setenv("CODEX_RUNTIME_ADMISSION", "debugged-worker-v1", 1);
+        unsetenv("DYLD_INSERT_LIBRARIES");
+        log_message("runtimeAdmissionEnvironment=ready transport=pinned-load "
+                    "interposer=%s",
+                    [kExecInterposerLibrary fileSystemRepresentation]);
 
         bool unsupportedKernelPackagesRemoved = false;
         NSString *kernelPackageError = nil;
@@ -2804,41 +3991,92 @@ int main(int argc, char *argv[]) {
                     (unsigned long)trustedPackageCurrent,
                     (unsigned long)trustedPackageNotApplicable);
 
-        // A transaction can stop after unpacking when its first executable was
-        // absent from the previously mounted static trust cache. The current
-        // Cryptex covers the pinned default tweak stack, so finish pending
-        // maintainer scripts before checking APT dependency consistency.
+        char *runtimeSelfTestArguments[] = {
+            (char *)[kExecWorkerExecutable fileSystemRepresentation],
+            "--self-test", NULL};
+        int runtimeSelfTestStatus = run_and_wait(
+            runtimeSelfTestArguments[0], runtimeSelfTestArguments);
+        log_message("runtimeAdmissionSelfTestExit=%d", runtimeSelfTestStatus);
+        if (runtimeSelfTestStatus != 0) {
+            return fail(@"on-device runtime admission self-test failed", nil);
+        }
+        log_message("elleKitInjectionMode=per-process "
+                    "launchdInjection=false pid1Guard=true");
+
+        // Repair runs must refresh dpkg's installed maintainer-script copy as
+        // well as the provisioned application. Reinstall the matched package
+        // after trusted package executables are ready so its UIKit trigger can
+        // execute under the static Cryptex trust cache.
+        if (repairMode) {
+            char *sileoRepairArguments[] = {
+                "/var/jb/usr/bin/dpkg", "-i",
+                (char *)[sourceSileo fileSystemRepresentation], NULL};
+            int sileoRepairStatus = run_and_wait_bounded(
+                sileoRepairArguments[0], sileoRepairArguments, 90000);
+            log_message("sileoRepairDpkgExit=%d", sileoRepairStatus);
+            if (sileoRepairStatus != 0) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"Sileo repair install exited %d",
+                                  sileoRepairStatus],
+                    nil);
+            }
+        }
+
+        // Finish pending maintainer scripts after the fixed worker/interposer
+        // is installed. Newly unpacked executables remain outside the static
+        // trust cache and are routed through that runtime backend.
         char *dpkgConfigureArguments[] = {
             "/var/jb/usr/bin/dpkg", "--configure", "-a", NULL};
-        int dpkgConfigureStatus = run_and_wait(
-            dpkgConfigureArguments[0], dpkgConfigureArguments);
+        int dpkgConfigureStatus =
+            repairMode
+                ? run_and_wait_bounded(dpkgConfigureArguments[0],
+                                       dpkgConfigureArguments, 90000)
+                : run_and_wait(dpkgConfigureArguments[0],
+                               dpkgConfigureArguments);
         log_message("dpkgConfigurePendingExit=%d", dpkgConfigureStatus);
-        if (dpkgConfigureStatus != 0) {
+        if (dpkgConfigureStatus != 0 && !repairMode) {
             return fail(
                 [NSString stringWithFormat:
                               @"pending package configuration exited %d",
                               dpkgConfigureStatus],
                 nil);
         }
+        if (dpkgConfigureStatus != 0) {
+            log_message("dpkgConfigurePendingAdvisory=true "
+                        "mode=registration-repair status=%d",
+                        dpkgConfigureStatus);
+        }
 
         bool repositoryMetadataChanged =
             elleKitKeyUpdated || bigBossKeyUpdated ||
-            repositoryCompatibilityUpdated || defaultSourcesUpdated;
+            aptListNormalizerUpdated || repositoryCompatibilityUpdated ||
+            runtimeTrustAptConfigUpdated || defaultSourcesUpdated;
         if (repositoryMetadataChanged) {
             char *apt_update_arguments[] = {
                 "/var/jb/usr/bin/apt-get", "update", "-o",
                 "Dpkg::Use-Pty=0", NULL};
             log_message("aptUpdateScope=all reason=repository-metadata-changed");
             int apt_update_status =
-                run_and_wait(apt_update_arguments[0], apt_update_arguments);
+                repairMode
+                    ? run_and_wait_bounded(apt_update_arguments[0],
+                                           apt_update_arguments, 60000)
+                    : run_and_wait(apt_update_arguments[0],
+                                   apt_update_arguments);
             log_message("aptUpdateExit=%d", apt_update_status);
-            if (apt_update_status != 0 ||
-                !apt_package_lists_are_populated()) {
+            bool packageListsPopulated = apt_package_lists_are_populated();
+            if (!packageListsPopulated ||
+                (!repairMode && apt_update_status != 0)) {
                 return fail(
                     [NSString stringWithFormat:
                                   @"APT index refresh exited %d",
                                   apt_update_status],
                     nil);
+            }
+            if (apt_update_status != 0) {
+                log_message("aptUpdateAdvisory=true mode=registration-repair "
+                            "lists=populated status=%d",
+                            apt_update_status);
             }
         } else if (!apt_package_lists_are_populated()) {
             NSString *procursusSources =
@@ -2855,7 +4093,11 @@ int main(int argc, char *argv[]) {
                 "-o", "Dir::Etc::sourceparts=-", NULL};
             log_message("aptUpdateScope=procursus");
             int apt_update_status =
-                run_and_wait(apt_update_arguments[0], apt_update_arguments);
+                repairMode
+                    ? run_and_wait_bounded(apt_update_arguments[0],
+                                           apt_update_arguments, 60000)
+                    : run_and_wait(apt_update_arguments[0],
+                                   apt_update_arguments);
             log_message("aptUpdateExit=%d", apt_update_status);
             if (apt_update_status != 0 ||
                 !apt_package_lists_are_populated()) {
@@ -2873,14 +4115,22 @@ int main(int argc, char *argv[]) {
             "/var/jb/usr/bin/apt-get", "check", "-o", "Dpkg::Use-Pty=0",
             NULL};
         int apt_check_status =
-            run_and_wait(apt_check_arguments[0], apt_check_arguments);
+            repairMode
+                ? run_and_wait_bounded(apt_check_arguments[0],
+                                       apt_check_arguments, 60000)
+                : run_and_wait(apt_check_arguments[0], apt_check_arguments);
         log_message("aptDependencyCheckExit=%d", apt_check_status);
-        if (apt_check_status != 0) {
+        if (apt_check_status != 0 && !repairMode) {
             return fail(
                 [NSString stringWithFormat:
                               @"APT dependency check exited %d",
                               apt_check_status],
                 nil);
+        }
+        if (apt_check_status != 0) {
+            log_message("aptDependencyCheckAdvisory=true "
+                        "mode=registration-repair status=%d",
+                        apt_check_status);
         }
 
         const char *sileoBinary =
@@ -3089,6 +4339,10 @@ int main(int argc, char *argv[]) {
         manifest[@"SileoSandboxBroker"] = brokerPath;
         manifest[@"SileoRootBroker"] = @CODEX_ROOT_BROKER_MACH_SERVICE;
         manifest[@"SileoRootBrokerExecutable"] = kRootBrokerExecutable;
+        manifest[@"RuntimeTrustClientExecutable"] =
+            kRuntimeTrustClientExecutable;
+        manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
+        manifest[@"RuntimeExecInterposerLibrary"] = kExecInterposerLibrary;
         manifest[@"SileoRootBrokerPlist"] = kRootBrokerPlist;
         manifest[@"SileoExecutableMode"] =
             @"developer-signed-main-with-constructor-broker";
@@ -3137,7 +4391,7 @@ int main(int argc, char *argv[]) {
 
         char *uiopen_arguments[] = {
             "/var/jb/usr/bin/uiopen", "--bundleid",
-            "org.coolstar.SileoStore", NULL};
+            (char *)[kSileoIdentifier UTF8String], NULL};
         int uiopen_status =
             run_and_wait(uiopen_arguments[0], uiopen_arguments);
         log_message("uiopenExit=%d", uiopen_status);

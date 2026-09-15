@@ -1,26 +1,28 @@
 # untitled
 
-Private iPhone18,2 / iOS 27.0 (24A435) security-research workspace.
+Private iOS 27 security-research workspace for the validated iPhone18,2
+(24A435) and iPhone13,1 / iPhone 12 mini (24A437) lanes.
 
 The primary workflow builds a Dopamine 3.x Procursus/Sileo compatibility
 environment, signs Sileo with the operator's own Apple Development profile,
 personalizes a generic Cryptex1 through Apple's service, validates the complete
-matched pair, and mounts the nonpersistent Cryptex on an eligible paired
+matched pair, and requests a persistent Cryptex install on an eligible paired
 device. A separate root-SSH proof of concept is also included. The expected
 environment has the SRD host tools and Cryptex1 personalization eligibility.
 
 ## Validated configuration
 
-- Device: iPhone18,2
-- OS: iOS 27.0
-- Build: 24A435
+- iPhone18,2: iOS 27.0 (24A435), including the native USB/RSD Frida proof
+- iPhone13,1 (iPhone 12 mini): iOS 27.0 (24A437), including the latest
+  Procursus/Sileo bootstrap deployment
 - Host: macOS with a full Xcode iPhoneOS SDK
 - Upstream Dopamine: branch `3.x`, commit
   `939a3a21400f0dc6d6163b2b5999ba2ace0d2732`
 - Python dependencies: pinned in `requirements.txt`
 
-The default device guard selects this exact product, version, and build. Use the
-documented override when deliberately porting to another configuration.
+The default device guard accepts only these exact device/version/build tuples.
+Pass an exact UDID when both validated devices are connected; use the documented
+override only when deliberately porting to another configuration.
 
 ## Prerequisites
 
@@ -137,8 +139,8 @@ That command performs the complete ordered workflow:
 10. Installs the provisioned app through the userspace tunnel.
 11. Captures fresh device identifiers and a nonce, requests a Cryptex1 ticket,
     and verifies every returned ticket field and payload digest.
-12. Runs a live validation, then installs the nonpersistent Cryptex and replaces
-    a single older project Cryptex when one is present.
+12. Runs a live validation, then requests the persistent Cryptex install and
+    replaces a single older project Cryptex when one is present.
 
 If exactly one validated device is connected it is selected automatically.
 When several eligible devices are present, pass the target UDID:
@@ -237,15 +239,34 @@ Successful host-side run metadata is saved in the newest
 Detailed on-device acceptance gates and the known-good run are documented in
 [`RUNNING_PROOF_20260914.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/RUNNING_PROOF_20260914.md).
 
-The Cryptex and its trust cache are nonpersistent. After reboot, the managed
-Procursus tree remains at `/var/jb`; reconnect and remount a fresh Cryptex with:
+The installer requests cryptexd's persistent DDI settings. The latest recorded
+iPhone 12 mini install used `persistence=2` and `noncePersistence=1` and
+completed successfully. A separate clean-reboot acceptance pass has not yet
+been captured, so treat reboot persistence as configured but not fully proven.
+An install run generates a fresh Cryptex version and device-bound
+personalization data; rerun it when changing fixed Cryptex contents or
+recovering from an OS update, nonce roll, invalidated ticket, or damaged state.
 
-```sh
-./Dopamine-CryptexBootstrap/setup.sh --install
-```
+## Current runtime status
 
-The driver generates a fresh Cryptex version and fresh device-bound
-personalization data for each run.
+The latest accepted iPhone 12 mini deployment is Cryptex version
+`1.0.20260915200055.800872`. Its validated trust cache contains 459 entries;
+its SHA-256 is
+`40ea85a4d0cb33393f5d5611b1bdd7c7d7084330cc0cc6abf37968325c5109c0`.
+The on-device runtime worker self-test and root-broker `whoami` both exited 0,
+the guarded ElleKit injector loaded into SpringBoard with status 0, package
+configuration and `apt-get check` exited 0, and PID 1 remained explicitly out
+of scope.
+
+A later BrokerProbe 1.0.14 update exposed the remaining package-install edge:
+three attempts stopped before payload unpack and `postinst` because the already
+installed image's APT pre-install client returned 100. The current source removes
+that obsolete hook and routes non-baseline executable launches through the
+fixed interposer and debugger-softened worker. That source change has not yet
+been rebuilt, installed, or used to pass BrokerProbe, so arbitrary package
+payload execution remains a pending acceptance gate rather than a claimed
+result. See [`ARBITRARY_EXEC_STRATEGY.md`](ARBITRARY_EXEC_STRATEGY.md) for the
+measured boundary and next tests.
 
 ## Default Sileo repositories
 
@@ -286,6 +307,81 @@ Select a device explicitly or run one command and save its result:
 generated payload, host key, client key, tickets, and results remain under the
 ignored `build` directory.
 
+## iOS 27 Frida runtime validation
+
+Native Frida 17.17.0 USB/RSD injection and Gum Interceptor are working on the
+iPhone18,2 / 24A435 lane. Frida's existing iOS 26+ page-plan support covered
+image patches but did
+not cover Gum's allocator-owned executable trampolines. The checked-in
+`Patches/frida-gum-17.17.0-ios27-code-page-plan.patch` adds those allocations
+to the debugger plan. The official host binding remains untouched.
+
+Install the host packages, select the proven universal patched Gadget, and run
+the bounded test against an exact UDID:
+
+```sh
+uv pip install --python build/frida-host-venv/bin/python \
+  -r requirements-frida.txt
+Scripts/select-frida-ios27-gadget.zsh patched
+Scripts/run-frida-ios27-usb-smoke.zsh --udid <UDID>
+```
+
+The wrapper uses Apple's Python 3.9 with the Frida abi3 extension from the host
+venv; this avoids a macOS 27 RSD-discovery failure observed under Homebrew
+Python. The test refuses a listener on device TCP 27042, starts only the exact
+`untitled-frida-debug-target`, proves an `Interceptor` callback and
+`NativeFunction(getpid)`, and revalidates the PID/path before cleanup. It never
+starts or restarts a device-side Frida server or policyd and contains no PID 1
+attach or signal path.
+
+After the smoke test passes, use the same transport in the interactive CLI:
+
+```sh
+Scripts/frida-ios27-usb.zsh -p <disposable-pid>
+```
+
+That wrapper is pinned to the validated UDID, refuses remote/ambiguous device
+selectors, and rejects PID 1/launchd targets. Keep the legacy device-side
+Frida server stopped so Fruity cannot select the wrong route.
+
+The proven patched Gadget has SHA-256
+`10a34a745f3e2342004847ee921119ff50fc41ea6ffc949b0c6a4ccd37182c71`.
+The untouched official rollback copy has SHA-256
+`1c5855bacfbe2e2ed3029b15a44110967609416676c2e3f9e998a83b1c3a4bf5`.
+Both are staged under `build/frida-ios27-host/`; switch explicitly with:
+
+```sh
+Scripts/select-frida-ios27-gadget.zsh patched
+Scripts/select-frida-ios27-gadget.zsh official
+```
+
+A source-pinned rebuild is available separately:
+
+```sh
+export IOS_CERTID=<Apple-Development-certificate-SHA1>
+Scripts/build-frida-ios27-gadget.zsh
+```
+
+The older `Scripts/frida-ios27-smoke-test.py` remains a guarded device-server
+GTA/non-GTA A/B diagnostic. Do not run it at the same time as the native USB
+test: its TCP 27042 server intentionally selects a different route.
+
+The Cryptex also carries a hard-coded dynamic-code probe. Its entitlement-only
+`MAP_JIT` attempt returned `EINVAL`, and its ordinary RW-to-RX child was killed.
+The successful alternative is `Scripts/bless_jit26_probe.py`, which uses the
+iOS 26+ debugger page broker and returned 42 from a newly written RX page.
+
+Together these results support one fixed trusted worker that accepts runtime
+modules as data, avoiding a trust-cache entry per module. They do not bypass
+AMFI for arbitrary fresh Mach-O `execve`. LiveContainer implications,
+appregistrard's separate role, platformization limits, exact artifact
+provenance, and the next worker/daemon architecture are documented in
+[`ARBITRARY_EXEC_STRATEGY.md`](ARBITRARY_EXEC_STRATEGY.md).
+
+Never attach Frida to launchd/PID 1. Reproduce launchd-facing behavior in a
+disposable project worker and inspect the real service through logs and other
+non-mutating diagnostics.
+
 ## Updating an existing clone
 
 ```sh
@@ -320,7 +416,7 @@ Open Xcode, sign in to the intended team, create an Apple Development
 certificate, and build an automatically signed iOS app to the target device.
 If multiple teams are present, use the signing overrides above.
 
-### `no connected, paired iPhone18,2 on iOS 27.0 (24A435) found`
+### `no connected validated iOS 27 target found`
 
 Unlock and reconnect the device, accept its trust prompt, and inspect:
 
@@ -369,7 +465,10 @@ issue.
 
 Build outputs are organized under `build/` and
 `Dopamine-upstream/CryptexBootstrap/out/`. Rebuild and repersonalize the Cryptex
-to add newly installed ad-hoc Mach-O files to its trust cache.
+when changing its fixed trusted infrastructure or static baseline. The current
+runtime design instead routes non-baseline package executables through the fixed
+worker, but that package-install path still needs the BrokerProbe acceptance run
+described above.
 
 See
 [`Dopamine-CryptexBootstrap/CryptexBootstrap/README.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/README.md)

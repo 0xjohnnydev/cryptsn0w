@@ -35,10 +35,10 @@ def patch_thread_utils(text: str) -> str:
     end = text.index("\nkern_return_t suspend_threads_except_for", start)
     replacement = r'''kern_return_t wait_for_thread(thread_act_t thread, uint64_t pcToWait, struct arm_unified_thread_state* stateOut)
 {
-	// A malformed or changed remote call must not spin forever while launchd's
-	// remaining threads are suspended. Fifteen seconds is deliberately much
-	// longer than the tiny pthread bootstrap and dlopen calls performed here.
-	static const unsigned int pollLimit = 15000;
+	// A malformed or changed remote call must not spin while the target's
+	// remaining threads are suspended. These in-process calls normally finish
+	// in milliseconds; three seconds leaves ample scheduling margin.
+	static const unsigned int pollLimit = 3000;
 	static const useconds_t pollIntervalUs = 1000;
 	struct arm_unified_thread_state stateToObserve;
 	int errCount = 0;
@@ -172,6 +172,106 @@ def patch_rop_inject(text: str) -> str:
 \t\telse if (dlopenRet) {
 ''',
         "dlopen status handling",
+    )
+    start = text.index("bool sandboxFixup(")
+    end = text.index("\nvoid injectDylibViaRop", start)
+    sandbox_replacement = r'''static bool consumeSandboxExtensionForPath(
+	task_t task, thread_act_t pthread, uint64_t consumeAddress,
+	const char *extensionClass, const char *path, uint32_t flags)
+{
+	char *extension = sandbox_extension_issue_file(extensionClass, path, flags);
+	if (extension == NULL) {
+		printf("[sandboxFixup] failed to issue class=%s path=%s errno=%d (%s)\n",
+		       extensionClass, path, errno, strerror(errno));
+		return false;
+	}
+
+	size_t remoteExtensionSize = 0;
+	vm_address_t remoteExtension = writeStringToTask(
+		task, extension, &remoteExtensionSize);
+	free(extension);
+	if (remoteExtension == 0) {
+		return false;
+	}
+
+	int64_t consumeResult = -1;
+	kern_return_t kr = arbCall(
+		task, pthread, (uint64_t *)&consumeResult, true, consumeAddress, 1,
+		remoteExtension);
+	vm_deallocate(task, remoteExtension, remoteExtensionSize);
+	printf("[sandboxFixup] consume class=%s path=%s flags=0x%x "
+	       "mach=%d handle=%lld\n",
+	       extensionClass, path, flags, kr, (long long)consumeResult);
+	return kr == KERN_SUCCESS && consumeResult > 0;
+}
+
+bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
+	const char *dylibPath, vm_address_t allImageInfoAddr)
+{
+	bool readNeeded = sandbox_check(
+		pid, "file-read-data", SANDBOX_FILTER_PATH |
+		SANDBOX_CHECK_NO_REPORT, dylibPath);
+	bool executableNeeded = sandbox_check(
+		pid, "file-map-executable", SANDBOX_FILTER_PATH |
+		SANDBOX_CHECK_NO_REPORT, dylibPath);
+	bool jailbreakPath = strncmp(dylibPath, "/var/jb/", 8) == 0;
+	if (!readNeeded && !executableNeeded && !jailbreakPath) {
+		printf("[sandboxFixup] extensions not needed, skipping...\n");
+		return true;
+	}
+
+	vm_address_t libSystemSandboxAddr = getRemoteImageAddress(
+		task, allImageInfoAddr,
+		"/usr/lib/system/libsystem_sandbox.dylib");
+	uint64_t consumeAddress = remoteDlSym(
+		task, libSystemSandboxAddr, "_sandbox_extension_consume");
+	if (consumeAddress == 0) {
+		printf("[sandboxFixup] sandbox_extension_consume unavailable\n");
+		return false;
+	}
+
+	bool success = true;
+	if (readNeeded) {
+		success &= consumeSandboxExtensionForPath(
+			task, pthread, consumeAddress, APP_SANDBOX_READ, dylibPath, 0);
+	}
+	if (executableNeeded) {
+		success &= consumeSandboxExtensionForPath(
+			task, pthread, consumeAddress, "com.apple.sandbox.executable",
+			dylibPath, 0);
+	}
+
+	if (jailbreakPath) {
+		// ElleKit scans and loads post-bootstrap dylibs and their dependencies
+		// after this trusted injector enters the target. A token for only the
+		// injector itself leaves that scan sandbox-denied. Grant the target a
+		// process-local recursive view of the managed jailbreak root instead.
+		success &= consumeSandboxExtensionForPath(
+			task, pthread, consumeAddress, APP_SANDBOX_READ, "/var/jb",
+			SANDBOX_EXTENSION_PREFIXMATCH);
+		success &= consumeSandboxExtensionForPath(
+			task, pthread, consumeAddress, "com.apple.sandbox.executable",
+			"/var/jb", SANDBOX_EXTENSION_PREFIXMATCH);
+	}
+	return success;
+}
+'''
+    text = text[:start] + sandbox_replacement + text[end:]
+    text = replace_once(
+        text,
+        '''\tsandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
+
+\tprintf("[injectDylibViaRop] Preparation done, now injecting!\\n");
+''',
+        '''\tif (!sandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr)) {
+\t\tprintf("[injectDylibViaRop] sandbox preparation failed; refusing injection\\n");
+\t\tthread_terminate(pthread);
+\t\treturn;
+\t}
+
+\tprintf("[injectDylibViaRop] Preparation done, now injecting!\\n");
+''',
+        "sandbox failure handling",
     )
     return text
 

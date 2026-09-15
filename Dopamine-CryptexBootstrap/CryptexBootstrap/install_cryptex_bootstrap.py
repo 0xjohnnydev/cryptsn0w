@@ -3,7 +3,8 @@
 
 This installer accepts only the generic 999.* identity, a non-Apple bundle
 identifier matching the build summary, an exact build-pinned multi-entry trust
-cache, a current device-bound IM4M, and nonpersistent cryptexd install flags.
+cache, a current device-bound IM4M, and the same persistent cryptexd install
+flags Xcode uses for its DeveloperDiskImage.
 The root job inside the image separately refuses to replace an existing
 ``/var/jb``.
 """
@@ -24,7 +25,11 @@ from typing import Any
 from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
 from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
 from pymobiledevice3.remote.xpc_message import XpcUInt64Type
-from pymobiledevice3.services.cryptexd import CryptexdService
+from pymobiledevice3.services.cryptexd import (
+    DDI_NONCE_PERSISTENCE,
+    DDI_PERSISTENCE,
+    CryptexdService,
+)
 from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 
@@ -206,8 +211,8 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
             "ticketChecks": ticket_checks,
             "installArguments": {
                 "imageTypeIndex": 10,
-                "persistence": 0,
-                "noncePersistence": 0,
+                "persistence": DDI_PERSISTENCE,
+                "noncePersistence": DDI_NONCE_PERSISTENCE,
                 "auth": 0,
             },
             "installedBefore": [
@@ -305,8 +310,8 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                     volumehash=volumehash,
                     cryptex1_properties=properties,
                     image_type_index=10,
-                    persistence=0,
-                    nonce_persistence=0,
+                    persistence=DDI_PERSISTENCE,
+                    nonce_persistence=DDI_NONCE_PERSISTENCE,
                     auth=0,
                 ),
                 timeout=INSTALL_TIMEOUT_SECONDS,
