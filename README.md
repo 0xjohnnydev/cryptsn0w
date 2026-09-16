@@ -29,8 +29,77 @@ Not yet proven:
   adding each payload to the trust cache.
 - [ ] Load a completely unsigned arbitrary dylib into SpringBoard or another
   protected process; the successful SpringBoard payload was trust-cached.
+- [ ] Demonstrate executable-page admission inside a system process that lacks
+  `get-task-allow`; obtaining its task port and loading a trusted dylib do not
+  prove that its newly generated native pages can execute.
 - [ ] Provide transparent system-wide `execve`, complete Mach-O semantics, or
   arbitrary new entitlements for loaded payloads.
+
+## Debugger/JIT boundary
+
+Two external statements that initially sounded contradictory describe different
+levels of authority:
+
+- The stock debugger-JIT route requires `get-task-allow` on the **target**
+  process. A privileged helper, root caller, or task port does not transfer that
+  entitlement to SpringBoard. On TXM/SPTM devices, setting `CS_DEBUGGED` alone is
+  also insufficient: each executable region must pass the debugger-backed page
+  preparation protocol. See the [current debugger-JIT integration guidance](https://github.com/StikDebug/StikJIT/blob/main/INTEGRATION.md).
+  XNU likewise keeps [task-port authorization](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_proc.c#L5585-L5664)
+  separate from `ptrace`'s call to
+  [`cs_allow_invalid`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_cs.c#L193-L245),
+  which has its own MAC-policy and `pmap` gates.
+- A public full-jailbreak daemon can claim to JIT processes and inject tweaks
+  because it is only one component of a kernel-assisted stack. Its
+  [system hook](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/systemhook/src/main.c)
+  manually requests debug state when ordinary `ptrace` cannot set it, while its
+  [kernel helper](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/libjailbreak/src/kernel.c)
+  directly changes process, `vm_map`, and `pmap` code-signing state. The same
+  stack also provides a
+  [dynamic trust-cache service](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/launchdhook/src/jbserver/jbdomain_systemwide.c)
+  for newly installed native files.
+
+The reported `vm_protect` argument-order fix has a version-specific explanation
+that points to a kernel-call broker rather than a new AMFI bypass. The public
+`vm_protect`/`mach_vm_protect` ABI remains
+`task, address, size, set_maximum, new_protection`, and this project's calls use
+that order. The kernel-internal `vm_map_protect` ABI did change, however:
+[XNU 10002 used](https://github.com/apple-oss-distributions/xnu/blob/xnu-10002.81.5/osfmk/vm/vm_map.c#L5890-L5895)
+`map, start, end, new_protection, set_maximum`, whereas
+[XNU 11215 uses](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/osfmk/vm/vm_map.c#L5602-L5607)
+`map, start, end, set_maximum, new_protection`. The installed KDK 27.0 arm64e
+DWARF confirms the newer order. A direct kernel caller ported from the older ABI
+would put the intended RX protection bits in `set_maximum` and `false` in
+`new_protection`, effectively requesting maximum protection `VM_PROT_NONE`.
+Correcting that swap would make the last page-protection transition begin
+working and could easily be described informally as fixing code signing.
+
+It still does not supply the missing authorization. With the correct order,
+[XNU treats the transition as a debugger/COW-region association](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/vm/vm_map.c#L6136-L6181),
+and the code-signing monitor permits such a
+[debug region only in an already debug-authorized address space](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/code_signing.h#L725-L742).
+On the current path, a denied association removes execute permission even
+though the outer protection operation can still return success. XNU also says
+that the monitor does not base enforcement on its diagnostic trust-level value,
+and its general address-space exemption is limited to stage-2-translation
+pmaps. Platformization or a high reported trust level therefore does not replace
+`CS_DEBUGGED`/TXM `allowsInvalidCode`. The clue explains how executable pages
+began working after that prerequisite existed; it does not explain how a non-
+`get-task-allow` system process acquired it.
+
+The particular daemon named in the external claim has no public implementation
+that was located, so its private mechanism remains unverified. The closest
+public analogue above is not a launch-daemon-only technique and does not
+establish an NDA-only bypass. This project currently has a durable root Cryptex
+daemon and privileged task-port access, but not the kernel-write,
+`vm_map`/`pmap`, or launchd-hook authority used by that public architecture. The
+separate [public ROP-injector documentation](https://github.com/opa334/opainject)
+also warns that an arm64e target crashes when the injected dylib is absent from
+the trust cache. The proven split is:
+
+- debugger-authorized JIT and Frida inside the fixed `get-task-allow` worker;
+- trusted-library task-port/ROP injection into SpringBoard;
+- no proof yet of arbitrary unsigned native execution inside SpringBoard.
 
 The primary workflow builds a Dopamine 3.x Procursus/Sileo compatibility
 environment, signs Sileo with the operator's own Apple Development profile,
