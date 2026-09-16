@@ -132,22 +132,40 @@ package outside the exact removal set depends on it.
 
 The installer requests cryptexd's persistent DDI settings. The latest recorded
 iPhone 12 mini install completed with `persistence=2` and
-`noncePersistence=1`. A separate clean-reboot acceptance pass has not yet been
-captured, so those settings are evidence of configured persistence, not yet a
-claim of fully verified boot recovery.
+`noncePersistence=1`. A subsequent full reboot remounted the exact build and
+started the daemon, Sileo, and root broker. The broker replayed the nonce-bound
+runtime trust journal before starting its injection lanes.
 
 ## Latest iPhone 12 mini acceptance
 
-Cryptex version `1.0.20260915200055.800872` installed successfully with a
-validated 459-entry trust cache. The runtime worker self-test, root-broker
-`whoami`, package configuration, and `apt-get check` exited 0; the guarded
-ElleKit loader also verified its SpringBoard injection with status 0. PID 1 is
-excluded by explicit guards.
+Cryptex version `1.0.20260916131317.993376` installed successfully with a
+validated 459-entry trust cache whose SHA-256 is
+`4c8d76c52cfc0d111ce17e1b7ee9c0db12382b11ab34882a46965dc888db4c19`.
+Its corrected trust-cached loader reproduced hookd's `RW|COPY -> write -> RX`
+sequence on the device, verified effective protection `0x5`, and called the
+generated function for return value 42. The final trusted ElleKit injection
+into SpringBoard returned status 0, and the injector heartbeat reports
+`safeMode=false`. PID 1 remains excluded by explicit guards.
 
-BrokerProbe 1.0.14 subsequently failed three update attempts before unpack or
-`postinst` because the installed image's obsolete APT pre-install client
-returned 100. The checked-in policy now removes that hook, but this revision has
-not yet been rebuilt and installed for a passing BrokerProbe run.
+BrokerProbe 1.0.18 then passed the post-boot dynamic-trust path. The broker
+generated a three-entry cache from the incoming archive, personalized the
+complete `gtcd` IM4P with the persisted Generic Cryptex1 nonce, and loaded it
+through AMFI with status 0 before `dpkg` unpack. The new arm64e dylib was absent
+from the static cache; direct loading into stable SpringBoard PID 1751 returned
+0, dyld image verification passed, and its constructor emitted a PID-matched
+marker. SpringBoard remained alive, no new crash appeared, heartbeats stayed
+`safeMode=false`, and PID 1 remained excluded. See
+[`iphone12mini-postboot-dynamic-trust-20260916.md`](../../findings/iphone12mini-postboot-dynamic-trust-20260916.md)
+for the exact results and hashes.
+
+The accepted personalized cache is also persisted only after AMFI returns 0.
+Entries are kept under a root-owned, mode-0700 journal epoch derived from the
+persisted nonce, named by SHA-256, and validated for ownership, link count,
+permissions, size, and digest before replay. On the clean-reboot pass, the first
+pre-replay BrokerProbe load failed, journal replay returned 0, and BrokerProbe's
+constructor then ran in new SpringBoard PID 37. The dylib CDHash remained absent
+from the static cache and the post-boot log contained no new TSS request. See
+[`iphone12mini-clean-reboot-runtime-trust-20260916.md`](../../findings/iphone12mini-clean-reboot-runtime-trust-20260916.md).
 
 ## Runtime model
 
@@ -157,8 +175,10 @@ cache for the stable infrastructure. Direct executable launches are attempted
 first; non-baseline/admission-failing package Mach-Os are routed through the
 fixed worker's bounded `--macho` path. Rebuild and repersonalize when the fixed
 trusted infrastructure or baseline changes, not once per package payload. Full
-Mach-O compatibility and the corrected package-install path remain explicit
-acceptance work rather than proven transparent system-wide `execve` behavior.
+Mach-O compatibility remains explicit acceptance work rather than proven
+transparent system-wide `execve` behavior. New package dylibs with structurally
+valid Apple ad-hoc CodeDirectories can now take the post-boot `gtcd` path;
+completely unsigned or malformed files cannot.
 
 Sileo's Featured cards can reference optional repositories in addition to the
 standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's

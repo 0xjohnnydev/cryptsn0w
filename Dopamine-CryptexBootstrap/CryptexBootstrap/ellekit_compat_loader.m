@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -38,6 +39,8 @@ static const char *const kPageProbePid = "--page-probe-pid";
 #define CODEX_CS_HARD 0x00000100U
 #define CODEX_CS_KILL 0x00000200U
 #define CODEX_CS_DEBUGGED 0x10000000U
+#define CODEX_WAIT_ATTEMPTS 500U
+#define CODEX_WAIT_DELAY_USEC (10U * 1000U)
 
 extern int csops(pid_t pid, unsigned int operation, void *address,
                  size_t size);
@@ -292,9 +295,53 @@ static bool read_supported_target(pid_t pid, char path[PATH_MAX]) {
            supported_target_path(path);
 }
 
+static bool wait_for_trace_stop(pid_t pid, int *status) {
+    for (unsigned int attempt = 0; attempt < CODEX_WAIT_ATTEMPTS; ++attempt) {
+        errno = 0;
+        pid_t result = waitpid(pid, status, WUNTRACED | WNOHANG);
+        if (result == pid) {
+            if (WIFSTOPPED(*status) && WSTOPSIG(*status) == SIGSTOP) {
+                return true;
+            }
+            errno = EPROTO;
+            return false;
+        }
+        if (result < 0 && errno != EINTR) {
+            return false;
+        }
+        usleep(CODEX_WAIT_DELAY_USEC);
+    }
+    errno = ETIMEDOUT;
+    return false;
+}
+
+static int detach_traced_target(pid_t pid, int *savedError) {
+    int result = -1;
+    *savedError = 0;
+    for (unsigned int attempt = 0; attempt < CODEX_WAIT_ATTEMPTS; ++attempt) {
+        errno = 0;
+        result = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
+        *savedError = result == 0 ? 0 : errno;
+        if (result == 0 ||
+            (*savedError != EBUSY && *savedError != EINTR)) {
+            break;
+        }
+        usleep(CODEX_WAIT_DELAY_USEC);
+    }
+    return result;
+}
+
 static bool soften_target(pid_t pid, const char *expectedPath) {
     uint32_t before = 0;
     uint32_t after = 0;
+    char initialPath[PATH_MAX];
+    bool sameInitialProcess = read_supported_target(pid, initialPath) &&
+                              strcmp(initialPath, expectedPath) == 0;
+    if (!sameInitialProcess) {
+        unified_loader_log("elleKitTargetCodesign pid=%d sameInitial=false",
+                           pid);
+        return false;
+    }
     if (csops(pid, CODEX_CS_OPS_STATUS, &before, sizeof(before)) == 0 &&
         (before & CODEX_CS_DEBUGGED) != 0 &&
         (before & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0) {
@@ -314,45 +361,64 @@ static bool soften_target(pid_t pid, const char *expectedPath) {
                            pid, before, errno);
         return false;
     }
-    int detachResult = -1;
+    int stopStatus = 0;
+    bool traceStopped = wait_for_trace_stop(pid, &stopStatus);
+    int waitError = traceStopped ? 0 : errno;
+
+    char stoppedPath[PATH_MAX];
+    bool sameStoppedProcess =
+        traceStopped && read_supported_target(pid, stoppedPath) &&
+        strcmp(stoppedPath, expectedPath) == 0;
+
     int detachError = 0;
-    for (unsigned int attempt = 0; attempt < 500; ++attempt) {
-        errno = 0;
-        detachResult = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
-        detachError = detachResult == 0 ? 0 : errno;
-        if (detachResult == 0 ||
-            (detachError != EBUSY && detachError != EINTR)) {
-            break;
-        }
-        usleep(10 * 1000);
-    }
+    int detachResult = detach_traced_target(pid, &detachError);
     if (detachResult != 0) {
         fprintf(stderr,
-                "compat-loader: pid=%d codesign detach failed: %s\n", pid,
+                "compat-loader: pid=%d codesign stop=%s waitError=%d "
+                "detach failed: %s\n",
+                pid, traceStopped ? "true" : "false", waitError,
                 strerror(detachError));
         unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
-                           "detach=false errno=%d",
-                           pid, before, detachError);
+                           "stopped=%s waitError=%d detach=false errno=%d",
+                           pid, before, traceStopped ? "true" : "false",
+                           waitError, detachError);
         return false;
     }
 
     char currentPath[PATH_MAX];
-    bool sameProcess = read_supported_target(pid, currentPath) &&
+    bool sameProcess = sameStoppedProcess &&
+                       read_supported_target(pid, currentPath) &&
                        strcmp(currentPath, expectedPath) == 0;
+    int continueResult = -1;
+    int continueError = 0;
+    if (sameProcess) {
+        errno = 0;
+        continueResult = kill(pid, SIGCONT);
+        continueError = continueResult == 0 ? 0 : errno;
+    }
     bool softened = csops(pid, CODEX_CS_OPS_STATUS, &after, sizeof(after)) ==
                         0 &&
                     (after & CODEX_CS_DEBUGGED) != 0 &&
                     (after & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
     printf("compat-loader: pid=%d codesign before=0x%08x after=0x%08x "
-           "sameProcess=%s softened=%s\n",
-           pid, before, after, sameProcess ? "true" : "false",
+           "stopped=%s stopSignal=%d sameProcess=%s continued=%s "
+           "softened=%s\n",
+           pid, before, after, traceStopped ? "true" : "false",
+           traceStopped ? WSTOPSIG(stopStatus) : 0,
+           sameProcess ? "true" : "false",
+           continueResult == 0 ? "true" : "false",
            softened ? "true" : "false");
     unified_loader_log("elleKitTargetCodesign pid=%d before=0x%08x "
-                       "after=0x%08x sameProcess=%s softened=%s",
+                       "after=0x%08x stopped=%s stopSignal=%d waitError=%d "
+                       "sameProcess=%s continued=%s continueError=%d "
+                       "softened=%s",
                        pid, before, after,
+                       traceStopped ? "true" : "false",
+                       traceStopped ? WSTOPSIG(stopStatus) : 0, waitError,
                        sameProcess ? "true" : "false",
+                       continueResult == 0 ? "true" : "false", continueError,
                        softened ? "true" : "false");
-    return sameProcess && softened;
+    return traceStopped && sameProcess && continueResult == 0 && softened;
 }
 
 static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
@@ -364,23 +430,20 @@ static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
     };
     const mach_vm_size_t pageSize = (mach_vm_size_t)getpagesize();
     mach_vm_address_t executeAddress = 0;
-    mach_vm_address_t writeAddress = 0;
+    mach_vm_address_t verificationAddress = 0;
     thread_act_t remoteThread = MACH_PORT_NULL;
-    vm_prot_t currentProtection = VM_PROT_NONE;
-    vm_prot_t maximumProtection = VM_PROT_NONE;
-    uint8_t prepareByte = 0x69;
+    vm_prot_t verificationCurrent = VM_PROT_NONE;
+    vm_prot_t verificationMaximum = VM_PROT_NONE;
     uint32_t readback[sizeof(kReturn42) / sizeof(kReturn42[0])] = {0};
     mach_vm_size_t readSize = 0;
-    bool usedCopy = false;
     uint64_t callReturn = UINT64_MAX;
     kern_return_t allocateResult = KERN_INVALID_ARGUMENT;
     kern_return_t executeProtectResult = KERN_INVALID_ARGUMENT;
-    kern_return_t prepareWriteResult = KERN_INVALID_ARGUMENT;
-    kern_return_t remapResult = KERN_INVALID_ARGUMENT;
     kern_return_t writeProtectResult = KERN_INVALID_ARGUMENT;
     kern_return_t codeWriteResult = KERN_INVALID_ARGUMENT;
     kern_return_t flushResult = KERN_INVALID_ARGUMENT;
     kern_return_t readResult = KERN_INVALID_ARGUMENT;
+    kern_return_t verificationRemapResult = KERN_INVALID_ARGUMENT;
     kern_return_t threadResult = KERN_INVALID_ARGUMENT;
     kern_return_t callResult = KERN_INVALID_ARGUMENT;
     int status = 88;
@@ -399,47 +462,21 @@ static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
         goto finished;
     }
 
-    /* Match the iOS 26+ debugger JIT protocol: allocate RX, then perform a
-     * bounded debugger write to associate the page with this task port. */
-    executeProtectResult = mach_vm_protect(
+    /* Match the present hookd patch sequence: make the mapping writable with
+     * copy semantics, write the bytes, and only then request RX.  The public
+     * mach_vm_protect order remains task, address, size, set_maximum,
+     * protection.  Requesting RX before mach_vm_write makes the write fail
+     * even for an already-authorized debugger target. */
+    writeProtectResult = mach_vm_protect(
         task, executeAddress, pageSize, FALSE,
-        VM_PROT_READ | VM_PROT_EXECUTE);
-    if (executeProtectResult != KERN_SUCCESS) {
-        status = 83;
-        goto finished;
-    }
-    prepareWriteResult = mach_vm_write(
-        task, executeAddress, (vm_offset_t)(uintptr_t)&prepareByte,
-        (mach_msg_type_number_t)sizeof(prepareByte));
-    if (prepareWriteResult != KERN_SUCCESS) {
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (writeProtectResult != KERN_SUCCESS) {
         status = 84;
         goto finished;
     }
 
-    remapResult = mach_vm_remap(
-        task, &writeAddress, pageSize, 0, VM_FLAGS_ANYWHERE, task,
-        executeAddress, FALSE, &currentProtection, &maximumProtection,
-        VM_INHERIT_NONE);
-    if (remapResult != KERN_SUCCESS) {
-        status = 85;
-        goto finished;
-    }
-    writeProtectResult = mach_vm_protect(
-        task, writeAddress, pageSize, FALSE,
-        VM_PROT_READ | VM_PROT_WRITE);
-    if (writeProtectResult != KERN_SUCCESS) {
-        usedCopy = true;
-        writeProtectResult = mach_vm_protect(
-            task, writeAddress, pageSize, FALSE,
-            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    }
-    if (writeProtectResult != KERN_SUCCESS) {
-        status = 86;
-        goto finished;
-    }
-
     codeWriteResult = mach_vm_write(
-        task, writeAddress, (vm_offset_t)(uintptr_t)kReturn42,
+        task, executeAddress, (vm_offset_t)(uintptr_t)kReturn42,
         (mach_msg_type_number_t)sizeof(kReturn42));
     if (codeWriteResult != KERN_SUCCESS) {
         status = 87;
@@ -456,6 +493,30 @@ static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
         readSize != sizeof(readback) ||
         memcmp(readback, kReturn42, sizeof(kReturn42)) != 0) {
         status = 87;
+        goto finished;
+    }
+
+    executeProtectResult = mach_vm_protect(
+        task, executeAddress, pageSize, FALSE,
+        VM_PROT_READ | VM_PROT_EXECUTE);
+    if (executeProtectResult != KERN_SUCCESS) {
+        status = 83;
+        goto finished;
+    }
+
+    /* Re-query the mapping after the RX transition. Never branch into the page
+     * unless the kernel reports that execute permission actually survived. */
+    verificationRemapResult = mach_vm_remap(
+        task, &verificationAddress, pageSize, 0, VM_FLAGS_ANYWHERE, task,
+        executeAddress, FALSE, &verificationCurrent, &verificationMaximum,
+        VM_INHERIT_NONE);
+    if (verificationRemapResult != KERN_SUCCESS) {
+        status = 93;
+        goto finished;
+    }
+    if ((verificationCurrent & (VM_PROT_READ | VM_PROT_EXECUTE)) !=
+        (VM_PROT_READ | VM_PROT_EXECUTE)) {
+        status = 94;
         goto finished;
     }
 
@@ -479,30 +540,31 @@ static int run_page_probe(task_t task, pid_t pid, const char *expectedPath,
 
 finished:
     printf("compat-loader: page-probe pid=%d status=%d page=0x%llx "
-           "write=0x%llx pageSize=0x%llx allocateKr=%d rxKr=%d "
-           "prepareWriteKr=%d remapKr=%d current=0x%x maximum=0x%x "
-           "writeProtectKr=%d usedCopy=%s codeWriteKr=%d flushKr=%d "
-           "readKr=%d readSize=0x%llx threadKr=%d callKr=%d return=%llu\n",
+           "verify=0x%llx pageSize=0x%llx allocateKr=%d writeProtectKr=%d "
+           "codeWriteKr=%d flushKr=%d rxKr=%d "
+           "readKr=%d readSize=0x%llx verifyRemapKr=%d verifyCurrent=0x%x "
+           "verifyMaximum=0x%x threadKr=%d callKr=%d return=%llu\n",
            pid, status, (unsigned long long)executeAddress,
-           (unsigned long long)writeAddress, (unsigned long long)pageSize,
-           allocateResult, executeProtectResult, prepareWriteResult,
-           remapResult, currentProtection, maximumProtection,
-           writeProtectResult, usedCopy ? "true" : "false",
-           codeWriteResult, flushResult, readResult,
-           (unsigned long long)readSize, threadResult, callResult,
+           (unsigned long long)verificationAddress,
+           (unsigned long long)pageSize, allocateResult, writeProtectResult,
+           codeWriteResult, flushResult, executeProtectResult, readResult,
+           (unsigned long long)readSize, verificationRemapResult,
+           verificationCurrent, verificationMaximum, threadResult, callResult,
            (unsigned long long)callReturn);
     unified_loader_log(
-        "elleKitPageProbe pid=%d status=%d allocate=%d rx=%d prepare=%d "
-        "remap=%d writeProtect=%d codeWrite=%d flush=%d call=%d return=%llu",
-        pid, status, allocateResult, executeProtectResult,
-        prepareWriteResult, remapResult, writeProtectResult, codeWriteResult,
-        flushResult, callResult, (unsigned long long)callReturn);
+        "elleKitPageProbe pid=%d status=%d allocate=%d writeProtect=%d "
+        "codeWrite=%d flush=%d rx=%d "
+        "verifyRemap=%d verifyCurrent=0x%x call=%d return=%llu",
+        pid, status, allocateResult, writeProtectResult, codeWriteResult,
+        flushResult, executeProtectResult,
+        verificationRemapResult, verificationCurrent, callResult,
+        (unsigned long long)callReturn);
     if (MACH_PORT_VALID(remoteThread)) {
         (void)thread_terminate(remoteThread);
         (void)mach_port_deallocate(mach_task_self(), remoteThread);
     }
-    if (writeAddress != 0) {
-        (void)mach_vm_deallocate(task, writeAddress, pageSize);
+    if (verificationAddress != 0) {
+        (void)mach_vm_deallocate(task, verificationAddress, pageSize);
     }
     if (executeAddress != 0) {
         (void)mach_vm_deallocate(task, executeAddress, pageSize);
@@ -581,6 +643,13 @@ int main(int argc, char *argv[]) {
             softened = soften_target(targetPid, targetPath);
         }
         if (runtimeMutation && !isPtrauthChild && !softened) {
+            if (pageProbePid) {
+                fprintf(stderr,
+                        "compat-loader: pid=%d debugged admission unavailable; "
+                        "refusing executable-page probe\n",
+                        targetPid);
+                return 79;
+            }
             fprintf(stderr,
                     "compat-loader: pid=%d debugged admission unavailable; "
                     "continuing with trusted-library task-port lane\n",

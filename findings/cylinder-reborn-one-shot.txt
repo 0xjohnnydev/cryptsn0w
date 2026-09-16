@@ -1,0 +1,17 @@
+target_pid=887
+target_image=/var/jb/Library/MobileSubstrate/DynamicLibraries/Cylinder.dylib
+compat-loader: pid=887 codesign before=0x26003301 after=0x26003301 stopped=true stopSignal=17 sameProcess=true continued=true softened=false
+compat-loader: pid=887 debugged admission unavailable; continuing with trusted-library task-port lane
+compat-loader: preflight ropLoop=0x19ca4281c libdyld=0x19b755000 dlopen=0x19b75809c libpthread=0x19b832000 pthreadSetSelf=0x19b83a380
+compat-loader: injecting /private/preboot/AF84400F382EE356DE3183209B5FCB94BD1979B9698B6310FF4032A69FE296287ADF46DEC659F94D31060DE1FE2670FA/dopamine-e56714/procursus/usr/lib/TweakInject/Cylinder.dylib into pid 887 path=/System/Library/CoreServices/SpringBoard.app/SpringBoard
+[prepareForMagic] done, ropLoop: 0x19CA4281C
+[createRemotePthread] Created bootstrap thread... now waiting on finish
+[createRemotePthread] Bootstrap done!
+[sandboxFixup] extensions not needed, skipping...
+[injectDylibViaRop] Preparation done, now injecting!
+[injectDylibViaRop] dlopen: 0x19B75809C, dlerror: 0x19B75AD38
+[arbCall] Set thread state for arbitary call
+[arbCall] Started thread, waiting for it to finish...
+[injectDylibViaRop] dlopen succeeded, library handle: 0x48c0039a921d60
+compat-loader: pid=887 image loaded=true path=/private/preboot/AF84400F382EE356DE3183209B5FCB94BD1979B9698B6310FF4032A69FE296287ADF46DEC659F94D31060DE1FE2670FA/dopamine-e56714/procursus/usr/lib/TweakInject/Cylinder.dylib
+loader_status=0

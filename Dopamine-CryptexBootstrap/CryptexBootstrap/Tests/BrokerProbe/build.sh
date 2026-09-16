@@ -12,7 +12,7 @@ CONTROL_DIRECTORY="$PACKAGE_ROOT/DEBIAN"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 MINIMUM_VERSION=15.0
 INSTALL_NAME=/var/jb/Library/MobileSubstrate/DynamicLibraries/BrokerProbe.dylib
-PACKAGE_VERSION=1.0.14
+PACKAGE_VERSION=1.0.18
 
 rm -rf "$PACKAGE_ROOT"
 mkdir -p "$DYLIB_DIRECTORY" "$PROBE_DIRECTORY" "$CONTROL_DIRECTORY"
@@ -32,14 +32,28 @@ lipo -create \
     "$OUTPUT_DIR/BrokerProbe.arm64.dylib" \
     "$OUTPUT_DIR/BrokerProbe.arm64e.dylib" \
     -output "$DYLIB_DIRECTORY/BrokerProbe.dylib"
-ldid -S "$DYLIB_DIRECTORY/BrokerProbe.dylib"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$DYLIB_DIRECTORY/BrokerProbe.dylib"
 xcrun --sdk iphoneos clang \
     -target "arm64-apple-ios${MINIMUM_VERSION}" \
     -isysroot "$SDK" \
     -Os -Wall -Wextra -Werror \
     "$SCRIPT_DIR/ArbitraryExecProbe.c" \
     -o "$PROBE_DIRECTORY/ArbitraryExecProbe"
-ldid -S "$PROBE_DIRECTORY/ArbitraryExecProbe"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$PROBE_DIRECTORY/ArbitraryExecProbe"
+xcrun --sdk iphoneos clang \
+    -target "arm64-apple-ios${MINIMUM_VERSION}" \
+    -isysroot "$SDK" \
+    -Os -Wall -Wextra -Werror \
+    "$SCRIPT_DIR/ProtectedDylibProbe.c" \
+    -o "$PROBE_DIRECTORY/ProtectedDylibProbe"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$PROBE_DIRECTORY/ProtectedDylibProbe"
+codesign --verify --strict --all-architectures \
+    "$DYLIB_DIRECTORY/BrokerProbe.dylib"
+codesign --verify --strict "$PROBE_DIRECTORY/ArbitraryExecProbe"
+codesign --verify --strict "$PROBE_DIRECTORY/ProtectedDylibProbe"
 install -m 0644 "$SCRIPT_DIR/BrokerProbe.plist" \
     "$DYLIB_DIRECTORY/BrokerProbe.plist"
 install -m 0644 "$SCRIPT_DIR/control" "$CONTROL_DIRECTORY/control"
@@ -50,5 +64,6 @@ dpkg-deb --root-owner-group --build "$PACKAGE_ROOT" \
 
 codesign -d --verbose=4 "$DYLIB_DIRECTORY/BrokerProbe.dylib" 2>&1
 codesign -d --verbose=4 "$PROBE_DIRECTORY/ArbitraryExecProbe" 2>&1
+codesign -d --verbose=4 "$PROBE_DIRECTORY/ProtectedDylibProbe" 2>&1
 shasum -a 256 \
     "$OUTPUT_DIR/com.openai.codex.broker-probe_${PACKAGE_VERSION}_iphoneos-arm64.deb"

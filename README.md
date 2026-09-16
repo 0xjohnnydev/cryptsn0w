@@ -13,22 +13,38 @@ Proven:
   configuration, and `apt-get check` with exit 0.
 - [x] Load the already trust-cached ElleKit injector into SpringBoard through
   privileged task-port access and ROP into SpringBoard's existing dyld code.
+- [x] Generate, personalize, and load a Generic Cryptex1 `gtcd` trust cache
+  after boot using Apple TSS, then inject its newly trusted BrokerProbe dylib
+  into stable SpringBoard PID 1751 and observe the constructor in that same
+  PID. This is the working compatibility fallback, not the no-TSS goal.
+- [x] Persist accepted runtime `gtcd` caches in a nonce-bound, root-owned
+  journal and replay them before broker/injector startup. After a full reboot,
+  the exact Cryptex remounted and BrokerProbe loaded in new SpringBoard PID 37
+  without another TSS request; heartbeats remained `safeMode=false`.
 - [x] Execute newly generated native code in a debugger-authorized process and
   run patched Frida Interceptor/NativeFunction over native USB/RSD.
 - [x] Reproduce the executable-page primitive in the installed on-device worker
-  without requiring the Mac.
+  without requiring the Mac; the direct device probe completed
+  `RW|COPY -> write -> RX`, observed effective protection `0x5`, and returned
+  `42` from the generated AArch64 function.
+- [x] Install BrokerProbe 1.0.18 through Sileo with package SHA-256
+  `ebd11b5bbdba0249f8d6dc3dafa67a2a0f4d3a4c5ce695316cb1fc56207c50f9`;
+  its fail-closed `postinst`, runtime trust load, protected-process injection,
+  image-list check, and PID-matched constructor marker all passed.
 - [x] Exclude launchd/PID 1 through explicit PID and executable-path guards.
 
 Not yet proven:
 
-- [ ] Complete a clean-reboot acceptance pass for Cryptex remount, trust-cache
-  availability, daemon startup, worker self-test, and Sileo launch.
-- [ ] Rebuild and install the no-APT-preinstall-hook revision, then pass
-  BrokerProbe through unpack, `postinst`, executable launch, and tweak loading.
-- [ ] Reliably run arbitrary package Mach-Os through the fixed worker without
-  adding each payload to the trust cache.
-- [ ] Load a completely unsigned arbitrary dylib into SpringBoard or another
-  protected process; the successful SpringBoard payload was trust-cached.
+- [ ] Admit a newly installed native tweak entirely on-device with Apple TSS
+  unavailable. The current per-package `gtcd` path is TSS-backed. The local
+  Dopamine mechanism instead appends cdhashes to the live TXM trust-cache list,
+  but requires retained `kread`/`kwrite`/`kalloc`; this Cryptex root environment
+  does not currently expose those primitives.
+- [ ] Generalize the single passing BrokerProbe executable test to arbitrary
+  package Mach-Os and full child-process semantics.
+- [ ] Load a completely unsigned or structurally malformed dylib. The proven
+  post-boot path accepts a valid Apple ad-hoc CodeDirectory without CMS; it does
+  not make an invalid signature structurally valid.
 - [ ] Demonstrate executable-page admission inside a system process that lacks
   `get-task-allow`; obtaining its task port and loading a trusted dylib do not
   prove that its newly generated native pages can execute.
@@ -37,68 +53,66 @@ Not yet proven:
 
 ## Debugger/JIT boundary
 
-Two external statements that initially sounded contradictory describe different
-levels of authority:
+Two independent TXM decisions explain the current behavior:
 
-- The stock debugger-JIT route requires `get-task-allow` on the **target**
-  process. A privileged helper, root caller, or task port does not transfer that
-  entitlement to SpringBoard. On TXM/SPTM devices, setting `CS_DEBUGGED` alone is
-  also insufficient: each executable region must pass the debugger-backed page
-  preparation protocol. See the [current debugger-JIT integration guidance](https://github.com/StikDebug/StikJIT/blob/main/INTEGRATION.md).
-  XNU likewise keeps [task-port authorization](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_proc.c#L5585-L5664)
-  separate from `ptrace`'s call to
-  [`cs_allow_invalid`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_cs.c#L193-L245),
-  which has its own MAC-policy and `pmap` gates.
-- A public full-jailbreak daemon can claim to JIT processes and inject tweaks
-  because it is only one component of a kernel-assisted stack. Its
-  [system hook](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/systemhook/src/main.c)
-  manually requests debug state when ordinary `ptrace` cannot set it, while its
-  [kernel helper](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/libjailbreak/src/kernel.c)
-  directly changes process, `vm_map`, and `pmap` code-signing state. The same
-  stack also provides a
-  [dynamic trust-cache service](https://github.com/mineek/DopamineekPublic/blob/5aeee4bb9516d9c9268c67279950e09e9fb2f03f/BaseBin/launchdhook/src/jbserver/jbdomain_systemwide.c)
-  for newly installed native files.
+1. `AllowInvalidCode` authorizes the target address space. In the
+   [exact 24A435 TXM](findings/txm-debug-region-24A435.md), developer mode is
+   mandatory and the request then needs either
+   `get-task-allow` on the target, or a caller with
+   `research.com.apple.license-to-operate` while the device's security-research
+   configuration is enabled. A separate development override exists but is not
+   enabled by this retail configuration. Root, a task port, platform status, and
+   a high diagnostic trust level are not substitutes for this state.
+2. `AssociateDebugRegion` authorizes each executable COW region. Its caller
+   needs `com.apple.private.cs.debugger`, and the target address space must
+   already have TXM `allowsInvalidCode`. If this association is denied, XNU can
+   remove execute permission while the outer protection operation still returns
+   success.
 
-The reported `vm_protect` argument-order fix has a version-specific explanation
-that points to a kernel-call broker rather than a new AMFI bypass. The public
-`vm_protect`/`mach_vm_protect` ABI remains
-`task, address, size, set_maximum, new_protection`, and this project's calls use
-that order. The kernel-internal `vm_map_protect` ABI did change, however:
-[XNU 10002 used](https://github.com/apple-oss-distributions/xnu/blob/xnu-10002.81.5/osfmk/vm/vm_map.c#L5890-L5895)
-`map, start, end, new_protection, set_maximum`, whereas
-[XNU 11215 uses](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/osfmk/vm/vm_map.c#L5602-L5607)
-`map, start, end, set_maximum, new_protection`. The installed KDK 27.0 arm64e
-DWARF confirms the newer order. A direct kernel caller ported from the older ABI
-would put the intended RX protection bits in `set_maximum` and `false` in
-`new_protection`, effectively requesting maximum protection `VM_PROT_NONE`.
-Correcting that swap would make the last page-protection transition begin
-working and could easily be described informally as fixing code signing.
+That is the primitive working in this root environment now. The fixed
+trust-cached worker spawns a `get-task-allow` child and attaches to it; XNU's
+[`cs_allow_invalid`](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_cs.c#L193-L245)
+path establishes the child address-space state, and the debugger-entitled fixed
+binary performs the page operations. Root launches and coordinates those
+admitted components; it is not itself the executable-page authorization.
 
-It still does not supply the missing authorization. With the correct order,
-[XNU treats the transition as a debugger/COW-region association](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/vm/vm_map.c#L6136-L6181),
-and the code-signing monitor permits such a
-[debug region only in an already debug-authorized address space](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/code_signing.h#L725-L742).
-On the current path, a denied association removes execute permission even
-though the outer protection operation can still return success. XNU also says
-that the monitor does not base enforcement on its diagnostic trust-level value,
-and its general address-space exemption is limited to stage-2-translation
-pmaps. Platformization or a high reported trust level therefore does not replace
-`CS_DEBUGGED`/TXM `allowsInvalidCode`. The clue explains how executable pages
-began working after that prerequisite existed; it does not explain how a non-
-`get-task-allow` system process acquired it.
+The public `vm_protect`/`mach_vm_protect` argument order is:
 
-The particular daemon named in the external claim has no public implementation
-that was located, so its private mechanism remains unverified. The closest
-public analogue above is not a launch-daemon-only technique and does not
-establish an NDA-only bypass. This project currently has a durable root Cryptex
-daemon and privileged task-port access, but not the kernel-write,
-`vm_map`/`pmap`, or launchd-hook authority used by that public architecture. The
-separate [public ROP-injector documentation](https://github.com/opa334/opainject)
-also warns that an arm64e target crashes when the injected dylib is absent from
-the trust cache. The proven split is:
+`task, address, size, set_maximum, new_protection`
+
+The current public hook daemon uses that ABI order end to end. Its
+[sender](Dopamine-upstream/BaseBin/libjailbreak/src/hookd.c#L104-L110) stores
+`set_maximum` before `prot`, and its
+[receiver](Dopamine-upstream/BaseBin/hookd/src/main.c#L71-L80) calls
+`vm_protect(task, address, size, set_maximum, prot)`. The first public revision
+containing this path already has the correct request layout.
+
+The debugger-page probe also required the operation sequence `RW|COPY`, write
+and flush, then RX; doing RX before the first `mach_vm_write` failed with
+`KERN_INVALID_ADDRESS`. That is a real page-operation constraint, but it was
+not opa's trust-cache "order" point. Upstream commit
+`123eef3689c1610d3c3718646ece50b8354c6b90` changes SPTM/TXM trust-cache
+insertion from the list head to the list tail, because TXM prepends signed
+caches and cannot update the `prevptr` in Dopamine's read-only allocation. That
+live-list insertion is the presently working no-TSS mechanism in a jailbreak
+that retains kernel read/write; this root environment has not yet supplied the
+required kernel/SPTM primitive.
+
+The same distinction explains the remaining SpringBoard boundary. The fixed
+worker presently satisfies both TXM decisions, but SpringBoard lacks
+`get-task-allow`, and this retail device does not enable the security-research
+configuration required by the LTO branch. Loading a trust-cached library and
+obtaining its task port do not set TXM `allowsInvalidCode`. A kernel-assisted
+stack can set that target state directly before routing page changes through its
+debugger-entitled hook daemon; this Cryptex environment does not currently have
+that kernel-write equivalent. The separate
+[public ROP-injector documentation](https://github.com/opa334/opainject) also
+warns that an arm64e target crashes when the injected dylib is absent from the
+trust cache. The proven split is:
 
 - debugger-authorized JIT and Frida inside the fixed `get-task-allow` worker;
-- trusted-library task-port/ROP injection into SpringBoard;
+- statically or dynamically trusted-library task-port/ROP injection into
+  SpringBoard;
 - no proof yet of arbitrary unsigned native execution inside SpringBoard.
 
 The primary workflow builds a Dopamine 3.x Procursus/Sileo compatibility
@@ -336,11 +350,14 @@ Successful host-side run metadata is saved in the newest
 `Dopamine-upstream/CryptexBootstrap/out/runs/<run-id>/flow-summary.json`.
 Detailed on-device acceptance gates and the known-good run are documented in
 [`RUNNING_PROOF_20260914.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/RUNNING_PROOF_20260914.md).
+The current iPhone 12 mini package and executable-page evidence is recorded in
+[`iphone12mini-runtime-acceptance-20260915.md`](findings/iphone12mini-runtime-acceptance-20260915.md).
 
 The installer requests cryptexd's persistent DDI settings. The latest recorded
-iPhone 12 mini install used `persistence=2` and `noncePersistence=1` and
-completed successfully. A separate clean-reboot acceptance pass has not yet
-been captured, so treat reboot persistence as configured but not fully proven.
+iPhone 12 mini install used `persistence=2` and `noncePersistence=1`. A full
+reboot then remounted the exact build and started its daemon, Sileo, and root
+broker. The broker replayed the persisted runtime trust cache before starting
+its injectors.
 An install run generates a fresh Cryptex version and device-bound
 personalization data; rerun it when changing fixed Cryptex contents or
 recovering from an OS update, nonce roll, invalidated ticket, or damaged state.
@@ -348,23 +365,32 @@ recovering from an OS update, nonce roll, invalidated ticket, or damaged state.
 ## Current runtime status
 
 The latest accepted iPhone 12 mini deployment is Cryptex version
-`1.0.20260915200055.800872`. Its validated trust cache contains 459 entries;
-its SHA-256 is
-`40ea85a4d0cb33393f5d5611b1bdd7c7d7084330cc0cc6abf37968325c5109c0`.
-The on-device runtime worker self-test and root-broker `whoami` both exited 0,
-the guarded ElleKit injector loaded into SpringBoard with status 0, package
-configuration and `apt-get check` exited 0, and PID 1 remained explicitly out
-of scope.
+`1.0.20260916131317.993376`. Its validated 459-entry static trust cache has
+SHA-256
+`4c8d76c52cfc0d111ce17e1b7ee9c0db12382b11ab34882a46965dc888db4c19`.
+The installed runtime-trust helper has SHA-256
+`3ed965eb83c6ca207b9fdb3366508fea20b8e6a1502fc025a82985d5002e58f0`
+and CDHash `79f622d1933399a79df8da466fc91d0ec10cf778`.
 
-A later BrokerProbe 1.0.14 update exposed the remaining package-install edge:
-three attempts stopped before payload unpack and `postinst` because the already
-installed image's APT pre-install client returned 100. The current source removes
-that obsolete hook and routes non-baseline executable launches through the
-fixed interposer and debugger-softened worker. That source change has not yet
-been rebuilt, installed, or used to pass BrokerProbe, so arbitrary package
-payload execution remains a pending acceptance gate rather than a claimed
-result. See [`ARBITRARY_EXEC_STRATEGY.md`](ARBITRARY_EXEC_STRATEGY.md) for the
-measured boundary and next tests.
+BrokerProbe 1.0.18 then proved the separate post-boot payload-trust boundary.
+The broker generated a three-entry runtime cache, TSS personalized its complete
+`gtcd` IM4P against the persisted Generic Cryptex1 nonce, and AMFI loaded it
+with status 0. The arm64e dylib CDHash
+`19dcf02f0ddf1a82695426b50c1819d6739f861a` was absent from the static
+baseline. Direct ROP `dlopen` into stable SpringBoard PID 1751 succeeded, the
+image-list check returned true, and the dylib constructor emitted a PID-matched
+marker. The same SpringBoard remained alive, no new crash report appeared, and
+fresh heartbeats reported `safeMode=false`. PID 1 remained explicitly out of
+scope. See
+[`iphone12mini-postboot-dynamic-trust-20260916.md`](findings/iphone12mini-postboot-dynamic-trust-20260916.md)
+for exact hashes, failure distinctions, and raw evidence links.
+
+The follow-up full reboot proved the persistence half. The broker replayed the
+root-owned journal with status 0 before becoming ready. BrokerProbe's CDHash was
+still absent from the static cache; nevertheless its constructor ran in the new
+SpringBoard PID 37, and no runtime-helper TSS or CFNetwork activity occurred
+between boot and activation. See
+[`iphone12mini-clean-reboot-runtime-trust-20260916.md`](findings/iphone12mini-clean-reboot-runtime-trust-20260916.md).
 
 ## Default Sileo repositories
 
@@ -559,14 +585,16 @@ issue.
   helpers.
 - `tools/atc-streamingzip-chain-static/`: AirTraffic/StreamingZip
   research helpers.
-- `findings/`: relocated-symlink finding documentation.
+- `findings/`: static-analysis and runtime evidence, including the TXM gates and
+  current iPhone 12 mini acceptance record.
 
 Build outputs are organized under `build/` and
 `Dopamine-upstream/CryptexBootstrap/out/`. Rebuild and repersonalize the Cryptex
 when changing its fixed trusted infrastructure or static baseline. The current
-runtime design instead routes non-baseline package executables through the fixed
-worker, but that package-install path still needs the BrokerProbe acceptance run
-described above.
+runtime design routes non-baseline package executables through the fixed worker;
+the BrokerProbe unpack, root `postinst`, and root executable test passed. Newly
+installed tweak dylibs still need an explicit trusted-payload or equivalent
+dynamic-trust design before they can be injected into SpringBoard.
 
 See
 [`Dopamine-CryptexBootstrap/CryptexBootstrap/README.md`](Dopamine-CryptexBootstrap/CryptexBootstrap/README.md)

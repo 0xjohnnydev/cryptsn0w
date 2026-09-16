@@ -8,7 +8,7 @@ a favorable entitlement dump as execution proof.
 
 ## Installed iPhone 12 mini result
 
-Cryptex version `1.0.20260915200055.800872` installs the runtime under `/var/jb`
+Cryptex version `1.0.20260916114900.304681` installs the runtime under `/var/jb`
 and starts the root broker as the system launch daemon
 `com.openai.codex.dopamine.sileo-root-broker`. The installed acceptance results
 were:
@@ -16,6 +16,10 @@ were:
 - on-device runtime-admission worker self-test: exit 0;
 - Sileo root-broker `whoami`: exit 0;
 - SpringBoard load of the trust-cached ElleKit `libinjector.dylib`: status 0;
+- post-boot Generic Cryptex1 trust-cache load and new BrokerProbe dylib
+  injection into stable SpringBoard PID 1751: status 0 with constructor marker;
+- direct on-device page probe: `RW|COPY`, write, flush, RX, effective
+  protection `0x5`, and generated-function return value 42;
 - package configuration and `apt-get check`: exit 0; and
 - launchd/PID 1 injection: disabled, with explicit PID and path guards.
 
@@ -25,24 +29,27 @@ spawn bridges; injecting ElleKit after those worker threads started was both
 redundant and caused the app to exit. Other eligible non-platform app targets
 and SpringBoard remain on the per-process ElleKit path.
 
-This is durable across app restarts and resprings while the Cryptex is mounted.
-The latest install completed successfully with cryptexd's persistent DDI values,
+This is durable across app restarts, resprings, and a full device reboot. The
+latest install completed successfully with cryptexd's persistent DDI values,
 `persistence=2` and `noncePersistence=1`, and a validated 459-entry trust cache.
 Its SHA-256 is
-`40ea85a4d0cb33393f5d5611b1bdd7c7d7084330cc0cc6abf37968325c5109c0`.
-A separate clean-reboot acceptance pass has not yet been recorded, so the flags
-show configured persistence without proving the complete reboot/remount path.
+`4c8d76c52cfc0d111ce17e1b7ee9c0db12382b11ab34882a46965dc888db4c19`.
+After the reboot, the exact Cryptex remounted and its daemon, Sileo, and broker
+returned before the runtime injection acceptance completed.
 
-After that accepted deployment, three BrokerProbe 1.0.14 update attempts failed
-before payload unpack and `postinst`: the installed image's APT pre-install
-client returned 100. The working tree removes the obsolete pre-install hook and
-keeps runtime admission at executable boundaries through the fixed interposer
-and debugger-softened worker. That revision is not yet rebuilt or installed, so
-BrokerProbe arbitrary execution and tweak delivery remain pending proofs.
+BrokerProbe 1.0.18 closed the separate payload-trust boundary. Before unpack,
+the broker generated a runtime trust cache for the package's three Mach-Os,
+wrapped it as `gtcd`, requested a Generic Cryptex1 ticket for the complete IM4P,
+and loaded it through AMFI with status 0. The package then configured as root.
+Its newly trusted arm64e dylib was loaded directly into stable SpringBoard PID
+1751; the loader's dyld image check and the dylib's PID-matched constructor
+marker both passed. SpringBoard remained PID 1751, no new crash report appeared,
+heartbeats remained `safeMode=false`, and PID 1 stayed excluded.
 
 ## Bottom line
 
-The useful no-per-payload-trust primitive now works in two forms:
+The useful no-per-payload-trust primitive works inside the fixed
+debugger-authorized worker:
 
 1. Start one stable, signed, trust-cached worker with kernel-accepted
    `get-task-allow`.
@@ -50,6 +57,62 @@ The useful no-per-payload-trust primitive now works in two forms:
    worker's address space.
 3. Submit page plans for every runtime-generated executable allocation.
 4. Supply scripts, bytecode, PIC modules, or manually loaded code as data.
+
+For new native files that need ordinary dyld admission, the current separate
+per-package path works after boot but still depends on Apple TSS:
+
+1. Extract the incoming archive to a private staging tree and enumerate its
+   Mach-Os before `dpkg` mutates `/var/jb`.
+2. Generate a version-1 trust cache from valid ad-hoc CodeDirectories.
+3. Wrap it as a `gtcd` IM4P and ask TSS for the Generic Cryptex1 manifest bound
+   to the persisted nonce-domain-3 value.
+4. Measure the complete IM4P, not the raw trust-cache bytes, then load the
+   stitched IMG4 through AMFI.
+5. Persist the accepted IMG4 only after that load returns 0, under a root-owned
+   content-addressed journal bound to the persisted nonce epoch.
+6. On each new boot, validate and replay that journal before exposing the root
+   broker or starting any injection lane.
+7. Install the same archive only after the initial load returns 0.
+
+This path therefore does not satisfy the project goal of installing arbitrary
+new tweaks with TSS unavailable. Replaying an already accepted cache after a
+reboot avoids another request for that same cache, but it does not make a new
+payload locally trusted.
+
+BrokerProbe's first runtime-cache ticket measured the raw cache and was validly
+signed for the wrong object, so AMFI rejected it. A later `ldid -S` probe still
+failed because Apple classified the image as structurally unsigned. The passing
+1.0.18 payload uses Apple's valid ad-hoc signature (`CS_ADHOC`) and requires no
+CMS identity. This distinction is essential: dynamic trust authorizes a valid
+CodeDirectory; it does not repair a malformed or absent one.
+
+The public `vm_protect` ABI remains
+`task, address, size, set_maximum, new_protection`, and the current public hook
+daemon serializes and calls those fields in that order. The page-operation
+sequence also matters: an old probe requested RX before its first
+`mach_vm_write`, so the write failed with `KERN_INVALID_ADDRESS`. Mirroring
+current hookd -- request `RW|COPY`, write, flush, then request RX -- produced
+status 0, verified effective RX protection, and returned 42 on the current
+24A437 device. This result is independent of the relevant trust-cache order
+clue.
+
+Opa's actual order change is upstream commit
+`123eef3689c1610d3c3718646ece50b8354c6b90`: on SPTM/TXM devices, Dopamine
+appends its jailbreak trust cache to the end of the live list instead of
+prepending it. TXM itself prepends signed caches and cannot write the `prevptr`
+of Dopamine's read-only allocation. This mechanism is local and TSS-free, but
+its implementation calls `kread`, `kwrite`, and `kalloc`. The current Cryptex
+root environment exposes neither Dopamine's `jbctl`/jbserver route nor an
+equivalent retained kernel/SPTM read-write provider.
+
+The order correction does not create the authorization. Exact 24A435 TXM has
+two separate gates: `AllowInvalidCode` needs developer mode plus either
+`get-task-allow` on the target or LTO from a caller while the security-research
+configuration is enabled; `AssociateDebugRegion` then needs a
+`com.apple.private.cs.debugger` caller and that target's `allowsInvalidCode`
+state. The installed worker satisfies the `get-task-allow` route today. The
+retail SpringBoard path does not, so its arbitrary executable pages remain a
+separate, unproven problem even though trusted-library injection works.
 
 The original host-driven form is the patched Frida/Fruity route described
 below. The installed form is `codex-exec-worker`, invoked by the root broker
@@ -94,10 +157,13 @@ failures into its fixed admitted worker instead of changing that kernel policy.
 | Does appregistrard make a Cryptex app discoverable? | Yes | Registration and FrontBoard launch are solved separately |
 | Does appregistrard bypass AMFI for arbitrary code? | No | It is a LaunchServices mechanism, not image admission policy |
 | Is a device-side `frida-server` required for the working path? | No | Native Fruity USB/RSD is the proven route |
-| Does the installed worker authorize and execute a generated RX page without the Mac? | Yes; self-test exited 0 on the iPhone 12 mini | The debugger/COW primitive now has an on-device implementation |
+| Does the installed worker authorize and execute a generated RX page without the Mac? | Yes; the direct iPhone 12 mini probe verified effective `0x5` protection and returned 42 | The debugger/COW primitive now has a device-side execution proof |
 | Can Sileo execute root package-manager commands through the daemon? | Yes; brokered `whoami` and package setup exited 0 | Sileo no longer depends on direct execution succeeding for every child Mach-O |
 | Can the guarded ElleKit lane load its trusted injector into SpringBoard? | Yes; image verification returned status 0 | Tweak loading no longer requires injecting `pspawn.dylib` into launchd |
-| Has the corrected no-APT-hook BrokerProbe package path passed? | Not yet; the installed older hook returned 100 before unpack | Rebuild/install the current policy before claiming arbitrary package payload execution |
+| Has the corrected no-APT-hook BrokerProbe package path passed? | Yes; unpack, root `postinst`, and root package-executable launch passed | One non-baseline package executable is proven without adding its payload to the static trust cache |
+| Can the post-boot broker add new valid ad-hoc payloads to a dynamic trust cache? | Yes; Generic Cryptex1 TSS and AMFI load both returned 0 for BrokerProbe 1.0.18 | Rebuilding the static Cryptex is no longer required for each properly signed package payload |
+| Did BrokerProbe's new SpringBoard tweak activate? | Yes; direct `dlopen`, dyld image verification, and a constructor marker all identified stable PID 1751 | The dynamically trusted dylib crossed the protected-process boundary |
+| Does dynamic payload trust survive a full reboot? | Yes; the nonce-bound journal replay returned 0 before broker readiness, then BrokerProbe activated in new SpringBoard PID 37 without another TSS request | Accepted per-package caches can be replayed locally on later boots |
 
 The disposable worker began with `csflags=0x26803b0d`, including
 `CS_GET_TASK_ALLOW`. PID 1 remained `/sbin/launchd` before attach, after detach,
@@ -334,18 +400,16 @@ testing those semantics, not just executing one function.
 
 ## Next milestones
 
-1. Rebuild and install the no-APT-hook revision, then pass BrokerProbe 1.0.14
-   through unpack, `postinst`, executable launch, and tweak activation.
-2. Perform and record a clean-reboot acceptance pass for Cryptex remount, trust
-   cache availability, broker startup, worker self-test, and Sileo launch.
-3. Expand `--macho` compatibility deliberately: chained fixups, arm64e pointer
+1. Repeat the reboot acceptance after an intentional nonce rotation and verify
+   that the old journal epoch remains isolated and fails closed.
+2. Expand `--macho` compatibility deliberately: chained fixups, arm64e pointer
    cases, initializers, TLS, unwind state, and commands that assume a distinct
    process identity.
-4. Add an authenticated, capability-limited general module API instead of
+3. Add an authenticated, capability-limited general module API instead of
    widening Sileo's command broker.
-5. Keep Frida as the interactive debugging path and port only demonstrated Gum
+4. Keep Frida as the interactive debugging path and port only demonstrated Gum
    primitives into the worker when they are needed in production.
-6. Treat transparent system-wide arbitrary `execve` as a separate kernel/AMFI
+5. Treat transparent system-wide arbitrary `execve` as a separate kernel/AMFI
    policy project; platformization alone does not provide it.
 
 The installed KDK and local XNU source are useful for symbols, panic triage,

@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
     }
 
     int result = dprintf(descriptor,
-                         "ARBITRARY_EXEC_PROBE version=1.0.14 pid=%d uid=%u "
+                         "ARBITRARY_EXEC_PROBE version=1.0.18 pid=%d uid=%u "
                          "gid=%u\n",
                          getpid(), getuid(), getgid());
     int saved_error = errno;
