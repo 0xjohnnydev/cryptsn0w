@@ -212,25 +212,39 @@ Detailed on-device acceptance gates and the known-good run are documented in
 [REDACTED: Related request, payload, or installation details omitted.]
 
 ## Current runtime status
+[REDACTED: TSS/Cryptex personalization and installation details are redacted from this educational source release.]
 
-The latest accepted iPhone 12 mini deployment is Cryptex version
-`1.0.20260915200055.800872`. Its validated trust cache contains 459 entries;
-its SHA-256 is
-`40ea85a4d0cb33393f5d5611b1bdd7c7d7084330cc0cc6abf37968325c5109c0`.
-The on-device runtime worker self-test and root-broker `whoami` both exited 0,
-the guarded ElleKit injector loaded into SpringBoard with status 0, package
-configuration and `apt-get check` exited 0, and PID 1 remained explicitly out
-of scope.
+The older validated lanes are unchanged: iPhone18,2 (24A435) with native
+USB/RSD Frida, and the iPhone13,1 / iPhone 12 mini (24A437) Procursus/Sileo
+deployment.
 
-A later BrokerProbe 1.0.14 update exposed the remaining package-install edge:
-three attempts stopped before payload unpack and `postinst` because the already
-installed image's APT pre-install client returned 100. The current source removes
-that obsolete hook and routes non-baseline executable launches through the
-fixed interposer and debugger-softened worker. That source change has not yet
-been rebuilt, installed, or used to pass BrokerProbe, so arbitrary package
-payload execution remains a pending acceptance gate rather than a claimed
-result. See [`ARBITRARY_EXEC_STRATEGY.md`](ARBITRARY_EXEC_STRATEGY.md) for the
-measured boundary and next tests.
+### Sileo installs as root and the LiveContainer posthook
+
+Sileo's install commands run through the root broker as UID 0, and the fixed
+Procursus parents carry the interposer as a pinned load command, so
+maintainer-script executables flow through the signexec/worker admission
+chain. After every successful `dpkg` or `apt-get install` brokered command the
+daemon runs the Sileo application posthook:
+
+1. re-registers `/var/jb/Applications` through appregistrard so installed
+   jailbreak apps stay launchable; and
+2. imports each installed app into the LiveContainer guest store at
+   `/var/jb/var/lib/codex-livecontainer/Applications` (mobile-owned), where the
+   patched host lists it without per-app LaunchServices registration.
+
+### Native JIT for LiveContainer
+
+The LiveContainer host is patched for the jailbreak's native JIT lane instead
+of SideStore/debugserver. When the Codex runtime marker is present, the host
+asks the root broker's JIT socket through the fixed, parent-pid-guarded
+`codex-jit-enable` helper; the broker validates the peer helper and the
+registered host executable, then spawns `codex-exec-worker --jit-attach <pid>`,
+whose `PT_ATTACHEXC` lane sets the sticky `CS_DEBUGGED` flag. `checkJITEnabled`
+then accepts either the trust-cache-admitted `get-task-allow` entitlement or
+the attached debugger lane, so LiveContainer takes its JIT path (library
+validation bypass, unpatched guest `dlopen`) and the "JIT was not enabled"
+gate no longer depends on an external JIT enabler. The JIT entitlement is
+assigned through this validated jailbreak admission lane, not by signing.
 
 ## Default Sileo repositories
 

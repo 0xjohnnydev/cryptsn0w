@@ -82,7 +82,9 @@ cp "$PROCURSUS_LIB/liblzma.5.dylib" \
     "$FRAMEWORKS_DIR/liblzma.5.dylib"
 cp "$PROCURSUS_LIB/libzstd.1.5.5.dylib" \
     "$FRAMEWORKS_DIR/libzstd.real.dylib"
-install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
+if otool -l "$APP_DIR/Sileo" | rg -q 'path /opt/procursus/lib'; then
+    install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
+fi
 install_name_tool -id @rpath/libzstd.real.dylib \
     "$FRAMEWORKS_DIR/libzstd.real.dylib"
 

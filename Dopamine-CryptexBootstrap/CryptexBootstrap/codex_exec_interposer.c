@@ -9,6 +9,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/fat.h>
+#include <mach-o/fixup-chains.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <pthread.h>
@@ -21,11 +22,14 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define CODEX_MAX_ARGUMENTS 1024U
 #define CODEX_RUNTIME_MARKER "CODEX_RUNTIME_ADMISSION=debugged-worker-v1"
 #define CODEX_MAX_BASE_CDHASHES 2048U
+#define CODEX_MAX_ENVIRONMENT_ENTRIES 4096U
+#define CODEX_SIGNEXEC_MAX_OUTPUT 4096U
 #define CODEX_CDHASH_SIZE 20U
 #define CODEX_CSMAGIC_CODEDIRECTORY 0xfade0c02U
 #define CODEX_CSMAGIC_EMBEDDED_SIGNATURE 0xfade0cc0U
@@ -39,8 +43,12 @@
 
 static const char *const kWorkerPath =
     "/var/jb/usr/libexec/codex-exec-worker";
+static const char *const kSignExecPath =
+    "/var/jb/usr/libexec/codex-signexec";
 static const char *const kRuntimeTrustClientPath =
     "/var/jb/usr/libexec/codex-runtime-trust-client";
+static const char *const kInterposerInstallPath =
+    "/var/jb/usr/lib/codex-exec-interposer.dylib";
 static const char *const kBaseCdhashesPath =
     "/var/jb/usr/share/codex-runtime-admission/base-cdhashes.txt";
 
@@ -156,6 +164,115 @@ static bool current_process_is_admitted(void) {
     const char *marker = getenv("CODEX_RUNTIME_ADMISSION");
     return geteuid() == 0 && marker != NULL &&
            strcmp(marker, "debugged-worker-v1") == 0;
+}
+
+static const char *environment_value(char *const environment[],
+                                     const char *name);
+
+/*
+ * Serotonin-style runtime admission: copy the managed Mach-O into the
+ * content-addressed codex-signexec store, let that fixed helper resign the
+ * copy ad-hoc with get-task-allow and load a personalized runtime trust cache
+ * for its cdhash, then execute the copy as a real process.  Falls back to the
+ * in-process worker when runtime trust personalization is unavailable.
+ */
+static bool signexec_prepare(const char *path, char copyPath[PATH_MAX]) {
+    if (gOriginalPosixSpawn == NULL) {
+        return false;
+    }
+    int pipeDescriptors[2] = {-1, -1};
+    if (pipe(pipeDescriptors) != 0) {
+        return false;
+    }
+    (void)fcntl(pipeDescriptors[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(pipeDescriptors[1], F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addclose(&actions, pipeDescriptors[0]);
+    posix_spawn_file_actions_adddup2(&actions, pipeDescriptors[1],
+                                     STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipeDescriptors[1]);
+    char *arguments[] = {
+        (char *)kSignExecPath, (char *)"prepare", (char *)path, NULL};
+    extern char ***_NSGetEnviron(void);
+    char **environCopy = *_NSGetEnviron();
+    ++gInterposeDepth;
+    pid_t child = 0;
+    int spawnResult = gOriginalPosixSpawn(&child, kSignExecPath, &actions,
+                                          NULL, arguments, environCopy);
+    --gInterposeDepth;
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipeDescriptors[1]);
+    if (spawnResult != 0) {
+        close(pipeDescriptors[0]);
+        return false;
+    }
+    char output[CODEX_SIGNEXEC_MAX_OUTPUT];
+    size_t used = 0;
+    while (used < sizeof(output) - 1U) {
+        ssize_t amount = read(pipeDescriptors[0], output + used,
+                              sizeof(output) - 1U - used);
+        if (amount > 0) {
+            used += (size_t)amount;
+            continue;
+        }
+        if (amount < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    close(pipeDescriptors[0]);
+    output[used] = '\0';
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || used == 0U) {
+        return false;
+    }
+    while (used > 0U &&
+           (output[used - 1U] == '\n' || output[used - 1U] == '\r')) {
+        output[--used] = '\0';
+    }
+    if (used == 0U || used >= PATH_MAX ||
+        strncmp(output, "/var/jb/", 8U) != 0 ||
+        strchr(output, '\n') != NULL) {
+        return false;
+    }
+    memcpy(copyPath, output, used + 1U);
+    return true;
+}
+
+static char *const *environment_with_interposer(char *const environment[],
+                                                char *storage[],
+                                                size_t storageCapacity) {
+    if (environment == NULL ||
+        environment_value(environment, "DYLD_INSERT_LIBRARIES") != NULL) {
+        return environment;
+    }
+    size_t count = 0;
+    while (count < CODEX_MAX_ENVIRONMENT_ENTRIES &&
+           environment[count] != NULL) {
+        ++count;
+    }
+    if (count + 2U > storageCapacity) {
+        return environment;
+    }
+    size_t index = 0;
+    for (; index < count; ++index) {
+        storage[index] = environment[index];
+    }
+    static char insertVariable[PATH_MAX + 32];
+    int length = snprintf(insertVariable, sizeof(insertVariable),
+                          "DYLD_INSERT_LIBRARIES=%s", kInterposerInstallPath);
+    if (length <= 0 || (size_t)length >= sizeof(insertVariable)) {
+        return environment;
+    }
+    storage[index++] = insertVariable;
+    storage[index] = NULL;
+    return (char *const *)storage;
 }
 
 static int hex_nibble(char value) {
@@ -533,6 +650,30 @@ static bool make_worker_arguments(const char *path, char *const arguments[],
 static int worker_execve(const char *path, char *const arguments[],
                          char *const environment[], const char *reason,
                          int directError) {
+    char copyPath[PATH_MAX];
+    if (signexec_prepare(path, copyPath)) {
+        char *copyEnvironment[CODEX_MAX_ENVIRONMENT_ENTRIES + 2U];
+        char *const *spawnEnvironment = environment_with_interposer(
+            environment, copyEnvironment,
+            sizeof(copyEnvironment) / sizeof(copyEnvironment[0]));
+        dprintf(STDERR_FILENO,
+                "codex-exec-interposer operation=execve path=%s copy=%s "
+                "reason=%s directError=%s backend=signexec\n",
+                path, copyPath, reason,
+                directError != 0 ? strerror(directError) : "none");
+        ++gInterposeDepth;
+        int result = gOriginalExecve(copyPath, arguments,
+                                     (char *const *)spawnEnvironment);
+        int copyError = errno;
+        --gInterposeDepth;
+        if (result == 0) {
+            return result;
+        }
+        dprintf(STDERR_FILENO,
+                "codex-exec-interposer operation=execve path=%s copy=%s "
+                "backend=signexec copyError=%s\n",
+                path, copyPath, strerror(copyError));
+    }
     char *workerArguments[CODEX_MAX_ARGUMENTS + 3U] = {0};
     if (!make_worker_arguments(path, arguments, workerArguments,
                                sizeof(workerArguments) /
@@ -563,6 +704,30 @@ static int worker_spawn(posix_spawn_function function, pid_t *restrict pid,
                         const char *operation) {
     if (function == NULL) {
         return directError != 0 ? directError : ENOSYS;
+    }
+    char copyPath[PATH_MAX];
+    if (signexec_prepare(path, copyPath)) {
+        char *copyEnvironment[CODEX_MAX_ENVIRONMENT_ENTRIES + 2U];
+        char *const *spawnEnvironment = environment_with_interposer(
+            environment, copyEnvironment,
+            sizeof(copyEnvironment) / sizeof(copyEnvironment[0]));
+        dprintf(STDERR_FILENO,
+                "codex-exec-interposer operation=%s path=%s copy=%s "
+                "reason=%s directError=%s backend=signexec\n",
+                operation, path, copyPath, reason,
+                directError != 0 ? strerror(directError) : "none");
+        ++gInterposeDepth;
+        int copyResult = function(pid, copyPath, actions, attributes,
+                                  arguments,
+                                  (char *const *)spawnEnvironment);
+        --gInterposeDepth;
+        if (copyResult == 0) {
+            return 0;
+        }
+        dprintf(STDERR_FILENO,
+                "codex-exec-interposer operation=%s path=%s copy=%s "
+                "backend=signexec copyError=%s\n",
+                operation, path, copyPath, strerror(copyResult));
     }
     char *workerArguments[CODEX_MAX_ARGUMENTS + 3U] = {0};
     if (!make_worker_arguments(path, arguments, workerArguments,
@@ -805,6 +970,178 @@ static bool write_rebound_pointer(void **slot, void *replacement) {
     return restoreResult == KERN_SUCCESS;
 }
 
+/*
+ * Modern Procursus builds bind imports only through dyld chained fixups and
+ * have no lazy/non-lazy pointer sections, so the symtab-driven rebind above
+ * finds nothing.  Walk the fixup chains instead: locate bind entries whose
+ * import ordinal names one of the targets and overwrite the non-authenticated
+ * GOT slot through the same COW page write.
+ */
+static void rebind_chained_fixups_image(
+    const struct mach_header_64 *header, uintptr_t imageEnd,
+    uintptr_t linkeditBase, uint32_t fixupsOffset, uint32_t fixupsSize,
+    struct codex_rebind_target targets[], size_t targetCount) {
+    if (fixupsSize < sizeof(struct dyld_chained_fixups_header)) {
+        return;
+    }
+    const uint8_t *fixupsBase =
+        (const uint8_t *)(uintptr_t)(linkeditBase + fixupsOffset);
+    if ((uintptr_t)fixupsBase < (uintptr_t)header ||
+        (uintptr_t)fixupsBase + fixupsSize > imageEnd) {
+        return;
+    }
+    const struct dyld_chained_fixups_header *fixups =
+        (const struct dyld_chained_fixups_header *)fixupsBase;
+    if (fixups->fixups_version != 0 ||
+        fixups->imports_format != DYLD_CHAINED_IMPORT ||
+        fixups->imports_count == 0 || fixups->imports_count > 65536U ||
+        fixups->starts_offset >= fixupsSize ||
+        fixups->imports_offset >= fixupsSize ||
+        fixups->symbols_offset >= fixupsSize) {
+        return;
+    }
+    uint32_t importsBytes = fixups->imports_count *
+                            (uint32_t)sizeof(struct dyld_chained_import);
+    if (fixups->imports_offset > fixupsSize - importsBytes ||
+        fixups->imports_offset > fixups->symbols_offset) {
+        return;
+    }
+    const struct dyld_chained_starts_in_image *starts =
+        (const struct dyld_chained_starts_in_image *)(fixupsBase +
+                                                      fixups->starts_offset);
+    if (fixups->starts_offset > fixupsSize - sizeof(*starts) ||
+        starts->seg_count == 0 || starts->seg_count > 64U) {
+        return;
+    }
+    const struct dyld_chained_import *imports =
+        (const struct dyld_chained_import *)(fixupsBase +
+                                             fixups->imports_offset);
+    const char *symbols = (const char *)(fixupsBase + fixups->symbols_offset);
+    size_t symbolsAvailable = fixupsSize - fixups->symbols_offset;
+
+    int *ordinalTargets = malloc(sizeof(int) * fixups->imports_count);
+    if (ordinalTargets == NULL) {
+        return;
+    }
+    for (uint32_t index = 0; index < fixups->imports_count; ++index) {
+        ordinalTargets[index] = -1;
+        uint32_t nameOffset = imports[index].name_offset;
+        if (nameOffset >= symbolsAvailable) {
+            continue;
+        }
+        const char *name = symbols + nameOffset;
+        size_t nameLimit = symbolsAvailable - nameOffset;
+        if (strnlen(name, nameLimit < 64U ? nameLimit : 64U) >= 63U) {
+            continue;
+        }
+        if (name[0] == '_') {
+            ++name;
+        }
+        for (size_t targetIndex = 0; targetIndex < targetCount;
+             ++targetIndex) {
+            if (targets[targetIndex].replacement != NULL &&
+                strcmp(name, targets[targetIndex].name) == 0) {
+                ordinalTargets[index] = (int)targetIndex;
+                break;
+            }
+        }
+    }
+
+    for (uint32_t segmentIndex = 0; segmentIndex < starts->seg_count;
+         ++segmentIndex) {
+        uint32_t segmentInfoOffset = starts->seg_info_offset[segmentIndex];
+        if (segmentInfoOffset == 0U ||
+            fixups->starts_offset + segmentInfoOffset >
+                fixupsSize - sizeof(struct dyld_chained_starts_in_segment)) {
+            continue;
+        }
+        const struct dyld_chained_starts_in_segment *segment =
+            (const struct dyld_chained_starts_in_segment *)
+                ((const uint8_t *)starts + segmentInfoOffset);
+        uint32_t format = segment->pointer_format;
+        bool arm64eFormat =
+            format == DYLD_CHAINED_PTR_ARM64E ||
+            format == DYLD_CHAINED_PTR_ARM64E_OFFSET ||
+            format == DYLD_CHAINED_PTR_ARM64E_USERLAND ||
+            format == DYLD_CHAINED_PTR_ARM64E_USERLAND24;
+        bool nativeFormat =
+            format == DYLD_CHAINED_PTR_64 ||
+            format == DYLD_CHAINED_PTR_64_OFFSET ||
+            format == DYLD_CHAINED_PTR_32;
+        if (!arm64eFormat && !nativeFormat) {
+            continue;
+        }
+        size_t stride =
+            (format == DYLD_CHAINED_PTR_ARM64E_USERLAND ||
+             format == DYLD_CHAINED_PTR_ARM64E_USERLAND24) ? 8U : 4U;
+        if ((segment->page_size != 0x1000U &&
+             segment->page_size != 0x4000U) ||
+            segment->page_count == 0U || segment->page_count > 8192U ||
+            segment->size <
+                offsetof(struct dyld_chained_starts_in_segment, page_start) +
+                    segment->page_count * sizeof(uint16_t)) {
+            continue;
+        }
+        uintptr_t segmentBase =
+            (uintptr_t)header + (uintptr_t)segment->segment_offset;
+        for (uint32_t page = 0; page < segment->page_count; ++page) {
+            uint16_t pageStart = segment->page_start[page];
+            if (pageStart == DYLD_CHAINED_PTR_START_NONE ||
+                (pageStart & DYLD_CHAINED_PTR_START_MULTI) != 0) {
+                continue;
+            }
+            uintptr_t pageAddress =
+                segmentBase + (uintptr_t)page * segment->page_size;
+            if (pageAddress < (uintptr_t)header ||
+                pageAddress + segment->page_size > imageEnd) {
+                continue;
+            }
+            uint32_t offset = pageStart;
+            uint32_t walked = 0;
+            while (offset + sizeof(uint64_t) <= segment->page_size &&
+                   walked++ < segment->page_size / 2U) {
+                uint64_t raw = 0;
+                memcpy(&raw, (const void *)(pageAddress + offset),
+                       sizeof(raw));
+                uint32_t next;
+                bool bind;
+                bool auth = false;
+                uint32_t ordinal = UINT32_MAX;
+                if (arm64eFormat) {
+                    bind = ((raw >> 62U) & 1U) != 0;
+                    auth = ((raw >> 63U) & 1U) != 0;
+                    next = (uint32_t)((raw >> 51U) & 0x7ffU);
+                    if (bind) {
+                        ordinal = format ==
+                                DYLD_CHAINED_PTR_ARM64E_USERLAND24
+                                      ? (uint32_t)(raw & 0xffffffU)
+                                      : (uint32_t)(raw & 0xffffU);
+                    }
+                } else {
+                    bind = ((raw >> 63U) & 1U) != 0;
+                    next = (uint32_t)((raw >> 51U) & 0xfffU);
+                    if (bind) {
+                        ordinal = (uint32_t)(raw & 0xffffffU);
+                    }
+                }
+                if (bind && !auth && ordinal < fixups->imports_count &&
+                    ordinalTargets[ordinal] >= 0) {
+                    if (write_rebound_pointer(
+                            (void **)(uintptr_t)(pageAddress + offset),
+                            targets[ordinalTargets[ordinal]].replacement)) {
+                        ++targets[ordinalTargets[ordinal]].count;
+                    }
+                }
+                if (next == 0U) {
+                    break;
+                }
+                offset += next * (uint32_t)stride;
+            }
+        }
+    }
+    free(ordinalTargets);
+}
+
 static void rebind_pointer_section(
     const struct section_64 *section, intptr_t slide,
     const struct nlist_64 *symbols, const char *strings, uint32_t stringSize,
@@ -853,6 +1190,8 @@ static void rebind_libiosexec_image(
     const struct symtab_command *symtab = NULL;
     const struct dysymtab_command *dysymtab = NULL;
     const struct segment_command_64 *linkedit = NULL;
+    const struct linkedit_data_command *chainedFixups = NULL;
+    uintptr_t imageEnd = 0;
     const uint8_t *cursor = (const uint8_t *)(header + 1);
     const uint8_t *commandsEnd = cursor + header->sizeofcmds;
     for (uint32_t index = 0; index < header->ncmds; ++index) {
@@ -871,6 +1210,9 @@ static void rebind_libiosexec_image(
         } else if (command->cmd == LC_DYSYMTAB &&
                    command->cmdsize >= sizeof(struct dysymtab_command)) {
             dysymtab = (const struct dysymtab_command *)command;
+        } else if (command->cmd == LC_DYLD_CHAINED_FIXUPS &&
+                   command->cmdsize >= sizeof(struct linkedit_data_command)) {
+            chainedFixups = (const struct linkedit_data_command *)command;
         } else if (command->cmd == LC_SEGMENT_64 &&
                    command->cmdsize >= sizeof(struct segment_command_64)) {
             const struct segment_command_64 *segment =
@@ -879,16 +1221,30 @@ static void rebind_libiosexec_image(
                         sizeof(segment->segname)) == 0) {
                 linkedit = segment;
             }
+            uintptr_t segmentEnd = (uintptr_t)(slide +
+                (intptr_t)segment->vmaddr + (intptr_t)segment->vmsize);
+            if (segmentEnd > imageEnd) {
+                imageEnd = segmentEnd;
+            }
         }
         cursor += command->cmdsize;
     }
-    if (symtab == NULL || dysymtab == NULL || linkedit == NULL) {
+    if (linkedit == NULL || imageEnd == 0) {
         return;
     }
 
     uintptr_t linkeditBase =
         (uintptr_t)(slide + (intptr_t)linkedit->vmaddr -
                     (intptr_t)linkedit->fileoff);
+    if (chainedFixups != NULL) {
+        rebind_chained_fixups_image(header, imageEnd, linkeditBase,
+                                    chainedFixups->dataoff,
+                                    chainedFixups->datasize, targets,
+                                    targetCount);
+    }
+    if (symtab == NULL || dysymtab == NULL) {
+        return;
+    }
     const struct nlist_64 *symbols =
         (const struct nlist_64 *)(linkeditBase + symtab->symoff);
     const char *strings = (const char *)(linkeditBase + symtab->stroff);

@@ -6,7 +6,12 @@ running iOS 27.0 (24A435) and the iPhone13,1 (iPhone 12 mini) running iOS 27.0
 still requires a separate proof. It does not treat a successful API return or
 a favorable entitlement dump as execution proof.
 
-## Installed iPhone 12 mini result
+## iPhone14,5 (24A5430a) verified deployment state
+
+The iPhone 13 lane now runs the complete stack with the following measured
+results:
+[REDACTED: TSS/Cryptex personalization and installation details are redacted from this educational source release.]
+
 
 Cryptex version `1.0.20260915200055.800872` installs the runtime under `/var/jb`
 and starts the root broker as the system launch daemon
@@ -92,6 +97,8 @@ failures into its fixed admitted worker instead of changing that kernel policy.
 | Can Sileo execute root package-manager commands through the daemon? | Yes; brokered `whoami` and package setup exited 0 | Sileo no longer depends on direct execution succeeding for every child Mach-O |
 | Can the guarded ElleKit lane load its trusted injector into SpringBoard? | Yes; image verification returned status 0 | Tweak loading no longer requires injecting `pspawn.dylib` into launchd |
 | Has the corrected no-APT-hook BrokerProbe package path passed? | Not yet; the installed older hook returned 100 before unpack | Rebuild/install the current policy before claiming arbitrary package payload execution |
+| Is the LiveContainer host granted JIT through the jailbreak? | Implemented, not yet accepted on device | `codex-jit-enable` + `--jit-attach` + patched `checkJITEnabled`; the entitlement is assigned through the validated admission lane |
+| Are Sileo-installed apps imported into LiveContainer automatically? | Implemented, not yet accepted on device | Post-install posthook copies `/var/jb/Applications` apps into the managed guest store for the patched host |
 
 The disposable worker began with `csflags=0x26803b0d`, including
 `CS_GET_TASK_ALLOW`. PID 1 remained `/sbin/launchd` before attach, after detach,
@@ -233,6 +240,21 @@ at runtime. The stable host receives the entitlements accepted from its own
 signature/admission. Code loaded into that address space operates with that
 host context; it does not bring a guest entitlement set with it.
 
+The one deliberate exception is the JIT entitlement for the fixed
+LiveContainer host: the jailbreak assigns it through the admission lane
+instead of a signing workflow. The host is patched to detect the Codex
+runtime, and when the kernel has not accepted its `get-task-allow`
+entitlement the host asks the root broker's JIT socket (through the fixed
+parent-pid-guarded `codex-jit-enable` helper) to attach the debugger lane.
+The broker validates the peer helper and the target executable path, then
+spawns `codex-exec-worker --jit-attach <pid>`, which performs the same
+`PT_ATTACHEXC` operation the worker's self-test already proved, sets the
+sticky `CS_DEBUGGED` flag, and detaches. `checkJITEnabled` then reports JIT
+as available, LiveContainer's own dyld bypass machinery takes the JIT path,
+and guest `dlopen` no longer depends on SideStore/debugserver. This is an
+explicit, path-validated jailbreak assignment of the JIT entitlement, not a
+general entitlement fabrication primitive.
+
 ## Why “platformization” is not a global allowlist
 
 Platform status can relax particular checks and is useful for a carefully
@@ -250,24 +272,41 @@ can do; it is not the mechanism that removes per-payload image admission.
 The implementation separates coordination from execution:
 
 ```text
-Sileo constructor ---- sandbox/file bridge ----+
-                                                v
-                                  system root broker launch daemon
-                                      |                    |
-                         direct spawn succeeds      admission-like failure
-                                      |                    |
-                                      |                    v
-                                      |          fixed GTA exec worker
-                                      |          debugger/COW + loader
-                                      v                    v
-                                  command result returned to Sileo
-
-root broker process watcher ---- guarded task port/ROP ---- trusted ElleKit
-               |                                             injector
-               +---- PID 1/launchd forbidden
-               +---- Sileo excluded (dedicated constructor path)
-               +---- platform apps excluded except SpringBoard
+[REDACTED: Related request, payload, or installation details omitted.]
 ```
+
+## Serotonin-style runtime code-signing lane (codex-signexec)
+
+The `codex-signexec` helper implements the copy/resign/trust-cache trick for
+payload executables (the "semijb" method, also used by Serotonin):
+
+[REDACTED: Related request, payload, or installation details omitted.]
+
+[REDACTED: Related request, payload, or installation details omitted.]
+
+[REDACTED: Related request, payload, or installation details omitted.]
+
+The bootstrap daemon runs a signexec self-test on every repair: it decodes the
+embedded unsigned probe (base64 so the static Cryptex trust cache never sees
+the Mach-O), prepares it through codex-signexec, spawns the resigned copy
+directly, and requires the probe's marker file
+(`signexecSelfTest=passed/failed` in the log). Failure is logged but does not
+abort the repair because the worker lane still covers execution.
+
+[REDACTED: Related request, payload, or installation details omitted.]
+
+## libiosexec chained-fixups rebinding
+
+Procursus' libiosexec binds `execve`/`posix_spawn`/`posix_spawnp` only through
+dyld chained fixups (format `DYLD_CHAINED_PTR_64_OFFSET`); it has no lazy or
+non-lazy pointer sections, so the original symtab-driven rebind pass matched
+zero slots (`rebind ... execve=0 posix_spawn=0 posix_spawnp=0`) and platformized
+Procursus tools never reached the fallback policy. The interposer now also
+walks `LC_DYLD_CHAINED_FIXUPS`: it resolves the three symbol names to import
+ordinals, walks each segment's chain starts, and COW-rewrites every
+non-authenticated bind slot that references them. Authenticated (arm64e PAC)
+slots are skipped deliberately.
+
 
 The coordinator, worker, ElleKit loader, and injector library are the fixed
 artifacts that must be admitted by the Cryptex trust cache. Each fallback
@@ -317,7 +356,7 @@ untrusted main executable; that is a different policy layer.
 | Goal | What is now viable | What remains unresolved |
 | --- | --- | --- |
 | Arbitrary native computation | Installed fixed worker plus on-device debugger/COW page authorization and runtime loader; no trust-cache entry per submitted module | A versioned public module ABI, authentication, and broader loader hardening |
-| Jailbreak command-line Mach-O through Sileo | Root broker first tries normal spawn, then routes admission failures through the worker's LiveContainer-style `--macho` mode | Full compatibility with every Mach-O feature and exact child-process semantics |
+| Jailbreak command-line Mach-O through Sileo | Root broker first tries normal spawn, then a resigned runtime-trust-cached real-process copy via codex-signexec, then the worker's LiveContainer-style `--macho` mode | On-device acceptance of the signexec lane (daemon self-test plus a dpkg package install) and full Mach-O compatibility for the loader fallback |
 | Arbitrary command-line Mach-O with transparent system-wide `execve` semantics | Not provided; the daemon is an explicit process-container strategy | Real signing, per-image trust, or a deliberate research/custom AMFI and code-signing-monitor policy |
 
 A userland loader can eventually emulate much of dyld, but it does not
@@ -328,10 +367,12 @@ testing those semantics, not just executing one function.
 
 ## Next milestones
 
-1. Rebuild and install the no-APT-hook revision, then pass BrokerProbe 1.0.14
-   through unpack, `postinst`, executable launch, and tweak activation.
+1. Pass BrokerProbe 1.0.14 through unpack, `postinst`, executable launch, and
+   tweak activation on the signexec lane; the daemon's boot-time signexec
+   self-test gates the primitive on every repair.
 2. Perform and record a clean-reboot acceptance pass for Cryptex remount, trust
-   cache availability, broker startup, worker self-test, and Sileo launch.
+   cache availability, broker startup, worker self-test, signexec re-trust, and
+   Sileo launch.
 3. Expand `--macho` compatibility deliberately: chained fixups, arm64e pointer
    cases, initializers, TLS, unwind state, and commands that assume a distinct
    process identity.

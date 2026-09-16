@@ -6,5 +6,4 @@ Description: End-to-end Sileo broker, arbitrary executable, and ElleKit admissio
 Maintainer: Codex Runtime Verification
 Author: Codex Runtime Verification
 Section: Tweaks
-Depends: ellekit
 Priority: optional

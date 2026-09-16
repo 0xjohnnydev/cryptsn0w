@@ -1,0 +1,15 @@
+diff --git a/appregistrard/Core/AppRegistration.swift b/appregistrard/Core/AppRegistration.swift
+--- a/appregistrard/Core/AppRegistration.swift
++++ b/appregistrard/Core/AppRegistration.swift
+@@ -108,7 +108,9 @@ struct AppRegistration {
+         guard !installedAppNames.isEmpty else {
+             throw lastRegistrationError ?? "No apps were registered with LaunchServices"
+         }
+ 
+-        Jindo.presentAppInstalledNotification(appNames: installedAppNames)
++        // One-off registrations run unattended from the bootstrap daemon. The
++        // Jindo alert would block the child until someone taps the phone.
++        logger.notice("Registered \(installedAppNames, privacy: .public)")
+     }
+ 
+     private func runInstallCoordination(urls: [URL]) throws {

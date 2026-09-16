@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>application-identifier</key>
+    <string>476NKR87Q7.com.kdt.livecontainer</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>476NKR87Q7</string>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>476NKR87Q7.*</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.kdt.livecontainer</string>
+        <string>group.com.SideStore.SideStore.476NKR87Q7</string>
+        <string>group.com.rileytestut.AltStore.476NKR87Q7</string>
+    </array>
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+    <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+    <true/>
+    <key>com.apple.private.MobileContainerManager.allowed</key>
+    <true/>
+    <key>com.apple.private.MobileContainerManager.proxy</key>
+    <true/>
+    <key>com.apple.private.security.container-manager</key>
+    <true/>
+    <key>com.apple.private.security.no-container</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.sandbox</key>
+    <false/>
+    <key>com.apple.private.security.storage.AppBundles</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+    <key>com.apple.private.security.storage.MobileContainerManager</key>
+    <true/>
+    <key>com.apple.private.security.storage.containers</key>
+    <true/>
+    <key>com.apple.private.coreservices.canmaplsdatabase</key>
+    <true/>
+    <key>com.apple.private.coreservices.can-perform-rebuild-registration</key>
+    <true/>
+    <key>com.apple.private.skip-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.debugger</key>
+    <true/>
+    <key>dynamic-codesigning</key>
+    <true/>
+    <key>get-task-allow</key>
+    <true/>
+    <key>platform-application</key>
+    <true/>
+    <key>task_for_pid-allow</key>
+    <true/>
+</dict>
+</plist>

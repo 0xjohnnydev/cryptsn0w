@@ -302,9 +302,58 @@ def main() -> int:
     parser.add_argument("--output-entitlements", required=True, type=Path)
     args = parser.parse_args()
 
-    candidate = select_candidate(
-        args.profile, args.identity, args.bundle_id, args.device
-    )
+    candidate: Candidate | None = None
+    try:
+        candidate = select_candidate(
+            args.profile, args.identity, args.bundle_id, args.device
+        )
+    except SigningError as error:
+        explicit = args.profile is not None or args.identity is not None
+        if explicit or "no unexpired development profile" not in str(error):
+            raise
+        note = (
+            "no development profile available; using Cryptex-signed "
+            "ad-hoc Sileo (cryptex-only mode)"
+        )
+        print(note, file=sys.stderr)
+
+    if candidate is None:
+        team_prefix = "476NKR87Q7"
+        entitlements = {
+            "application-identifier": f"{team_prefix}.{args.bundle_id}",
+            "com.apple.developer.team-identifier": team_prefix,
+            "get-task-allow": True,
+            "keychain-access-groups": [f"{team_prefix}.*"],
+            # AMFI's CT policy rejects bare ad-hoc app launches without the
+            # platform-binary bit; every ad-hoc-but-launchable app on this
+            # lane (LiveContainer, package apps) carries it.
+            "platform-application": True,
+        }
+        args.output_entitlements.parent.mkdir(parents=True, exist_ok=True)
+        args.output_entitlements.write_bytes(
+            plistlib.dumps(entitlements, fmt=plistlib.FMT_XML, sort_keys=True)
+        )
+        result = {
+            "bundleIdentifier": args.bundle_id,
+            "cryptexOnly": True,
+            "identityName": "cryptex-adhoc",
+            "identitySha1": "cryptex-only",
+            "profile": "cryptex-only",
+            "profileName": None,
+            "profileUuid": None,
+            "profileExpiration": None,
+            "profileSha256": None,
+            "applicationPattern": None,
+            "entitlements": str(args.output_entitlements.resolve()),
+            "entitlementsSha256": sha256(args.output_entitlements),
+        }
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.output_json.write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n"
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
     if args.entitlements is not None:
         source = args.entitlements.expanduser().resolve()
         if not source.is_file():

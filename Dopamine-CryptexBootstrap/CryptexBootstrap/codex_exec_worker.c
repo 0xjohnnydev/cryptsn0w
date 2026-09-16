@@ -1412,6 +1412,74 @@ static int rewrite_executable_pages(pid_t child,
                : 82;
 }
 
+/*
+ * Native JIT lane for the fixed LiveContainer host: attach the debugger lane
+ * to an already running GTA/attachable process so the kernel sets the sticky
+ * CS_DEBUGGED flag and the debugger page broker can authorize its runtime
+ * code pages.  The target is validated by the root broker before this worker
+ * is spawned; here we additionally refuse PID 1, our own pid, and a target
+ * whose csops status cannot be read.  The attach stops the target with
+ * SIGSTOP; poll csops (waitpid only works for own children), then detach and
+ * resume.  CS_DEBUGGED survives detach for the process lifetime.
+ */
+static int attach_external_jit(pid_t target) {
+    if (target <= 1 || target == getpid()) {
+        dprintf(STDERR_FILENO,
+                "codex-exec-worker parent=%d phase=jit-attach target=%d "
+                "refused=pid-guard\n",
+                getpid(), target);
+        return 104;
+    }
+    mach_port_t task = MACH_PORT_NULL;
+    kern_return_t taskResult =
+        task_for_pid(mach_task_self(), target, &task);
+    if (taskResult == KERN_SUCCESS && MACH_PORT_VALID(task)) {
+        (void)mach_port_deallocate(mach_task_self(), task);
+    }
+    dprintf(STDOUT_FILENO,
+            "codex-exec-worker parent=%d phase=jit-attach target=%d "
+            "taskKr=%d\n",
+            getpid(), target, taskResult);
+
+    errno = 0;
+    if (ptrace(PT_ATTACHEXC, target, NULL, 0) != 0) {
+        int savedError = errno;
+        dprintf(STDERR_FILENO,
+                "codex-exec-worker parent=%d phase=jit-attach target=%d "
+                "attach=false errno=%d\n",
+                getpid(), target, savedError);
+        return 105;
+    }
+
+    uint32_t flags = 0;
+    bool debugged = false;
+    for (unsigned int attempt = 0; attempt < CODEX_WAIT_ATTEMPTS; ++attempt) {
+        if (csops(target, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+            (flags & CODEX_CS_DEBUGGED) != 0) {
+            debugged = true;
+            break;
+        }
+        usleep(CODEX_WAIT_DELAY_USEC);
+    }
+    dprintf(debugged ? STDOUT_FILENO : STDERR_FILENO,
+            "codex-exec-worker parent=%d phase=jit-attach target=%d "
+            "flags=0x%08x debugged=%d\n",
+            getpid(), target, flags, debugged);
+
+    errno = 0;
+    int detachResult = ptrace(PT_DETACH, target, NULL, 0);
+    int detachError = errno;
+    (void)kill(target, SIGCONT);
+    dprintf(detachResult == 0 ? STDOUT_FILENO : STDERR_FILENO,
+            "codex-exec-worker parent=%d phase=jit-detach target=%d "
+            "result=%d errno=%d\n",
+            getpid(), target, detachResult, detachError);
+    if (!debugged) {
+        return 106;
+    }
+    return detachResult == 0 ? 0 : 107;
+}
+
 static bool wait_for_resume_ack(int control) {
     struct pollfd descriptor = {
         .fd = control,
@@ -1638,6 +1706,17 @@ int main(int argc, char *argv[]) {
                                   (const uint8_t *)kReturn42,
                                   sizeof(kReturn42), NULL, 0, NULL);
     }
+    if (argc == 3 && strcmp(argv[1], "--jit-attach") == 0) {
+        char *end = NULL;
+        long parsed = strtol(argv[2], &end, 10);
+        if (end == argv[2] || *end != '\0' || parsed <= 1 ||
+            parsed > INT32_MAX) {
+            dprintf(STDERR_FILENO,
+                    "codex-exec-worker mode=jit-attach pid=invalid\n");
+            return 64;
+        }
+        return attach_external_jit((pid_t)parsed);
+    }
     if (argc == 3 && strcmp(argv[1], "--raw") == 0) {
         uint8_t *payload = NULL;
         size_t payloadSize = 0;
@@ -1675,7 +1754,7 @@ int main(int argc, char *argv[]) {
         return result;
     }
     dprintf(STDERR_FILENO,
-            "usage: %s --self-test|--raw file|--dylib file|"
+            "usage: %s --self-test|--jit-attach pid|--raw file|--dylib file|"
             "--macho executable [arguments...]\n",
             argv[0]);
     return 64;

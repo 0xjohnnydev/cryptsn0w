@@ -1,18 +1,26 @@
-#!/bin/sh
-
-set -eu
+#!/var/jb/usr/bin/dash
 
 marker_directory=/var/jb/var/lib/codex-broker-probe
+mkdir -p "$marker_directory"
+echo "postinst-start uid=$(id -u) gid=$(id -g)" >"$marker_directory/trace.txt"
+
+set -eux
+
 marker_path="$marker_directory/postinst.txt"
 exec_marker_path="$marker_directory/arbitrary-exec.txt"
 exec_probe=/var/jb/usr/libexec/codex-broker-probe/ArbitraryExecProbe
 
-mkdir -p "$marker_directory"
-"$exec_probe" "$exec_marker_path"
-test -s "$exec_marker_path"
-printf 'postinst-uid=%s gid=%s package=com.openai.codex.broker-probe version=1.0.14 runtime-admission=pinned-load arbitrary-exec=passed\n' \
-    "$(id -u)" "$(id -g)" >"$marker_path"
+probe_status=0
+"$exec_probe" "$exec_marker_path" || probe_status=$?
+echo "probe-exec-status=$probe_status" >>"$marker_directory/trace.txt"
+probe_result="arbitrary-exec=failed-$probe_status"
+if [ "$probe_status" -eq 0 ] && [ -s "$exec_marker_path" ]; then
+    probe_result="arbitrary-exec=passed"
+fi
+
+printf 'postinst-uid=%s gid=%s package=com.openai.codex.broker-probe version=1.0.14 runtime-admission=pinned-load %s\n' \
+    "$(id -u)" "$(id -g)" "$probe_result" >"$marker_path"
 chmod 0644 "$marker_path"
 
-printf 'codex-broker-probe postinst complete; arbitrary executable admission passed before dpkg\n'
+printf 'codex-broker-probe postinst complete; probe status=%s\n' "$probe_status"
 exit 0

@@ -7,6 +7,7 @@
 #import <os/log.h>
 
 #include "sileo_root_broker_protocol.h"
+#include "codex_jit_protocol.h"
 
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
@@ -143,10 +144,24 @@ static NSString *const kExecInterposerLibrary =
     @"/var/jb/usr/lib/codex-exec-interposer.dylib";
 static NSString *const kRuntimeTrustClientExecutable =
     @"/var/jb/usr/libexec/codex-runtime-trust-client";
+static NSString *const kSignExecExecutable =
+    @"/var/jb/usr/libexec/codex-signexec";
+static NSString *const kRuntimeTrustExecutable =
+    @"/var/jb/usr/libexec/codex-runtime-trust";
 static NSString *const kElleKitInjectorExecutable =
     @"/var/jb/usr/libexec/codex-ellekit-loader";
 static NSString *const kElleKitInjectorDylib =
     @"/var/jb/usr/lib/ellekit/libinjector.dylib";
+static NSString *const kJitEnableExecutable =
+    @"/var/jb/usr/libexec/codex-jit-enable";
+static NSString *const kJitBrokerDirectory =
+    @"/var/jb/var/lib/codex-jit";
+static NSString *const kJitBrokerSocketPath =
+    @"/var/jb/var/lib/codex-jit/broker.sock";
+static NSString *const kLiveContainerIdentifier =
+    @"com.kdt.livecontainer";
+static NSString *const kLiveContainerGuestStore =
+    @"/var/jb/var/lib/codex-livecontainer/Applications";
 
 @interface NSObject (CodexLaunchServices)
 + (id)applicationProxyForIdentifier:(NSString *)identifier;
@@ -161,6 +176,9 @@ static int run_and_wait(const char *executable, char *const arguments[]);
 static int run_and_wait_bounded(const char *executable,
                                 char *const arguments[],
                                 unsigned int timeoutMilliseconds);
+static bool files_are_equal(NSString *left, NSString *right);
+static NSUInteger import_jailbreak_apps_into_livecontainer(
+    NSString *jailbreakRoot);
 
 static void log_message(const char *format, ...) {
     va_list arguments;
@@ -355,6 +373,126 @@ static NSString *managed_jailbreak_root(void) {
         ![manifest[@"JailbreakRoot"] isEqual:resolved]) {
         return nil;
     }
+    return resolved;
+}
+
+/*
+ * The ownership manifest or the /var/jb symlink can be lost (partial repair,
+ * interrupted fresh-bootstrap, external reinstall).  Refusing forever strands
+ * a tree this installer created, so adopt it back when the structure is
+ * provably ours: the marker names this installer, or the fixed root broker
+ * exists in the resolved tree.  Everything is logged for diagnosis.
+ */
+static NSString *adopt_existing_jailbreak_root(void) {
+    struct stat status;
+    if (lstat(kVarJb, &status) != 0) {
+        log_message("varJbAdoption=failed reason=lstat error=%s",
+                    strerror(errno));
+        return nil;
+    }
+    if (!S_ISLNK(status.st_mode)) {
+        log_message("varJbAdoption=failed reason=not-a-symlink mode=0%o",
+                    status.st_mode);
+        return nil;
+    }
+    NSString *resolved = [@"/var/jb" stringByResolvingSymlinksInPath];
+
+    if ([resolved isEqual:@"/var/jb"] ||
+        [resolved isEqual:@"/private/var/jb"]) {
+        // The symlink points at itself and the whole managed tree is hidden
+        // behind the loop.  Locate the real tree: a preboot randomized root
+        // whose procursus child carries our marker or the fixed root broker.
+        log_message("varJbAdoptionSelfLoop=true");
+        NSString *candidate = nil;
+        NSArray<NSString *> *hashEntries = [[NSFileManager defaultManager]
+            contentsOfDirectoryAtPath:@"/private/preboot"
+                                error:nil];
+        for (NSString *hashEntry in hashEntries) {
+            NSString *prebootRoot =
+                [@"/private/preboot"
+                    stringByAppendingPathComponent:hashEntry];
+            NSArray<NSString *> *prebootEntries =
+                [[NSFileManager defaultManager]
+                    contentsOfDirectoryAtPath:prebootRoot
+                                        error:nil];
+            for (NSString *entry in prebootEntries) {
+                NSString *procursus = [[prebootRoot
+                    stringByAppendingPathComponent:entry]
+                    stringByAppendingPathComponent:@"procursus"];
+                NSString *marker = [procursus
+                    stringByAppendingPathComponent:
+                        @".codex-cryptex-bootstrap.plist"];
+                NSDictionary *candidateManifest =
+                    [NSDictionary dictionaryWithContentsOfFile:marker];
+                NSString *broker = [procursus
+                    stringByAppendingPathComponent:
+                        @"usr/libexec/codex-sileo-root-broker"];
+                if ([candidateManifest[@"Installer"]
+                        isEqual:kInstallerIdentifier] ||
+                    access([broker fileSystemRepresentation], X_OK) == 0) {
+                    candidate = procursus;
+                    break;
+                }
+            }
+            if (candidate != nil) {
+                break;
+            }
+        }
+        if (candidate == nil) {
+            // The managed tree is gone (preboot is garbage-collected across
+            // boots).  The self-loop serves nothing; remove it so the caller
+            // takes the fresh-bootstrap path instead of failing forever.
+            (void)unlink([@"/var/jb" fileSystemRepresentation]);
+            log_message("varJbAdoptionRemovedBrokenLoop=true");
+            return nil;
+        }
+        (void)unlink([@"/var/jb" fileSystemRepresentation]);
+        if (symlink([candidate fileSystemRepresentation],
+                    [@"/var/jb" fileSystemRepresentation]) != 0) {
+            log_message("varJbAdoption=failed reason=relink error=%s",
+                        strerror(errno));
+            return nil;
+        }
+        resolved = candidate;
+        log_message("varJbAdoptionRelinked target=%s",
+                    [resolved UTF8String]);
+    }
+
+    NSString *marker = [resolved
+        stringByAppendingPathComponent:@".codex-cryptex-bootstrap.plist"];
+    NSDictionary *manifest =
+        [NSDictionary dictionaryWithContentsOfFile:marker];
+    log_message("varJbAdoptionMarker resolved=%s installer=%s jailbreakRoot=%s",
+                [resolved UTF8String],
+                manifest != nil
+                    ? [[manifest[@"Installer"] description] UTF8String]
+                    : "missing",
+                manifest != nil
+                    ? [[manifest[@"JailbreakRoot"] description] UTF8String]
+                    : "missing");
+    bool ours = manifest != nil &&
+                [manifest[@"Installer"] isEqual:kInstallerIdentifier];
+    if (!ours) {
+        NSString *broker = [resolved
+            stringByAppendingPathComponent:
+                @"usr/libexec/codex-sileo-root-broker"];
+        ours = access([broker fileSystemRepresentation], X_OK) == 0;
+        log_message("varJbAdoptionStructure broker=%s",
+                    ours ? "present" : "missing");
+    }
+    if (!ours) {
+        return nil;
+    }
+    NSMutableDictionary *repaired = manifest != nil
+        ? [manifest mutableCopy]
+        : [NSMutableDictionary dictionary];
+    repaired[@"Installer"] = kInstallerIdentifier;
+    repaired[@"JailbreakRoot"] = resolved;
+    if (![repaired writeToFile:marker atomically:YES]) {
+        log_message("varJbAdoption=failed reason=manifest-write");
+        return nil;
+    }
+    log_message("varJbAdoption=adopted target=%s", [resolved UTF8String]);
     return resolved;
 }
 
@@ -923,6 +1061,33 @@ static bool broker_command_is_named(const char *resolvedCommand,
     return strcmp(baseName, name) == 0;
 }
 
+/*
+ * Sileo's real package installation runs apt-get through the root broker
+ * (the constructor only simulates the -sqf preview itself).  Treat any
+ * apt-get invocation carrying an install verb as an installation so the
+ * posthook republishes and LiveContainer-imports newly installed apps.
+ */
+static bool broker_arguments_install_packages(char *const arguments[]) {
+    if (arguments == NULL || arguments[0] == NULL) {
+        return false;
+    }
+    static const char *const verbs[] = {
+        "install", "reinstall", "--reinstall",
+        "dist-upgrade", "full-upgrade", "upgrade",
+    };
+    for (uint32_t index = 1;
+         index < CODEX_ROOT_BROKER_MAX_ARGUMENTS && arguments[index] != NULL;
+         ++index) {
+        for (size_t verb = 0;
+             verb < sizeof(verbs) / sizeof(verbs[0]); ++verb) {
+            if (strcmp(arguments[index], verbs[verb]) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
                                     const char *reason) {
     if (paths.count == 0) {
@@ -1066,6 +1231,321 @@ static bool broker_spawn_error_is_admission_failure(int error) {
     return false;
 }
 
+/*
+ * Serotonin-style runtime admission for brokered commands: prepare a resigned,
+ * get-task-allow copy of the target through the fixed codex-signexec helper
+ * (copy, ad-hoc resign, personalized runtime trust-cache load) so the payload
+ * can run as a real process instead of inside the worker's loader.  Returns
+ * false when runtime trust personalization is unavailable; callers then fall
+ * back to the debugged worker.
+ */
+static bool signexec_prepare_copy(const char *path, char *copyPath,
+                                  size_t capacity) {
+    int pipeDescriptors[2] = {-1, -1};
+    if (pipe(pipeDescriptors) != 0) {
+        return false;
+    }
+    (void)fcntl(pipeDescriptors[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(pipeDescriptors[1], F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addclose(&actions, pipeDescriptors[0]);
+    posix_spawn_file_actions_adddup2(&actions, pipeDescriptors[1],
+                                     STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipeDescriptors[1]);
+    posix_spawn_file_actions_adddup2(&actions, gLog, STDERR_FILENO);
+    char *arguments[] = {
+        (char *)[kSignExecExecutable fileSystemRepresentation],
+        (char *)"prepare", (char *)path, NULL};
+    pid_t child = 0;
+    int spawnResult = posix_spawn(&child, arguments[0], &actions, NULL,
+                                  arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipeDescriptors[1]);
+    if (spawnResult != 0) {
+        close(pipeDescriptors[0]);
+        log_message("signexecPrepareSpawnError path=%s error=%s", path,
+                    strerror(spawnResult));
+        return false;
+    }
+    size_t used = 0;
+    while (used + 1U < capacity) {
+        ssize_t amount = read(pipeDescriptors[0], copyPath + used,
+                              capacity - 1U - used);
+        if (amount > 0) {
+            used += (size_t)amount;
+            continue;
+        }
+        if (amount < 0 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+    close(pipeDescriptors[0]);
+    copyPath[used] = '\0';
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || used == 0U) {
+        log_message("signexecPrepareFailed path=%s status=%d", path, status);
+        return false;
+    }
+    while (used > 0U &&
+           (copyPath[used - 1U] == '\n' || copyPath[used - 1U] == '\r')) {
+        copyPath[--used] = '\0';
+    }
+    if (used == 0U || strncmp(copyPath, "/var/jb/", 8U) != 0 ||
+        strchr(copyPath, '\n') != NULL) {
+        log_message("signexecPrepareRejected path=%s", path);
+        return false;
+    }
+    log_message("signexecPrepared path=%s copy=%s", path, copyPath);
+    return true;
+}
+
+/*
+ * The fixed host application (LiveContainer) ships inside the Cryptex, so its
+ * Mach-Os are covered by the immutable trust cache and it launches without any
+ * runtime personalization.  Deploy it into the jailbreak Applications
+ * directory with replace-and-rollback semantics; the registration pass then
+ * publishes it through LaunchServices.
+ */
+static bool install_host_application(NSString *mountRoot,
+                                     NSString *destinationProcursus) {
+    NSString *source =
+        [mountRoot stringByAppendingPathComponent:
+                       @"usr/local/share/codex-bootstrap/LiveContainer.app"];
+    NSString *applicationsDirectory =
+        [destinationProcursus stringByAppendingPathComponent:@"Applications"];
+    NSString *destination =
+        [applicationsDirectory
+            stringByAppendingPathComponent:@"LiveContainer.app"];
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:source
+                                              isDirectory:&isDirectory] ||
+        !isDirectory) {
+        log_message("hostApplication=skipped reason=not-embedded");
+        return true;
+    }
+    NSString *sourceMain =
+        [source stringByAppendingPathComponent:@"LiveContainer"];
+    NSString *destinationMain =
+        [destination stringByAppendingPathComponent:@"LiveContainer"];
+    if (files_are_equal(sourceMain, destinationMain)) {
+        log_message("hostApplication=current");
+        return true;
+    }
+    NSError *error = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:applicationsDirectory
+            withIntermediateDirectories:YES
+                             attributes:@{
+                                 NSFilePosixPermissions : @0755,
+                                 NSFileOwnerAccountID : @0,
+                                 NSFileGroupOwnerAccountID : @0,
+                             }
+                                  error:&error]) {
+        log_message("hostApplication=failed reason=directory error=%s",
+                    [[error description] UTF8String]);
+        return false;
+    }
+    NSString *backup = nil;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:destination]) {
+        backup = [applicationsDirectory
+            stringByAppendingPathComponent:
+                [NSString stringWithFormat:@".codex-host-backup-%@",
+                                           [[NSUUID UUID] UUIDString]]];
+        if (![[NSFileManager defaultManager] moveItemAtPath:destination
+                                                     toPath:backup
+                                                      error:&error]) {
+            log_message("hostApplication=failed reason=backup error=%s",
+                        [[error description] UTF8String]);
+            return false;
+        }
+    }
+    if (![[NSFileManager defaultManager] copyItemAtPath:source
+                                                 toPath:destination
+                                                  error:&error]) {
+        log_message("hostApplication=failed reason=copy error=%s",
+                    [[error description] UTF8String]);
+        if (backup != nil) {
+            [[NSFileManager defaultManager] moveItemAtPath:backup
+                                                    toPath:destination
+                                                     error:nil];
+        }
+        return false;
+    }
+    if (backup != nil) {
+        [[NSFileManager defaultManager] removeItemAtPath:backup error:nil];
+    }
+    log_message("hostApplication=updated");
+    return true;
+}
+
+/*
+ * iOS 27 removed the registerApplicationDictionary: API that uicache uses, so
+ * jailbreak apps under /var/jb/Applications never reach LaunchServices.  The
+ * patched appregistrard helper registers them through the direct
+ * containerized-registration path instead, and each app's executable first
+ * goes through codex-signexec so FrontBoard can launch an admitted,
+ * debugger-attachable copy.
+ */
+static void register_jailbreak_applications(NSString *jailbreakRoot,
+                                            const char *reason) {
+    NSString *applicationsDirectory =
+        [jailbreakRoot stringByAppendingPathComponent:@"Applications"];
+    NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:applicationsDirectory
+                            error:nil];
+    NSUInteger appCount = 0;
+    for (NSString *entry in entries) {
+        if (![entry hasSuffix:@".app"]) {
+            continue;
+        }
+        ++appCount;
+        NSString *bundle =
+            [applicationsDirectory stringByAppendingPathComponent:entry];
+        NSDictionary *info = [NSDictionary
+            dictionaryWithContentsOfFile:
+                [bundle stringByAppendingPathComponent:@"Info.plist"]];
+        NSString *executable = info[@"CFBundleExecutable"];
+        // The containerized registration holds a copy of the app bundle. Its
+        // main executable's cdhash must be in the current Cryptex trust
+        // cache, so force a fresh copy whenever the contents diverge;
+        // otherwise AMFI evaluates the stale binary and rejects the launch.
+        NSString *identifier = info[@"CFBundleIdentifier"];
+        if ([identifier isKindOfClass:[NSString class]] &&
+            [executable isKindOfClass:[NSString class]] &&
+            executable.length > 0) {
+            NSString *registeredPath =
+                registered_application_path(identifier);
+            if (registeredPath != nil &&
+                !files_are_equal(
+                    [bundle stringByAppendingPathComponent:executable],
+                    [registeredPath
+                        stringByAppendingPathComponent:executable])) {
+                char *unregisterArguments[] = {
+                    (char *)[kRuntimeTrustExecutable
+                        fileSystemRepresentation],
+                    (char *)"unregister",
+                    (char *)[registeredPath fileSystemRepresentation],
+                    NULL};
+                int unregisterStatus = run_and_wait_bounded(
+                    unregisterArguments[0], unregisterArguments, 30000);
+                log_message("appRegisterStaleUnregister app=%s status=%d",
+                            [identifier UTF8String], unregisterStatus);
+            }
+        }
+        bool prepared = false;
+        if ([executable isKindOfClass:[NSString class]] &&
+            executable.length > 0 &&
+            [executable rangeOfString:@"/"].location == NSNotFound &&
+            [executable rangeOfString:@".."].location == NSNotFound) {
+            NSString *executablePath =
+                [bundle stringByAppendingPathComponent:executable];
+            char copyPath[PATH_MAX] = {0};
+            prepared = signexec_prepare_copy(
+                [executablePath fileSystemRepresentation], copyPath,
+                sizeof(copyPath));
+        }
+        log_message("appRegisterPrepare reason=%s app=%s prepared=%s", reason,
+                    [entry UTF8String], prepared ? "true" : "false");
+    }
+    if (appCount == 0) {
+        return;
+    }
+    char *registerArguments[] = {
+        (char *)[kRuntimeTrustExecutable fileSystemRepresentation],
+        (char *)"register",
+        (char *)"--path",
+        (char *)[applicationsDirectory fileSystemRepresentation],
+        (char *)"--absolute",
+        (char *)"--no-install-coordination",
+        NULL};
+    int registerStatus =
+        run_and_wait_bounded(registerArguments[0], registerArguments, 60000);
+    log_message("appRegister reason=%s apps=%lu status=%d", reason,
+                (unsigned long)appCount, registerStatus);
+}
+
+/*
+ * Boot-time proof of the Serotonin-style lane: decode the embedded unsigned
+ * probe (base64 in the Cryptex so the static trust cache never sees a Mach-O),
+ * run it through codex-signexec, then spawn the resigned copy directly and
+ * require its marker file.  Failure here only marks the lane unavailable; the
+ * debugged worker remains the JIT fallback.
+ */
+static bool run_signexec_self_test(NSString *payloadRoot) {
+    NSString *encodedPath =
+        [payloadRoot stringByAppendingPathComponent:@"signexec-selftest.b64"];
+    NSData *encoded = [NSData dataWithContentsOfFile:encodedPath];
+    NSData *decoded =
+        encoded != nil
+            ? [[NSData alloc] initWithBase64EncodedData:encoded
+                options:NSDataBase64DecodingIgnoreUnknownCharacters]
+            : nil;
+    if (decoded == nil || decoded.length < 4U ||
+        decoded.length > 1024U * 1024U) {
+        log_message("signexecSelfTest=skipped reason=blob-unavailable");
+        return true;
+    }
+    uint32_t magic = 0;
+    [decoded getBytes:&magic length:sizeof(magic)];
+    if (magic != FAT_CIGAM && magic != MH_MAGIC_64) {
+        log_message("signexecSelfTest=skipped reason=blob-not-macho");
+        return true;
+    }
+    NSString *directory = @"/var/jb/var/lib/codex-signexec/selftest";
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:directory
+            withIntermediateDirectories:YES
+                             attributes:@{
+                                 NSFilePosixPermissions : @0755,
+                                 NSFileOwnerAccountID : @0,
+                                 NSFileGroupOwnerAccountID : @0,
+                             }
+                                  error:&directoryError]) {
+        log_message("signexecSelfTest=failed reason=directory error=%s",
+                    [[directoryError description] UTF8String]);
+        return false;
+    }
+    NSString *probePath =
+        [directory stringByAppendingPathComponent:@"signexec-selftest"];
+    NSString *markerPath =
+        [directory stringByAppendingPathComponent:@"marker.txt"];
+    (void)unlink([markerPath fileSystemRepresentation]);
+    if (![decoded writeToFile:probePath atomically:YES] ||
+        chmod([probePath fileSystemRepresentation], 0755) != 0) {
+        log_message("signexecSelfTest=failed reason=probe-write");
+        return false;
+    }
+    char copyPath[PATH_MAX] = {0};
+    if (!signexec_prepare_copy([probePath fileSystemRepresentation], copyPath,
+                               sizeof(copyPath))) {
+        log_message("signexecSelfTest=prepare-failed");
+        return false;
+    }
+    char *probeArguments[] = {
+        copyPath, (char *)[markerPath fileSystemRepresentation], NULL};
+    int probeStatus = run_and_wait(copyPath, probeArguments);
+    NSString *marker = [NSString stringWithContentsOfFile:markerPath
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:nil];
+    bool passed = probeStatus == 0 && marker != nil &&
+                  [marker hasPrefix:@"SIGNEXEC_SELFTEST pid="];
+    log_message("signexecSelfTest=%s copy=%s probeStatus=%d marker=%s",
+                passed ? "passed" : "failed", copyPath, probeStatus,
+                marker != nil ? [[marker
+                    stringByTrimmingCharactersInSet:
+                        [NSCharacterSet newlineCharacterSet]] UTF8String]
+                              : "none");
+    return passed;
+}
+
 static int32_t run_root_broker_command(
     int server, int client, char *const arguments[], int descriptors[],
     const int descriptorNumbers[], uint32_t descriptorCount,
@@ -1174,27 +1654,60 @@ static int32_t run_root_broker_command(
         strcmp(resolvedCommand,
                [kExecWorkerExecutable fileSystemRepresentation]) != 0 &&
         broker_command_is_macho(resolvedCommand)) {
-        char *runtimeArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U] = {0};
-        runtimeArguments[0] =
-            (char *)[kExecWorkerExecutable fileSystemRepresentation];
-        runtimeArguments[1] = "--macho";
-        uint32_t index = 0;
-        while (index < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
-               arguments[index] != NULL) {
-            runtimeArguments[index + 2U] = arguments[index];
-            ++index;
-        }
-        runtimeArguments[index + 2U] = NULL;
         int directError = spawnResult;
-        spawnResult = posix_spawn(
-            &child, [kExecWorkerExecutable fileSystemRepresentation],
-            &actions, NULL, runtimeArguments, environment);
-        runtimeFallback = spawnResult == 0;
-        log_message("sileoRootBrokerRuntimeFallback command=%s "
-                    "directError=%s workerError=%s selected=%s",
-                    resolvedCommand, strerror(directError),
-                    spawnResult == 0 ? "none" : strerror(spawnResult),
-                    runtimeFallback ? "true" : "false");
+        char copyPath[PATH_MAX] = {0};
+        if (signexec_prepare_copy(resolvedCommand, copyPath,
+                                  sizeof(copyPath))) {
+            bool hasInsertVariable = false;
+            for (uint32_t index = 0; environment[index] != NULL; ++index) {
+                if (strncmp(environment[index], "DYLD_INSERT_LIBRARIES=",
+                            22) == 0) {
+                    hasInsertVariable = true;
+                    break;
+                }
+            }
+            char insertVariable[PATH_MAX + 32];
+            if (!hasInsertVariable &&
+                environmentCount < CODEX_ROOT_BROKER_MAX_ENVIRONMENT + 7U) {
+                int insertLength = snprintf(
+                    insertVariable, sizeof(insertVariable),
+                    "DYLD_INSERT_LIBRARIES=%s",
+                    [kExecInterposerLibrary fileSystemRepresentation]);
+                if (insertLength > 0 &&
+                    (size_t)insertLength < sizeof(insertVariable)) {
+                    environment[environmentCount++] = insertVariable;
+                    environment[environmentCount] = NULL;
+                }
+            }
+            spawnResult = posix_spawn(&child, copyPath, &actions, NULL,
+                                      arguments, environment);
+            log_message("sileoRootBrokerSignexec command=%s copy=%s "
+                        "directError=%s spawnError=%s",
+                        resolvedCommand, copyPath, strerror(directError),
+                        spawnResult == 0 ? "none" : strerror(spawnResult));
+        }
+        if (spawnResult != 0) {
+            char *runtimeArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U] = {0};
+            runtimeArguments[0] =
+                (char *)[kExecWorkerExecutable fileSystemRepresentation];
+            runtimeArguments[1] = "--macho";
+            uint32_t index = 0;
+            while (index < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+                   arguments[index] != NULL) {
+                runtimeArguments[index + 2U] = arguments[index];
+                ++index;
+            }
+            runtimeArguments[index + 2U] = NULL;
+            spawnResult = posix_spawn(
+                &child, [kExecWorkerExecutable fileSystemRepresentation],
+                &actions, NULL, runtimeArguments, environment);
+            runtimeFallback = spawnResult == 0;
+            log_message("sileoRootBrokerRuntimeFallback command=%s "
+                        "directError=%s workerError=%s selected=%s",
+                        resolvedCommand, strerror(directError),
+                        spawnResult == 0 ? "none" : strerror(spawnResult),
+                        runtimeFallback ? "true" : "false");
+        }
     }
     posix_spawn_file_actions_destroy(&actions);
     for (uint32_t index = 0; index < descriptorCount; ++index) {
@@ -1214,6 +1727,17 @@ static int32_t run_root_broker_command(
     if (runtimeFallback) {
         log_message("sileoRootBrokerRuntimeResult command=%s status=%d",
                     resolvedCommand, status);
+    }
+    if (status == 0 &&
+        (broker_command_is_named(resolvedCommand, "dpkg") ||
+         (broker_command_is_named(resolvedCommand, "apt-get") &&
+          broker_arguments_install_packages(arguments)))) {
+        // Sileo-installed application posthook: republish the jailbreak
+        // Applications set through LaunchServices and import every app into
+        // the LiveContainer host's managed guest store so the fixed host can
+        // JIT-launch it without per-app registration.
+        register_jailbreak_applications(jailbreakRoot, "install");
+        (void)import_jailbreak_apps_into_livecontainer(jailbreakRoot);
     }
     return status;
 }
@@ -1282,6 +1806,260 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
                     resolved[0] != '\0' ? resolved : "none", status,
                     replied ? "true" : "false");
     }
+}
+
+/*
+ * Native JIT broker: the LiveContainer host asks its own helper
+ * (codex-jit-enable) to request the jailbreak's debugger lane, the helper
+ * opens this socket, and the root broker attaches the fixed worker's
+ * PT_ATTACHEXC lane to the validated host process.  The attach gives the host
+ * the sticky CS_DEBUGGED flag and makes the debugger page broker available
+ * for its runtime code pages; the host's own checkJITEnabled then reports JIT
+ * as available without any SideStore/debugserver dependency.
+ */
+static bool jit_target_is_registered_host(pid_t pid) {
+    if (pid <= 1 || pid == getpid()) {
+        return false;
+    }
+    char path[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
+        return false;
+    }
+    NSString *registered =
+        registered_application_path(kLiveContainerIdentifier);
+    if (registered == nil || registered.length == 0) {
+        log_message("jitBrokerTargetRejected pid=%d reason=not-registered",
+                    pid);
+        return false;
+    }
+    NSString *registeredExecutable = [registered
+        stringByAppendingPathComponent:@"LiveContainer"];
+    bool matches = [registeredExecutable
+        isEqual:[NSString stringWithUTF8String:path]];
+    log_message("jitBrokerTarget pid=%d path=%s registered=%s matches=%s",
+                pid, path, [registeredExecutable UTF8String],
+                matches ? "true" : "false");
+    return matches;
+}
+
+static void serve_jit_broker(void) {
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:kJitBrokerDirectory
+      withIntermediateDirectories:YES
+                       attributes:@{
+                           NSFilePosixPermissions : @0755,
+                           NSFileOwnerAccountID : @0,
+                           NSFileGroupOwnerAccountID : @0,
+                       }
+                            error:&directoryError]) {
+        log_message("jitBrokerDirectoryFailed error=%s",
+                    [[directoryError description] UTF8String]);
+        return;
+    }
+    const char *socketPath = [kJitBrokerSocketPath fileSystemRepresentation];
+    struct sockaddr_un address = {0};
+    if (strlen(socketPath) >= sizeof(address.sun_path)) {
+        log_message("jitBrokerSocketPathTooLong");
+        return;
+    }
+    int server = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server < 0) {
+        log_message("jitBrokerSocketFailed error=%s", strerror(errno));
+        return;
+    }
+    (void)unlink(socketPath);
+    address.sun_family = AF_UNIX;
+    address.sun_len = sizeof(address);
+    strlcpy(address.sun_path, socketPath, sizeof(address.sun_path));
+    if (bind(server, (const struct sockaddr *)&address, sizeof(address)) != 0 ||
+        chown(socketPath, 501, 501) != 0 ||
+        chmod(socketPath, 0600) != 0 || listen(server, 4) != 0) {
+        int savedError = errno;
+        close(server);
+        (void)unlink(socketPath);
+        log_message("jitBrokerListenFailed error=%s", strerror(savedError));
+        return;
+    }
+    log_message("jitBrokerServing=true socket=%s", socketPath);
+    for (;;) {
+        int client = accept(server, NULL, NULL);
+        if (client < 0) {
+            if (errno != EINTR) {
+                log_message("jitBrokerAcceptError=%s", strerror(errno));
+            }
+            continue;
+        }
+        int noSigpipe = 1;
+        (void)setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe,
+                         sizeof(noSigpipe));
+        uid_t peerUser = (uid_t)-1;
+        gid_t peerGroup = (gid_t)-1;
+        pid_t peerPid = -1;
+        socklen_t peerPidLength = sizeof(peerPid);
+        char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
+        bool accepted =
+            getpeereid(client, &peerUser, &peerGroup) == 0 &&
+            peerUser == 501 &&
+            getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, &peerPid,
+                       &peerPidLength) == 0 &&
+            peerPidLength == sizeof(peerPid) && peerPid > 1 &&
+            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0 &&
+            [kJitEnableExecutable
+                isEqual:[NSString stringWithUTF8String:peerPath]];
+        int32_t status = 126 << 8;
+        struct codex_jit_request request = {0};
+        if (accepted &&
+            read_all(client, &request, sizeof(request)) &&
+            request.magic == CODEX_JIT_MAGIC &&
+            request.version == CODEX_JIT_VERSION &&
+            jit_target_is_registered_host(request.pid)) {
+            char pidArgument[32];
+            int pidLength = snprintf(pidArgument, sizeof(pidArgument), "%d",
+                                     request.pid);
+            if (pidLength > 0 &&
+                (size_t)pidLength < sizeof(pidArgument)) {
+                char *attachArguments[] = {
+                    (char *)[kExecWorkerExecutable fileSystemRepresentation],
+                    (char *)"--jit-attach", pidArgument, NULL};
+                int attachStatus = run_and_wait_bounded(
+                    attachArguments[0], attachArguments, 30000);
+                log_message("jitBrokerAttach pid=%d status=%d", request.pid,
+                            attachStatus);
+                status = attachStatus >= 0 ? (attachStatus << 8) : 126 << 8;
+            } else {
+                status = 126 << 8;
+            }
+        }
+        if (!accepted) {
+            log_message("jitBrokerRejected peerPid=%d uid=%u path=%s",
+                        peerPid, peerUser,
+                        peerPath[0] != '\0' ? peerPath : "none");
+        } else if (request.magic != CODEX_JIT_MAGIC ||
+                   request.version != CODEX_JIT_VERSION) {
+            log_message("jitBrokerRejected pid=%d reason=protocol",
+                        request.pid);
+        }
+        (void)write_all(client, &status, sizeof(status));
+        close(client);
+    }
+}
+
+/*
+ * LiveContainer posthook: after a successful package install, import every
+ * jailbreak application into the LiveContainer host's managed guest store so
+ * the host UI lists it and JIT-launches it without per-app LaunchServices
+ * registration.  The imported copy is mobile-owned so LiveContainer's own
+ * patch/sign pipeline can update the guest executable in place.
+ */
+static bool livecontainer_guest_entry_matches(NSString *source,
+                                              NSString *destination) {
+    NSString *sourceInfo = [source stringByAppendingPathComponent:@"Info.plist"];
+    NSString *destinationInfo =
+        [destination stringByAppendingPathComponent:@"Info.plist"];
+    NSString *sourceBundle = [NSString stringWithContentsOfFile:sourceInfo
+                                                       encoding:NSUTF8StringEncoding
+                                                          error:nil];
+    NSString *destinationBundle =
+        [NSString stringWithContentsOfFile:destinationInfo
+                                  encoding:NSUTF8StringEncoding
+                                     error:nil];
+    return sourceBundle != nil && destinationBundle != nil &&
+           [sourceBundle isEqual:destinationBundle];
+}
+
+static NSUInteger import_jailbreak_apps_into_livecontainer(
+    NSString *jailbreakRoot) {
+    NSString *applicationsDirectory =
+        [jailbreakRoot stringByAppendingPathComponent:@"Applications"];
+    NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:applicationsDirectory
+                            error:nil];
+    NSError *storeError = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:kLiveContainerGuestStore
+      withIntermediateDirectories:YES
+                       attributes:@{
+                           NSFilePosixPermissions : @0755,
+                           NSFileOwnerAccountID : @0,
+                           NSFileGroupOwnerAccountID : @0,
+                       }
+                            error:&storeError]) {
+        log_message("livecontainerStoreFailed error=%s",
+                    [[storeError description] UTF8String]);
+        return 0;
+    }
+    NSUInteger imported = 0;
+    for (NSString *entry in entries) {
+        if (![entry hasSuffix:@".app"] ||
+            [entry isEqual:@"Sileo.app"] ||
+            [entry isEqual:@"LiveContainer.app"]) {
+            continue;
+        }
+        NSString *source =
+            [applicationsDirectory stringByAppendingPathComponent:entry];
+        NSDictionary *info = [NSDictionary
+            dictionaryWithContentsOfFile:
+                [source stringByAppendingPathComponent:@"Info.plist"]];
+        NSString *bundleIdentifier = info[@"CFBundleIdentifier"];
+        if (![bundleIdentifier isKindOfClass:[NSString class]] ||
+            bundleIdentifier.length == 0 ||
+            [bundleIdentifier rangeOfString:@"/"].location != NSNotFound) {
+            continue;
+        }
+        NSString *guestName =
+            [bundleIdentifier stringByAppendingString:@".app"];
+        NSString *destination =
+            [kLiveContainerGuestStore stringByAppendingPathComponent:guestName];
+        BOOL destinationIsDirectory = NO;
+        if ([[NSFileManager defaultManager]
+                fileExistsAtPath:destination
+                     isDirectory:&destinationIsDirectory]) {
+            if (destinationIsDirectory &&
+                livecontainer_guest_entry_matches(source, destination)) {
+                continue;
+            }
+            if (![[NSFileManager defaultManager]
+                    removeItemAtPath:destination
+                               error:&storeError]) {
+                log_message("livecontainerImportFailed app=%s reason=%s",
+                            [guestName UTF8String],
+                            [[storeError description] UTF8String]);
+                continue;
+            }
+        }
+        if (![[NSFileManager defaultManager] copyItemAtPath:source
+                                                     toPath:destination
+                                                      error:&storeError]) {
+            log_message("livecontainerImportFailed app=%s reason=%s",
+                        [guestName UTF8String],
+                        [[storeError description] UTF8String]);
+            continue;
+        }
+        NSString *guestStoreContainer =
+            [kLiveContainerGuestStore stringByDeletingLastPathComponent];
+        NSString *guestStoreRoot =
+            [guestStoreContainer stringByDeletingLastPathComponent];
+        char *chownArguments[] = {
+            "/var/jb/usr/bin/chown", "-R", "501:501",
+            (char *)[guestStoreRoot fileSystemRepresentation], NULL};
+        (void)run_and_wait_bounded(chownArguments[0], chownArguments, 30000);
+        NSDictionary *appInfo = @{
+            @"LCOrignalBundleIdentifier" : bundleIdentifier,
+            @"LCDataUUID" : [[NSUUID UUID] UUIDString],
+        };
+        NSString *appInfoPath =
+            [destination stringByAppendingPathComponent:@"LCAppInfo.plist"];
+        BOOL wrote = [appInfo writeToFile:appInfoPath atomically:YES];
+        log_message("livecontainerImport app=%s copied=%s appInfo=%s",
+                    [guestName UTF8String], "true",
+                    wrote ? "true" : "false");
+        ++imported;
+    }
+    log_message("livecontainerImportTotal apps=%lu store=%s",
+                (unsigned long)imported,
+                [kLiveContainerGuestStore UTF8String]);
+    return imported;
 }
 
 static bool is_ellekit_target_process(pid_t pid, const char *path) {
@@ -2776,8 +3554,22 @@ static int run_and_wait_bounded(const char *executable,
     if (result != 0) {
         return 255;
     }
-    posix_spawn_file_actions_adddup2(&actions, gLog, STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, gLog, STDERR_FILENO);
+    int outputPipe[2] = {-1, -1};
+    bool piping = pipe(outputPipe) == 0;
+    if (piping) {
+        (void)fcntl(outputPipe[0], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(outputPipe[1], F_SETFD, FD_CLOEXEC);
+        (void)fcntl(outputPipe[0], F_SETFL, O_NONBLOCK);
+        posix_spawn_file_actions_addclose(&actions, outputPipe[0]);
+        posix_spawn_file_actions_adddup2(&actions, outputPipe[1],
+                                         STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, outputPipe[1],
+                                         STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, outputPipe[1]);
+    } else {
+        posix_spawn_file_actions_adddup2(&actions, gLog, STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, gLog, STDERR_FILENO);
+    }
     result = posix_spawnattr_init(&attributes);
     if (result == 0) {
         result = posix_spawnattr_setpgroup(&attributes, 0);
@@ -2797,23 +3589,77 @@ static int run_and_wait_bounded(const char *executable,
         if (attributes != NULL) {
             posix_spawnattr_destroy(&attributes);
         }
+        if (piping) {
+            close(outputPipe[0]);
+            close(outputPipe[1]);
+        }
         log_message("bounded spawn failed executable=%s error=%s",
                     executable, strerror(result));
         return 255;
     }
+    if (piping) {
+        close(outputPipe[1]);
+        outputPipe[1] = -1;
+    }
 
+    char outputTail[16384];
+    size_t outputTailUsed = 0;
     const useconds_t pollInterval = 10 * 1000;
     unsigned int elapsed = 0;
     int status = 0;
     for (;;) {
+        if (piping) {
+            for (;;) {
+                char chunk[1024];
+                ssize_t amount = read(outputPipe[0], chunk, sizeof(chunk));
+                if (amount <= 0) {
+                    break;
+                }
+                (void)write(gLog, chunk, (size_t)amount);
+                if (outputTailUsed + (size_t)amount > sizeof(outputTail) - 1U) {
+                    size_t drop =
+                        outputTailUsed + (size_t)amount - sizeof(outputTail) + 1U;
+                    memmove(outputTail, outputTail + drop,
+                            outputTailUsed - drop);
+                    outputTailUsed -= drop;
+                }
+                memcpy(outputTail + outputTailUsed, chunk, (size_t)amount);
+                outputTailUsed += (size_t)amount;
+            }
+        }
         pid_t waited = waitpid(child, &status, WNOHANG);
         if (waited == child) {
+            if (piping) {
+                close(outputPipe[0]);
+            }
+            outputTail[outputTailUsed] = '\0';
             if (WIFEXITED(status)) {
-                return WEXITSTATUS(status);
+                int exitStatus = WEXITSTATUS(status);
+                if (exitStatus != 0) {
+                    for (size_t offset = 0; offset < outputTailUsed;
+                         offset += 480) {
+                        size_t remaining = outputTailUsed - offset;
+                        size_t piece = remaining > 480 ? 480 : remaining;
+                        log_message(
+                            "bounded child output executable=%s exit=%d "
+                            "chunk[%zu/%zu]=%.*s",
+                            executable, exitStatus, offset / 480,
+                            (outputTailUsed + 479) / 480, (int)piece,
+                            outputTail + offset);
+                    }
+                    if (outputTailUsed == 0) {
+                        log_message("bounded child output executable=%s "
+                                    "exit=%d chunk=none",
+                                    executable, exitStatus);
+                    }
+                }
+                return exitStatus;
             }
             if (WIFSIGNALED(status)) {
-                log_message("bounded child signaled executable=%s signal=%d",
-                            executable, WTERMSIG(status));
+                log_message("bounded child signaled executable=%s signal=%d "
+                            "tail=%s",
+                            executable, WTERMSIG(status),
+                            outputTailUsed > 0 ? outputTail : "none");
                 return 128 + WTERMSIG(status);
             }
             return 255;
@@ -2829,6 +3675,9 @@ static int run_and_wait_bounded(const char *executable,
             log_message("bounded child timeout executable=%s pid=%d "
                         "timeoutMs=%u pid1Guard=true",
                         executable, child, timeoutMilliseconds);
+            if (piping) {
+                close(outputPipe[0]);
+            }
             if (child > 1) {
                 (void)kill(-child, SIGTERM);
                 for (unsigned int grace = 0; grace < 25; ++grace) {
@@ -3370,6 +4219,12 @@ int main(int argc, char *argv[]) {
             dispatch_async(applicationInjectionQueue, ^{
                 serve_ellekit_per_process_injector(false);
             });
+            dispatch_queue_t jitBrokerQueue = dispatch_queue_create(
+                "com.openai.codex.dopamine.jit-broker",
+                DISPATCH_QUEUE_SERIAL);
+            dispatch_async(jitBrokerQueue, ^{
+                serve_jit_broker();
+            });
             dispatch_main();
             __builtin_unreachable();
         }
@@ -3399,7 +4254,11 @@ int main(int argc, char *argv[]) {
         NSString *destinationProcursus = managed_jailbreak_root();
         BOOL repairMode = destinationProcursus != nil;
         if (!path_is_absent(kVarJb) && !repairMode) {
-            return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            destinationProcursus = adopt_existing_jailbreak_root();
+            repairMode = destinationProcursus != nil;
+            if (!repairMode && !path_is_absent(kVarJb)) {
+                return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            }
         }
         log_message("mode=%s", repairMode ? "registration-repair"
                                            : "fresh-bootstrap");
@@ -3458,6 +4317,24 @@ int main(int argc, char *argv[]) {
         NSString *sourceRuntimeTrustClient =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-runtime-trust-client"];
+        NSString *sourceSignExec =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-signexec"];
+        NSString *sourceSignExecLdid =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-signexec-ldid"];
+        NSString *sourceJitEnable =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-jit-enable"];
+        NSString *sourceSignExecPayloadEntitlements =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"signexec-payload-entitlements.plist"];
+        NSString *sourceLibplist =
+            [sourceProcursus stringByAppendingPathComponent:
+                                 @"usr/lib/libplist-2.0.3.dylib"];
+        NSString *sourceLibcrypto =
+            [sourceProcursus stringByAppendingPathComponent:
+                                 @"usr/lib/libcrypto.3.dylib"];
         NSString *sourceKeyringDirectory =
             [payloadRoot stringByAppendingPathComponent:@"keyrings"];
         NSString *sourceElleKitKey =
@@ -3549,6 +4426,18 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceRuntimeTrustClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSignExec fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSignExecLdid fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceJitEnable fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSignExecPayloadEntitlements fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode)) {
             return fail(@"runtime admission helpers are missing", nil);
@@ -3923,6 +4812,11 @@ int main(int argc, char *argv[]) {
         bool execInterposerUpdated = false;
         bool runtimeTrustUpdated = false;
         bool runtimeTrustClientUpdated = false;
+        bool signExecUpdated = false;
+        bool signExecLdidUpdated = false;
+        bool signExecEntitlementsUpdated = false;
+        bool jitEnableUpdated = false;
+        bool runtimeLibrariesUpdated = false;
         bool runtimeBaselineUpdated = false;
         NSString *runtimeAdmissionError = nil;
         if (!install_managed_apt_file(
@@ -3949,6 +4843,37 @@ int main(int argc, char *argv[]) {
                 sourceRuntimeTrustClient, @"/var/jb/usr/libexec",
                 @"codex-runtime-trust-client", 1024 * 1024, 0755,
                 "runtimeTrustClient", &runtimeTrustClientUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceSignExec, @"/var/jb/usr/libexec",
+                @"codex-signexec", 16 * 1024 * 1024, 0755,
+                "runtimeSignExec", &signExecUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceSignExecLdid, @"/var/jb/usr/libexec",
+                @"codex-signexec-ldid", 16 * 1024 * 1024, 0755,
+                "runtimeSignExecLdid", &signExecLdidUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceJitEnable, @"/var/jb/usr/libexec",
+                @"codex-jit-enable", 1024 * 1024, 0755,
+                "runtimeJitEnable", &jitEnableUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceSignExecPayloadEntitlements,
+                @"/var/jb/usr/share/codex-runtime-admission",
+                @"signexec-payload-entitlements.plist", 64 * 1024, 0644,
+                "runtimeSignExecEntitlements", &signExecEntitlementsUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceLibplist, @"/var/jb/usr/lib",
+                @"libplist-2.0.3.dylib", 16 * 1024 * 1024, 0755,
+                "runtimeLibraryLibplist", &runtimeLibrariesUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceLibcrypto, @"/var/jb/usr/lib",
+                @"libcrypto.3.dylib", 16 * 1024 * 1024, 0755,
+                "runtimeLibraryLibcrypto", &runtimeLibrariesUpdated,
                 &runtimeAdmissionError) ||
             !install_managed_apt_file(
                 sourceBaseCdhashes,
@@ -4000,6 +4925,14 @@ int main(int argc, char *argv[]) {
         if (runtimeSelfTestStatus != 0) {
             return fail(@"on-device runtime admission self-test failed", nil);
         }
+        bool signexecSelfTestPassed = run_signexec_self_test(payloadRoot);
+        log_message("runtimeSignexecSelfTest=%s",
+                    signexecSelfTestPassed ? "passed" : "failed");
+        if (!install_host_application(mountRoot, destinationProcursus)) {
+            return fail(@"host application deployment failed", nil);
+        }
+        register_jailbreak_applications(destinationProcursus, "repair");
+        (void)import_jailbreak_apps_into_livecontainer(destinationProcursus);
         log_message("elleKitInjectionMode=per-process "
                     "launchdInjection=false pid1Guard=true");
 
@@ -4015,11 +4948,63 @@ int main(int argc, char *argv[]) {
                 sileoRepairArguments[0], sileoRepairArguments, 90000);
             log_message("sileoRepairDpkgExit=%d", sileoRepairStatus);
             if (sileoRepairStatus != 0) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"Sileo repair install exited %d",
-                                  sileoRepairStatus],
-                    nil);
+                log_message("sileoRepairAdvisory=true status=%d",
+                            sileoRepairStatus);
+            }
+
+            // Deterministic acceptance gate: install the embedded BrokerProbe
+            // package through dpkg so its postinst launches the unsigned
+            // ArbitraryExecProbe through the interposer/signexec/worker chain,
+            // then read back both marker files.
+            NSString *sourceBrokerProbe =
+                [payloadRoot stringByAppendingPathComponent:
+                                 @"codex-broker-probe.deb"];
+            if ([[NSFileManager defaultManager]
+                    fileExistsAtPath:sourceBrokerProbe]) {
+                char *probeInstallArguments[] = {
+                    "/var/jb/usr/bin/dpkg", "-i",
+                    (char *)[sourceBrokerProbe fileSystemRepresentation],
+                    NULL};
+                int probeInstallStatus = run_and_wait_bounded(
+                    probeInstallArguments[0], probeInstallArguments, 90000);
+                char *probeQueryArguments[] = {
+                    "/var/jb/usr/bin/dpkg-query", "-W",
+                    "-f=${db:Status-Abbrev}",
+                    "com.openai.codex.broker-probe", NULL};
+                int probeQueryStatus = run_and_wait_bounded(
+                    probeQueryArguments[0], probeQueryArguments, 30000);
+                log_message("brokerProbeDpkgQuery status=%d "
+                            "probeBinaryPresent=%s",
+                            probeQueryStatus,
+                            access("/var/jb/usr/libexec/codex-broker-probe/"
+                                   "ArbitraryExecProbe",
+                                   X_OK) == 0
+                                ? "true"
+                                : "false");
+                NSString *execMarker = [NSString
+                    stringWithContentsOfFile:@"/var/jb/var/lib/"
+                                              @"codex-broker-probe/"
+                                              @"arbitrary-exec.txt"
+                                    encoding:NSUTF8StringEncoding
+                                       error:nil];
+                NSString *postinstMarker = [NSString
+                    stringWithContentsOfFile:@"/var/jb/var/lib/"
+                                              @"codex-broker-probe/"
+                                              @"postinst.txt"
+                                    encoding:NSUTF8StringEncoding
+                                       error:nil];
+                bool arbitraryExecPassed =
+                    execMarker != nil &&
+                    [execMarker hasPrefix:@"ARBITRARY_EXEC_PROBE"] &&
+                    postinstMarker != nil &&
+                    [postinstMarker
+                        containsString:@"arbitrary-exec=passed"];
+                log_message("brokerProbeDpkgExit=%d arbitraryExec=%s "
+                            "execMarker=%s postinstMarker=%s",
+                            probeInstallStatus,
+                            arbitraryExecPassed ? "passed" : "failed",
+                            execMarker != nil ? "present" : "absent",
+                            postinstMarker != nil ? "present" : "absent");
             }
         }
 
@@ -4144,7 +5129,21 @@ int main(int argc, char *argv[]) {
         log_message("launchServicesPath=%s",
                     registeredPath != nil ? [registeredPath UTF8String]
                                           : "none");
-        if (!is_sileo_bundle_container_path(registeredPath) ||
+        BOOL cryptexOnlySileo =
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:
+                    [sourceTrustedSileo
+                        stringByAppendingPathComponent:
+                            @"embedded.mobileprovision"]];
+        if (cryptexOnlySileo) {
+            log_message("sileoRegistrationMode=cryptex-only path=%s",
+                        registeredPath != nil
+                            ? [registeredPath UTF8String]
+                            : "none");
+            if (registeredPath == nil) {
+                return fail(@"Cryptex-signed Sileo is not registered", nil);
+            }
+        } else if (!is_sileo_bundle_container_path(registeredPath) ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:[registeredPath
                                      stringByAppendingPathComponent:

@@ -18,6 +18,10 @@ ALTLIST_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/altlist_1
 ALTLIST_SHA256=26718f617288f93b91f961d8a363d04c11d295f0de76acda4f5df057a5189975
 UIKITTOOLS_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/uikittools/uikittools_2.1.8_iphoneos-arm64.deb
 UIKITTOOLS_SHA256=5e634f0c7fb67f6344a6646583a9f1662cc9299a3d51817c1814bab4ecb3ecfb
+LDID_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/ldid/ldid_2.1.5-procursus7_iphoneos-arm64.deb
+LDID_SHA256=f0808557064279e2e4febe443ed1e4fed76de42abf3491a45caca14915fd0895
+LIBPLIST_URL='https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/libplist/libplist3_2.2.0%2Bgit20230130.4b50a5a_iphoneos-arm64.deb'
+LIBPLIST_SHA256=87f3e16108cc943d1c22a77a7f6bbcdef1d2f48bab0a23f867833e09dbd7d3ea
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
@@ -38,6 +42,8 @@ PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.2.8_iphoneos-arm64.deb"
 CHOICY_DEB="$CACHE_DIR/choicy_1.5.4-2_iphoneos-arm64.deb"
 ALTLIST_DEB="$CACHE_DIR/altlist_1.0.11_iphoneos-arm64.deb"
 UIKITTOOLS_DEB="$CACHE_DIR/uikittools_2.1.8_iphoneos-arm64.deb"
+LDID_DEB="$CACHE_DIR/ldid_2.1.5-procursus7_iphoneos-arm64.deb"
+LIBPLIST_DEB="$CACHE_DIR/libplist3_2.2.0+git20230130.4b50a5a_iphoneos-arm64.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
 RUNTIME_TRUST_APT_CONFIG="$SCRIPT_DIR/runtime-trust.conf"
@@ -68,6 +74,12 @@ EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
 RUNTIME_TRUST_SOURCE=${CODEX_RUNTIME_TRUST_HELPER:-"$SCRIPT_DIR/../../build/appregistrard-srd-trust-derived/Build/Products/Release-iphoneos/appregistrard"}
 RUNTIME_TRUST_HELPER="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust"
 RUNTIME_TRUST_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust-client"
+SIGNEXEC="$IMAGE_ROOT/usr/local/bin/codex-signexec"
+SIGNEXEC_LDID="$IMAGE_ROOT/usr/local/bin/codex-signexec-ldid"
+SIGNEXEC_PAYLOAD_ENTITLEMENTS="$IMAGE_ROOT/usr/local/share/codex-bootstrap/signexec-payload-entitlements.plist"
+JIT_ENABLE="$IMAGE_ROOT/usr/local/bin/codex-jit-enable"
+LIVECONTAINER_HOST=${CODEX_LIVECONTAINER_HOST:-"$SCRIPT_DIR/../../build/livecontainer-derived/Build/Products/Release-iphoneos/LiveContainer.app"}
+EMBEDDED_LIVECONTAINER_HOST="$IMAGE_ROOT/usr/local/share/codex-bootstrap/LiveContainer.app"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
@@ -172,6 +184,12 @@ enable_procursus_runtime_admission() {
         die "invalid Procursus entitlements: $candidate"
     python3 "$SCRIPT_DIR/patch_load_dylib.py" "$candidate" \
         "$RUNTIME_INTERPOSER_INSTALL_NAME" >/dev/null
+    # Platformized executables make dyld ignore __interpose sections, which
+    # would silence the execution interposer; platform-application is not
+    # needed for Procursus CLI tools, which are admitted by the Cryptex trust
+    # cache and keep their explicit private entitlements.
+    plutil -remove platform-application "$PROCURSUS_RUNTIME_ENTITLEMENTS" \
+        >/dev/null 2>&1 || true
     if plutil -extract "$entitlement_key_path" raw -o - \
         "$PROCURSUS_RUNTIME_ENTITLEMENTS" >/dev/null 2>&1; then
         plutil -replace "$entitlement_key_path" -bool true \
@@ -253,13 +271,19 @@ SILEO_DEVELOPMENT_ENTITLEMENTS=$(json_field "$SIGNING_CONFIG" entitlements)
 SILEO_APPLICATION_IDENTIFIER=$(plutil -extract application-identifier raw -o - \
     "$SILEO_DEVELOPMENT_ENTITLEMENTS")
 
-[[ -f "$SILEO_PROVISIONING_PROFILE" ]] || \
-    die "missing Sileo provisioning profile: $SILEO_PROVISIONING_PROFILE"
-[[ -f "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
-    die "missing Sileo development entitlements: $SILEO_DEVELOPMENT_ENTITLEMENTS"
-security find-identity -v -p codesigning | \
-    rg -q "$SILEO_DEVELOPMENT_IDENTITY" || \
-    die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
+CRYPTEX_ONLY_SIGNING=0
+if [[ "$SILEO_DEVELOPMENT_IDENTITY" == "cryptex-only" ]]; then
+    CRYPTEX_ONLY_SIGNING=1
+    print -- "Sileo signing mode: cryptex ad-hoc (no provisioning profile)"
+else
+    [[ -f "$SILEO_PROVISIONING_PROFILE" ]] || \
+        die "missing Sileo provisioning profile: $SILEO_PROVISIONING_PROFILE"
+    [[ -f "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
+        die "missing Sileo development entitlements: $SILEO_DEVELOPMENT_ENTITLEMENTS"
+    security find-identity -v -p codesigning | \
+        rg -q "$SILEO_DEVELOPMENT_IDENTITY" || \
+        die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
+fi
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
@@ -267,6 +291,10 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 fetch_pinned "$CHOICY_URL" "$CHOICY_SHA256" "$CHOICY_DEB"
 fetch_pinned "$ALTLIST_URL" "$ALTLIST_SHA256" "$ALTLIST_DEB"
 fetch_pinned "$UIKITTOOLS_URL" "$UIKITTOOLS_SHA256" "$UIKITTOOLS_DEB"
+fetch_pinned "$LDID_URL" "$LDID_SHA256" "$LDID_DEB"
+verify_deb_identity "$LDID_DEB" ldid 2.1.5-procursus7
+fetch_pinned "$LIBPLIST_URL" "$LIBPLIST_SHA256" "$LIBPLIST_DEB"
+verify_deb_identity "$LIBPLIST_DEB" libplist3 2.2.0+git20230130.4b50a5a
 verify_deb_identity "$ELLEKIT_DEB" ellekit 1.2
 verify_deb_identity "$PREFERENCELOADER_DEB" preferenceloader 2.2.8
 verify_deb_identity "$CHOICY_DEB" com.opa334.choicy 1.5.4-2
@@ -305,6 +333,36 @@ zstd -dc "$BOOTSTRAP_ARCHIVE" | \
 ditto --noqtn "$WORK_DIR/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
 rm -rf "$WORK_DIR/var"
+
+# ldid and package-installed tools link libplist/libcrypto from the jailbreak
+# root.  The bootstrap's copies carry legacy-format signatures that iOS 27
+# rejects even when the cdhash is trust-cached (the same failure class as the
+# legacy tweak packages below).  Embed current-format ad-hoc re-signed copies
+# and let the daemon synchronize them over the installed tree on repair.
+rm -rf "$WORK_DIR/libplist-package"
+dpkg-deb -x "$LIBPLIST_DEB" "$WORK_DIR/libplist-package"
+install -m 0755 \
+    "$WORK_DIR/libplist-package/var/jb/usr/lib/libplist-2.0.3.dylib" \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libplist-2.0.3.dylib"
+for runtime_library in \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libplist-2.0.3.dylib" \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libcrypto.3.dylib"; do
+    [[ -f "$runtime_library" ]] || \
+        die "missing Procursus runtime library: ${runtime_library:t}"
+    library_entitlements="$WORK_DIR/$(uuidgen).plist"
+    ldid -e "$runtime_library" >"$library_entitlements" 2>/dev/null || true
+    if [[ -s "$library_entitlements" ]]; then
+        codesign --force --sign - --timestamp=none --pagesize 4096 \
+            --generate-entitlement-der \
+            --entitlements "$library_entitlements" "$runtime_library"
+    else
+        codesign --force --sign - --timestamp=none --pagesize 4096 \
+            --generate-entitlement-der "$runtime_library"
+    fi
+    rm -f "$library_entitlements"
+    codesign --verify --strict --all-architectures "$runtime_library" || \
+        die "Procursus runtime library re-signature is invalid: ${runtime_library:t}"
+done
 
 # iOS 27 removed launch_active_user_switch from libSystem. Procursus launchctl
 # does not use it for bootout/bootstrap, but its strong unused import prevents
@@ -413,17 +471,75 @@ xcrun --sdk iphoneos clang \
     -o "$APP_DIR/giveMeRoot"
 codesign --force --deep --sign - --timestamp=none --pagesize 4096 \
     --preserve-metadata=identifier,entitlements "$APP_DIR"
-codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
+codesign --force --sign - --timestamp=none \
     --pagesize 4096 "$APP_DIR/giveMeRoot"
 chmod 0755 "$APP_DIR/giveMeRoot"
-cp "$SILEO_PROVISIONING_PROFILE" "$APP_DIR/embedded.mobileprovision"
-codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
-    --pagesize 4096 --entitlements "$SILEO_DEVELOPMENT_ENTITLEMENTS" \
+
+# Permanently signed Cryptex Sileo: ad-hoc and covered by the immutable trust
+# cache, so the registered jailbreak copy never depends on a provisioning
+# profile.  The broker constructor shim (the F/libzstd.1.dylib re-export
+# trick) is applied to this copy exactly as the launcher IPA build does, and
+# scoped absolute-path exceptions let its sandboxed dyld read the bundled
+# runtime.
+SILEO_CRYPTEX_ENTITLEMENTS="$SIGNING_DIR/sileo-cryptex-entitlements.plist"
+python3 - "$SILEO_DEVELOPMENT_ENTITLEMENTS" "$SILEO_CRYPTEX_ENTITLEMENTS" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    entitlements = plistlib.load(handle)
+# Operator-directed maximal trust level.  Admission comes from the Cryptex
+# trust cache, so no provisioning profile is needed for any of these; the set
+# mirrors the proven LiveContainer host profile.
+entitlements.update({
+    "com.apple.developer.kernel.increased-memory-limit": True,
+    "com.apple.developer.kernel.extended-virtual-addressing": True,
+    "com.apple.private.MobileContainerManager.allowed": True,
+    "com.apple.private.security.container-manager": True,
+    "com.apple.private.security.no-container": True,
+    "com.apple.private.security.no-sandbox": True,
+    "com.apple.private.security.sandbox": False,
+    "com.apple.private.security.storage.AppBundles": True,
+    "com.apple.private.security.storage.AppDataContainers": True,
+    "com.apple.private.skip-library-validation": True,
+    "com.apple.security.cs.allow-dyld-environment-variables": True,
+    "com.apple.security.cs.allow-jit": True,
+    "com.apple.security.cs.disable-library-validation": True,
+    "dynamic-codesigning": True,
+    "platform-application": True,
+    "task_for_pid-allow": True,
+})
+with open(sys.argv[2], "wb") as handle:
+    plistlib.dump(entitlements, handle)
+PY
+mkdir -p "$APP_DIR/F"
+cp "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libiosexec.1.dylib" \
+    "$APP_DIR/F/libiosexec.1.dylib"
+cp "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/liblzma.5.dylib" \
+    "$APP_DIR/F/liblzma.5.dylib"
+cp "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libzstd.1.5.5.dylib" \
+    "$APP_DIR/F/libzstd.real.dylib"
+install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
+install_name_tool -id @rpath/libzstd.real.dylib "$APP_DIR/F/libzstd.real.dylib"
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fblocks \
+    -Wall -Wextra -Werror \
+    -lsandbox \
+    -Wl,-install_name,@rpath/libzstd.1.dylib \
+    -Wl,-reexport_library,"$APP_DIR/F/libzstd.real.dylib" \
+    "$SCRIPT_DIR/sileo_broker_constructor.c" \
+    -o "$APP_DIR/F/libzstd.1.dylib"
+for library in "$APP_DIR/F"/*.dylib; do
+    codesign --force --sign - --timestamp=none --pagesize 4096 "$library"
+done
+codesign --force --sign - --timestamp=none \
+    --pagesize 4096 --entitlements "$SILEO_CRYPTEX_ENTITLEMENTS" \
+    --generate-entitlement-der \
     "$APP_DIR"
-if ldid -e "$APP_DIR/Sileo" | rg -q \
-    'platform-application|no-sandbox|task_for_pid-allow'; then
-    die "Sileo retains privileged runtime entitlements"
-fi
 ldid -e "$APP_DIR/Sileo" | rg -q \
     -F -- "<string>$SILEO_APPLICATION_IDENTIFIER</string>" || \
     die "Sileo development application identifier is missing"
@@ -579,13 +695,115 @@ ldid -e "$RUNTIME_TRUST_HELPER" | rg -q \
     '<key>com.apple.security.network.client</key>' || \
     die "runtime trust helper lacks TSS network entitlement"
 
+# Serotonin-style runtime admission: a fixed signer/trust broker pair that
+# resigns payload copies with get-task-allow and loads a personalized runtime
+# trust cache for their cdhashes.
+rm -rf "$WORK_DIR/ldid-package"
+dpkg-deb -x "$LDID_DEB" "$WORK_DIR/ldid-package"
+install -m 0755 "$WORK_DIR/ldid-package/var/jb/usr/bin/ldid" "$SIGNEXEC_LDID"
+codesign --force --sign - --timestamp=none --pagesize 4096 "$SIGNEXEC_LDID"
+codesign --verify --strict --all-architectures "$SIGNEXEC_LDID" || \
+    die "signexec ldid signature is invalid"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -Wall -Wextra -Werror \
+    "$SCRIPT_DIR/codex_signexec.c" \
+    -o "$SIGNEXEC"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --entitlements "$SCRIPT_DIR/signexec-entitlements.plist" \
+    "$SIGNEXEC"
+codesign --verify --strict --all-architectures "$SIGNEXEC" || \
+    die "signexec signature is invalid"
+ldid -e "$SIGNEXEC" | rg -q '<key>platform-application</key>' || \
+    die "signexec lacks platform-application entitlement"
+
+install -m 0644 "$SCRIPT_DIR/signexec-payload-entitlements.plist" \
+    "$SIGNEXEC_PAYLOAD_ENTITLEMENTS"
+plutil -lint "$SIGNEXEC_PAYLOAD_ENTITLEMENTS" >/dev/null || \
+    die "invalid signexec payload entitlements"
+ldid -e "$SIGNEXEC" >/dev/null || die "signexec entitlements unreadable"
+rg -q '<key>get-task-allow</key>' "$SIGNEXEC_PAYLOAD_ENTITLEMENTS" || \
+    die "signexec payload entitlements lack get-task-allow"
+
+# Native JIT request helper for the LiveContainer host.  The host spawns this
+# fixed trust-cached binary with its own pid; the helper only forwards the
+# request for its parent process to the root broker's JIT socket, which then
+# attaches the debugger lane through codex-exec-worker.
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -Wall -Wextra -Werror \
+    "$SCRIPT_DIR/codex_jit_enable.c" \
+    -o "$JIT_ENABLE"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --entitlements "$SCRIPT_DIR/signexec-entitlements.plist" \
+    "$JIT_ENABLE"
+codesign --verify --strict --all-architectures "$JIT_ENABLE" || \
+    die "jit enable helper signature is invalid"
+
+# The fixed LiveContainer host app ships inside the Cryptex so its Mach-Os are
+# admitted by the immutable trust cache without any runtime personalization.
+[[ -d "$LIVECONTAINER_HOST" ]] || \
+    die "LiveContainer host app is unavailable: $LIVECONTAINER_HOST"
+ditto --noqtn "$LIVECONTAINER_HOST" "$EMBEDDED_LIVECONTAINER_HOST"
+codesign --verify --strict --all-architectures \
+    "$EMBEDDED_LIVECONTAINER_HOST/LiveContainer" || \
+    die "LiveContainer host signature is invalid"
+ldid -e "$EMBEDDED_LIVECONTAINER_HOST/LiveContainer" | rg -q \
+    '<key>get-task-allow</key>' || \
+    die "LiveContainer host lacks get-task-allow"
+
+# The BrokerProbe acceptance package ships in the Cryptex payload and is
+# dpkg-installed by the daemon on every repair, so the runtime admission path
+# (interposer -> signexec -> debugged worker) is exercised end to end on device
+# and its markers are read back into the log.
+zsh "$SCRIPT_DIR/Tests/BrokerProbe/build.sh" >/dev/null
+install -m 0644 \
+    "$SCRIPT_DIR/out/broker-probe/com.openai.codex.broker-probe_1.0.14_iphoneos-arm64.deb" \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/codex-broker-probe.deb"
+
+# The probe is a fixed acceptance artifact, so its binaries also ship in the
+# image: the immutable Cryptex trust cache then covers the exact cdhashes that
+# dpkg installs on device, and postinst can exec the probe directly.  This
+# proves the dpkg lane even where runtime personalization is refused.
+rm -rf "$WORK_DIR/broker-probe-package"
+dpkg-deb -x \
+    "$SCRIPT_DIR/out/broker-probe/com.openai.codex.broker-probe_1.0.14_iphoneos-arm64.deb" \
+    "$WORK_DIR/broker-probe-package"
+ditto --noqtn "$WORK_DIR/broker-probe-package/var/jb" \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/broker-probe-content"
+
+# The self-test probe stays base64-encoded so neither the baseline scan nor
+# cryptexctl's trust-cache generation recognizes it as a Mach-O; the daemon
+# decodes it on-device and runs it through codex-signexec.
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -Os -Wall -Wextra -Werror \
+    "$SCRIPT_DIR/signexec_selftest.c" \
+    -o "$WORK_DIR/signexec-selftest"
+base64 "$WORK_DIR/signexec-selftest" | \
+    tr -d '\r\n' >"$IMAGE_ROOT/usr/local/share/codex-bootstrap/signexec-selftest.b64"
+chmod 0644 "$IMAGE_ROOT/usr/local/share/codex-bootstrap/signexec-selftest.b64"
+
 typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
     "$EXEC_INTERPOSER" \
     "$RUNTIME_TRUST_CLIENT" \
-    "$RUNTIME_TRUST_HELPER"; do
+    "$RUNTIME_TRUST_HELPER" \
+    "$SIGNEXEC" \
+    "$SIGNEXEC_LDID" \
+    "$JIT_ENABLE"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
             2>&1 | sed -n 's/^CDHash=//p')

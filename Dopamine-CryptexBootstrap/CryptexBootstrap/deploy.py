@@ -346,18 +346,34 @@ def build_pair(version: str | None) -> dict[str, Any]:
 
     note(f"Building matched Cryptex/Sileo pair version {version}")
     run([str(BUILD_SCRIPT)], env=env)
-    run([str(APP_SCRIPT)], env=env)
+
+    signing_config = read_json(SCRIPT_DIR / "work" / "signing" / "config.json")
+    cryptex_only = signing_config.get("identitySha1") == "cryptex-only"
+    if cryptex_only:
+        note("Cryptex-only signing: skipping provisioned IPA build; "
+             "Sileo ships ad-hoc inside the Cryptex")
+    else:
+        run([str(APP_SCRIPT)], env=env)
 
     build_summary = read_json(BUILD_SUMMARY)
-    app_summary = read_json(app_summary_path)
+    app_summary = (
+        read_json(app_summary_path) if not cryptex_only else {}
+    )
     if build_summary.get("version") != version:
         raise DeployError("Cryptex build summary version does not match this run")
-    if Path(str(app_summary.get("ipa", ""))).resolve() != ipa.resolve():
-        raise DeployError("Sileo build summary points at an unexpected IPA")
-    if app_summary.get("cryptexVersion") != version:
-        raise DeployError("Sileo build summary is not paired to this Cryptex version")
-    if app_summary.get("cryptexBuildSummarySha256") != sha256_file(BUILD_SUMMARY):
-        raise DeployError("Sileo build summary is not paired to this build summary")
+    if not cryptex_only:
+        if Path(str(app_summary.get("ipa", ""))).resolve() != ipa.resolve():
+            raise DeployError("Sileo build summary points at an unexpected IPA")
+        if app_summary.get("cryptexVersion") != version:
+            raise DeployError(
+                "Sileo build summary is not paired to this Cryptex version"
+            )
+        if app_summary.get("cryptexBuildSummarySha256") != sha256_file(
+            BUILD_SUMMARY
+        ):
+            raise DeployError(
+                "Sileo build summary is not paired to this build summary"
+            )
 
     source_helper = (
         SCRIPT_DIR
@@ -381,25 +397,41 @@ def build_pair(version: str | None) -> dict[str, Any]:
         / "Sileo.app"
         / "giveMeRoot"
     )
-    expected = app_summary.get("rootHelperSha256")
-    hashes = {
-        "workingCopy": sha256_file(source_helper),
-        "cryptexCopy": sha256_file(trusted_helper),
-        "ipaCopy": sha256_bytes(helper_from_ipa(ipa)),
-    }
-    if not isinstance(expected, str) or set(hashes.values()) != {expected}:
-        raise DeployError(
-            "the Cryptex and provisioned app do not contain the exact same root helper"
-        )
+    if cryptex_only:
+        expected = sha256_file(trusted_helper)
+        hashes = {
+            "workingCopy": sha256_file(source_helper),
+            "cryptexCopy": sha256_file(trusted_helper),
+        }
+        if set(hashes.values()) != {expected}:
+            raise DeployError(
+                "the Cryptex and working copies do not contain the exact same "
+                "root helper"
+            )
+    else:
+        expected = app_summary.get("rootHelperSha256")
+        hashes = {
+            "workingCopy": sha256_file(source_helper),
+            "cryptexCopy": sha256_file(trusted_helper),
+            "ipaCopy": sha256_bytes(helper_from_ipa(ipa)),
+        }
+        if not isinstance(expected, str) or set(hashes.values()) != {expected}:
+            raise DeployError(
+                "the Cryptex and provisioned app do not contain the exact "
+                "same root helper"
+            )
 
     result = {
         "identifier": build_summary["identifier"],
         "version": version,
         "unsignedBundle": build_summary["bundle"],
         "buildSummary": str(BUILD_SUMMARY.resolve()),
-        "ipa": str(ipa.resolve()),
-        "ipaSha256": sha256_file(ipa),
-        "appSummary": str(app_summary_path.resolve()),
+        "ipa": None if cryptex_only else str(ipa.resolve()),
+        "ipaSha256": None if cryptex_only else sha256_file(ipa),
+        "cryptexOnly": cryptex_only,
+        "appSummary": (
+            None if cryptex_only else str(app_summary_path.resolve())
+        ),
         "rootHelperSha256": expected,
         "rootHelperCopies": hashes,
     }

@@ -32,14 +32,16 @@ lipo -create \
     "$OUTPUT_DIR/BrokerProbe.arm64.dylib" \
     "$OUTPUT_DIR/BrokerProbe.arm64e.dylib" \
     -output "$DYLIB_DIRECTORY/BrokerProbe.dylib"
-ldid -S "$DYLIB_DIRECTORY/BrokerProbe.dylib"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$DYLIB_DIRECTORY/BrokerProbe.dylib"
 xcrun --sdk iphoneos clang \
     -target "arm64-apple-ios${MINIMUM_VERSION}" \
     -isysroot "$SDK" \
     -Os -Wall -Wextra -Werror \
     "$SCRIPT_DIR/ArbitraryExecProbe.c" \
     -o "$PROBE_DIRECTORY/ArbitraryExecProbe"
-ldid -S "$PROBE_DIRECTORY/ArbitraryExecProbe"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$PROBE_DIRECTORY/ArbitraryExecProbe"
 install -m 0644 "$SCRIPT_DIR/BrokerProbe.plist" \
     "$DYLIB_DIRECTORY/BrokerProbe.plist"
 install -m 0644 "$SCRIPT_DIR/control" "$CONTROL_DIRECTORY/control"
