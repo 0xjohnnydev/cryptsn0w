@@ -491,6 +491,103 @@ static int verify_root_broker(os_log_t log) {
     return 0;
 }
 
+static bool is_hex_character(char character) {
+    return (character >= '0' && character <= '9') ||
+           (character >= 'a' && character <= 'f') ||
+           (character >= 'A' && character <= 'F');
+}
+
+static bool is_managed_documents_deb_path(const char *path) {
+    static const char prefix[] =
+        "/private/var/mobile/Containers/Data/Application/";
+    static const char documents[] = "/Documents/";
+    if (path == NULL || strncmp(path, prefix, sizeof(prefix) - 1U) != 0 ||
+        strstr(path, "/../") != NULL || strstr(path, "/./") != NULL) {
+        return false;
+    }
+    const char *identifier = path + sizeof(prefix) - 1U;
+    for (size_t index = 0; index < 36U; ++index) {
+        bool separator = index == 8U || index == 13U || index == 18U ||
+                         index == 23U;
+        if ((separator && identifier[index] != '-') ||
+            (!separator && !is_hex_character(identifier[index]))) {
+            return false;
+        }
+    }
+    const char *leaf = identifier + 36U;
+    if (strncmp(leaf, documents, sizeof(documents) - 1U) != 0) {
+        return false;
+    }
+    leaf += sizeof(documents) - 1U;
+    size_t leafLength = strnlen(leaf, NAME_MAX + 1U);
+    return leafLength > strlen(".deb") && leafLength <= NAME_MAX &&
+           strchr(leaf, '/') == NULL &&
+           strcmp(leaf + leafLength - strlen(".deb"), ".deb") == 0;
+}
+
+static bool run_postboot_install_driver(os_log_t log, int *exitCode) {
+    const char *mode = getenv("CODEX_POSTBOOT_DRIVER");
+    if (mode == NULL) {
+        return false;
+    }
+    const char *debPath = getenv("CODEX_POSTBOOT_INSTALL_DEB");
+    if (strcmp(mode, "install-deb-v1") != 0 ||
+        !is_managed_documents_deb_path(debPath)) {
+        os_log_error(log,
+                     "postboot driver rejected mode=%{public}s path=%{public}s",
+                     mode, debPath != NULL ? debPath : "none");
+        dprintf(STDERR_FILENO,
+                "codex-postboot-driver rejected mode=%s path=%s\n", mode,
+                debPath != NULL ? debPath : "none");
+        *exitCode = 126;
+        return true;
+    }
+
+    char *arguments[] = {"/var/jb/usr/bin/dpkg", "-i", (char *)debPath,
+                         NULL};
+    int descriptors[2];
+    int descriptorNumbers[2];
+    uint32_t descriptorCount = 0;
+    for (int descriptor = STDOUT_FILENO; descriptor <= STDERR_FILENO;
+         ++descriptor) {
+        if (fcntl(descriptor, F_GETFD) >= 0) {
+            descriptors[descriptorCount] = descriptor;
+            descriptorNumbers[descriptorCount] = descriptor;
+            ++descriptorCount;
+        }
+    }
+    int32_t status = 126 << 8;
+    bool ran = descriptorCount != 0 &&
+        run_broker_request(arguments, 3, NULL, 0, descriptors,
+                           descriptorNumbers, descriptorCount, &status);
+    if (!ran) {
+        int savedError = errno;
+        os_log_error(log,
+                     "postboot driver broker request failed: %{public}s",
+                     strerror(savedError));
+        dprintf(STDERR_FILENO,
+                "codex-postboot-driver broker-failed errno=%d\n",
+                savedError);
+        *exitCode = 126;
+        return true;
+    }
+    if (WIFEXITED(status)) {
+        *exitCode = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        *exitCode = 128 + WTERMSIG(status);
+    } else {
+        *exitCode = 126;
+    }
+    os_log(log,
+           "postboot driver complete path=%{public}s status=%{public}d "
+           "exit=%{public}d",
+           debPath, status, *exitCode);
+    dprintf(STDERR_FILENO,
+            "codex-postboot-driver complete path=%s status=%d exit=%d\n",
+            debPath, status, *exitCode);
+    return true;
+}
+
 static struct codex_action_record *find_action_record_locked(
     const posix_spawn_file_actions_t *key) {
     for (struct codex_action_record *record = gActionRecords; record != NULL;
@@ -1091,6 +1188,10 @@ __attribute__((constructor)) static void initialize_sileo_broker(void) {
         os_log_error(gConstructorLog,
                      "constructor root broker preflight failed");
         _exit(126);
+    }
+    int driverExitCode = 0;
+    if (run_postboot_install_driver(gConstructorLog, &driverExitCode)) {
+        _exit(driverExitCode);
     }
     if (verify_spawn_bridge(gConstructorLog) != 0) {
         os_log_error(gConstructorLog,

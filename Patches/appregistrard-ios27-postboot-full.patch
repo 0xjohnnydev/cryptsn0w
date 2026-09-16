@@ -1,0 +1,168 @@
+diff --git a/appregistrard/AppRegistrar.swift b/appregistrard/AppRegistrar.swift
+index 9562d7b..48cce60 100644
+--- a/appregistrard/AppRegistrar.swift
++++ b/appregistrard/AppRegistrar.swift
+@@ -25,6 +25,8 @@ struct AppRegistrar: ParsableCommand {
+         abstract: "The App Registrar Daemon can be run as a daemon so that it registers apps in the /Applications and /System/Applications folders within mounted cryptexes, or as an on-demand command-line tool for dynamically registering applications with the system.",
+         subcommands: [
+             AppRegistrarDaemon.self,
++            TrustPathCommand.self,
++            ReplayTrustCachesCommand.self,
+             RegisterAppsCommand.self,
+             UnregisterAppCommand.self
+         ]
+# [REDACTED HUNK] Related request, payload, or installation details omitted.
+diff --git a/appregistrard/AppTrust/AMFIHelper.h b/appregistrard/AppTrust/AMFIHelper.h
+index 24ae0e4..c3fcf56 100644
+--- a/appregistrard/AppTrust/AMFIHelper.h
++++ b/appregistrard/AppTrust/AMFIHelper.h
+# [REDACTED HUNK] Related request, payload, or installation details omitted.
+diff --git a/appregistrard/AppTrust/AMFIHelper.m b/appregistrard/AppTrust/AMFIHelper.m
+index 3e8a21d..b77f2ce 100644
+--- a/appregistrard/AppTrust/AMFIHelper.m
++++ b/appregistrard/AppTrust/AMFIHelper.m
+# [REDACTED HUNK] Related request, payload, or installation details omitted.
+diff --git a/appregistrard/AppTrust/TrustCachePayloadGenerator.swift b/appregistrard/AppTrust/TrustCachePayloadGenerator.swift
+index ed17f45..22f3680 100644
+--- a/appregistrard/AppTrust/TrustCachePayloadGenerator.swift
++++ b/appregistrard/AppTrust/TrustCachePayloadGenerator.swift
+# [REDACTED HUNK] Related request, payload, or installation details omitted.
+diff --git a/appregistrard/Core/AppRegistration.swift b/appregistrard/Core/AppRegistration.swift
+index e5abf26..7a1dc38 100644
+--- a/appregistrard/Core/AppRegistration.swift
++++ b/appregistrard/Core/AppRegistration.swift
+@@ -85,6 +85,7 @@ struct AppRegistration {
+ 
+     private func runLaunchServices(urls: [URL]) throws {
+         var installedAppNames = [String]()
++        var lastRegistrationError: Error?
+ 
+         for url in urls {
+             autoreleasepool {
+@@ -97,11 +98,16 @@ struct AppRegistration {
+ 
+                     installedAppNames.append(url.deletingPathExtension().lastPathComponent)
+                 } catch {
++                    lastRegistrationError = error
+                     logger.error("Error during registration of \(url.lastPathComponent, privacy: .public): \(error, privacy: .public)")
+                 }
+             }
+         }
+ 
++        guard !installedAppNames.isEmpty else {
++            throw lastRegistrationError ?? "No apps were registered with LaunchServices"
++        }
++
+         Jindo.presentAppInstalledNotification(appNames: installedAppNames)
+     }
+ 
+@@ -146,18 +152,33 @@ private extension Bundle {
+         /// Ensure preinstalled version is terminated.
+         try? ProcessHelper.terminateProcess(withBundleIdentifier: bundleIdentifier)
+ 
+-        let registration = try createLaunchServicesRegistrationDictionary()
++        var registration = try createLaunchServicesRegistrationDictionary()
+ 
+         logger.debug("Registration dictionary for \(bundleIdentifier, privacy: .public): \((registration as NSDictionary).description, privacy: .public)")
+ 
+-        if LSApplicationWorkspace.default.registerApplicationDictionary(registration) {
+-            logger.notice("Successfully registered \(bundleIdentifier, privacy: .public)")
+-
+-            notify_post("com.apple.mobile.application_installed")
+-            notify_post("com.apple.itunesstored.application_installed")
+-        } else {
+-            logger.warning("Registration failed for \(bundleIdentifier, privacy: .public)")
++        let rawPlugins = registration.removeValue(forKey: "_LSBundlePlugins") as? [String: Any] ?? [:]
++        let plugins: [[String: Any]] = try rawPlugins.keys.sorted().map { key in
++            guard let dictionary = rawPlugins[key] as? [String: Any] else {
++                throw "Malformed plugin registration dictionary for \(key)"
++            }
++            return dictionary
+         }
++        let registrationDictionaries = [registration] + plugins
++
++        let requestContext = LSOperationRequestContext()
++        requestContext.targetUserID = NSNumber(value: 501)
++
++        let registrationResult: Any = try LSApplicationWorkspace.default.registerContainerizedApplication(
++            withInfoDictionaries: registrationDictionaries,
++            operationUUID: UUID(),
++            requestContext: requestContext,
++            saveObserver: nil
++        )
++
++        logger.notice("Successfully registered \(bundleIdentifier, privacy: .public), result: \(String(describing: registrationResult), privacy: .public)")
++
++        notify_post("com.apple.mobile.application_installed")
++        notify_post("com.apple.itunesstored.application_installed")
+     }
+ 
+     func createLaunchServicesRegistrationDictionary() throws -> [String: Any] {
+diff --git a/appregistrard/Core/DaemonServer.swift b/appregistrard/Core/DaemonServer.swift
+index e02737c..08657bb 100644
+--- a/appregistrard/Core/DaemonServer.swift
++++ b/appregistrard/Core/DaemonServer.swift
+@@ -46,11 +46,15 @@ final class DaemonServer {
+     private func activateAFU(applicationsPath: String) {
+         TrustCacheFSService.shared.activate()
+         
+-        do {
+-            /// Inject `libAppRegistrarHooks.dylib` into installd to allow ad-hoc signature validation.
+-            try HookInjection.enable()
+-        } catch {
+-            logger.fault("Error enabling dylib injection for installd: \(error, privacy: .public)")
++        if ProcessInfo.appregistrard_useInstallCoordination {
++            do {
++                /// Inject `libAppRegistrarHooks.dylib` into installd to allow ad-hoc signature validation.
++                try HookInjection.enable()
++            } catch {
++                logger.fault("Error enabling dylib injection for installd: \(error, privacy: .public)")
++            }
++        } else {
++            logger.notice("Direct LaunchServices mode enabled; skipping installd hook injection")
+         }
+ 
+         logger.info("Observing cryptex mounts, applications path is \(applicationsPath, privacy: .public)")
+diff --git a/appregistrard/Headers/CoreServicesSPI.h b/appregistrard/Headers/CoreServicesSPI.h
+index 2064034..2797390 100644
+--- a/appregistrard/Headers/CoreServicesSPI.h
++++ b/appregistrard/Headers/CoreServicesSPI.h
+@@ -10,6 +10,12 @@ NS_ASSUME_NONNULL_BEGIN
+ 
+ @end
+ 
++@interface LSOperationRequestContext : NSObject
++
++@property (nonatomic, retain) NSNumber *targetUserID;
++
++@end
++
+ @interface LSApplicationWorkspace : NSObject
+ 
+ @property (readonly, class) LSApplicationWorkspace *defaultWorkspace;
+@@ -17,6 +23,11 @@ NS_ASSUME_NONNULL_BEGIN
+ @property (readonly) NSArray <LSApplicationProxy *> *allInstalledApplications;
+ 
+ - (BOOL)registerApplicationDictionary:(NSDictionary *)dictionary;
++- (id _Nullable)registerContainerizedApplicationWithInfoDictionaries:(NSArray<NSDictionary *> *)dictionaries
++                                                        operationUUID:(NSUUID *)uuid
++                                                       requestContext:(LSOperationRequestContext *)context
++                                                         saveObserver:(id _Nullable)observer
++                                                    registrationError:(NSError * _Nullable * _Nullable)error;
+ - (BOOL)unregisterApplication:(NSURL *)appURL;
+ 
+ @end
+diff --git a/appregistrard/appregistrard.entitlements b/appregistrard/appregistrard.entitlements
+index 24229a7..679664a 100644
+--- a/appregistrard/appregistrard.entitlements
++++ b/appregistrard/appregistrard.entitlements
+# [REDACTED HUNK] Related request, payload, or installation details omitted.
+@@ -190,7 +185,7 @@
+ 		<string>IOHDIXControllerUserClient</string>
+ 	</array>
+ 	<key>application-identifier</key>
+-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
++	<string>codes.rambo.research.appregistrard</string>
+ 	<key>com.apple.sh</key>
+ 	<true/>
+ 	<key>platform-application</key>

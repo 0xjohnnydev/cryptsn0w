@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <mach/mach.h>
+#include <notify.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
@@ -143,6 +144,10 @@ static NSString *const kExecInterposerLibrary =
     @"/var/jb/usr/lib/codex-exec-interposer.dylib";
 static NSString *const kRuntimeTrustClientExecutable =
     @"/var/jb/usr/libexec/codex-runtime-trust-client";
+static NSString *const kRuntimeTrustHelperExecutable =
+    @"/var/jb/usr/libexec/codex-runtime-trust";
+static NSString *const kHeadlessSileoExecutable =
+    @"/var/jb/Applications/Sileo.app/Sileo";
 static NSString *const kElleKitInjectorExecutable =
     @"/var/jb/usr/libexec/codex-ellekit-loader";
 static NSString *const kElleKitInjectorDylib =
@@ -158,6 +163,10 @@ static int gLog = STDERR_FILENO;
 static os_log_t gUnifiedLog;
 
 static int run_and_wait(const char *executable, char *const arguments[]);
+static int run_and_wait_bounded_to_fd(const char *executable,
+                                      char *const arguments[],
+                                      unsigned int timeoutMilliseconds,
+                                      int outputDescriptor);
 static int run_and_wait_bounded(const char *executable,
                                 char *const arguments[],
                                 unsigned int timeoutMilliseconds);
@@ -307,6 +316,37 @@ static bool executable_paths_match(NSString *expected, NSString *actual) {
     return realpath([expected fileSystemRepresentation], expectedPath) != NULL &&
            realpath([actual fileSystemRepresentation], actualPath) != NULL &&
            strcmp(expectedPath, actualPath) == 0;
+}
+
+static bool configure_managed_environment(NSString *jailbreakRoot) {
+    if (jailbreakRoot == nil) {
+        return false;
+    }
+    const char *root = [jailbreakRoot fileSystemRepresentation];
+    char path[8192];
+    char shell[4096];
+    char libraryPath[4096];
+    int lengths[] = {
+        snprintf(path, sizeof(path),
+                 "%s/usr/bin:%s/bin:%s/usr/sbin:%s/sbin:"
+                 "/usr/bin:/bin:/usr/sbin:/sbin",
+                 root, root, root, root),
+        snprintf(shell, sizeof(shell), "%s/bin/sh", root),
+        snprintf(libraryPath, sizeof(libraryPath), "%s/usr/lib", root),
+    };
+    size_t capacities[] = {sizeof(path), sizeof(shell), sizeof(libraryPath)};
+    for (size_t index = 0; index < sizeof(lengths) / sizeof(lengths[0]);
+         ++index) {
+        if (lengths[index] < 0 ||
+            (size_t)lengths[index] >= capacities[index]) {
+            return false;
+        }
+    }
+    return setenv("PATH", path, 1) == 0 &&
+           setenv("SHELL", shell, 1) == 0 &&
+           setenv("DYLD_LIBRARY_PATH", libraryPath, 1) == 0 &&
+           setenv("HOME", "/var/root", 1) == 0 &&
+           setenv("TMPDIR", "/var/tmp", 1) == 0;
 }
 
 static bool path_is_absent(const char *path) {
@@ -905,12 +945,28 @@ static bool runtime_admission_infrastructure_ready(const char *reason) {
         access([kExecInterposerLibrary fileSystemRepresentation], R_OK) == 0;
     bool injector =
         access([kElleKitInjectorExecutable fileSystemRepresentation], X_OK) == 0;
+    bool trustHelper =
+        access([kRuntimeTrustHelperExecutable fileSystemRepresentation], X_OK) ==
+        0;
     log_message("runtimeAdmissionInfrastructure reason=%s worker=%s "
-                "interposer=%s injector=%s backend=debugged-worker",
+                "interposer=%s injector=%s trustHelper=%s "
+                "backend=postboot-gtcd-v1",
                 reason, worker ? "ready" : "missing",
                 interposer ? "ready" : "missing",
-                injector ? "ready" : "missing");
-    return worker && interposer && injector;
+                injector ? "ready" : "missing",
+                trustHelper ? "ready" : "missing");
+    return worker && interposer && injector && trustHelper;
+}
+
+static bool replay_runtime_trust_caches(const char *reason) {
+    char *arguments[] = {
+        (char *)[kRuntimeTrustHelperExecutable fileSystemRepresentation],
+        "replay", NULL};
+    int status = run_and_wait_bounded(arguments[0], arguments, 60000);
+    log_message("runtimeTrustReplay reason=%s status=%d "
+                "backend=postboot-gtcd-v1",
+                reason, status);
+    return status == 0;
 }
 
 static bool broker_command_is_named(const char *resolvedCommand,
@@ -921,6 +977,70 @@ static bool broker_command_is_named(const char *resolvedCommand,
     const char *lastSlash = strrchr(resolvedCommand, '/');
     const char *baseName = lastSlash != NULL ? lastSlash + 1 : resolvedCommand;
     return strcmp(baseName, name) == 0;
+}
+
+static bool is_hex_character(char character) {
+    return (character >= '0' && character <= '9') ||
+           (character >= 'a' && character <= 'f') ||
+           (character >= 'A' && character <= 'F');
+}
+
+static bool is_managed_documents_deb_path(const char *path) {
+    static const char prefix[] =
+        "/private/var/mobile/Containers/Data/Application/";
+    static const char documents[] = "/Documents/";
+    if (path == NULL || strncmp(path, prefix, sizeof(prefix) - 1U) != 0 ||
+        strstr(path, "/../") != NULL || strstr(path, "/./") != NULL) {
+        return false;
+    }
+    const char *identifier = path + sizeof(prefix) - 1U;
+    for (size_t index = 0; index < 36U; ++index) {
+        bool separator = index == 8U || index == 13U || index == 18U ||
+                         index == 23U;
+        if ((separator && identifier[index] != '-') ||
+            (!separator && !is_hex_character(identifier[index]))) {
+            return false;
+        }
+    }
+    const char *leaf = identifier + 36U;
+    if (strncmp(leaf, documents, sizeof(documents) - 1U) != 0) {
+        return false;
+    }
+    leaf += sizeof(documents) - 1U;
+    size_t leafLength = strnlen(leaf, NAME_MAX + 1U);
+    if (leafLength <= strlen(".deb") || leafLength > NAME_MAX ||
+        strchr(leaf, '/') != NULL ||
+        strcmp(leaf + leafLength - strlen(".deb"), ".deb") != 0) {
+        return false;
+    }
+    struct stat status;
+    return lstat(path, &status) == 0 && S_ISREG(status.st_mode) &&
+           status.st_uid == 501 && status.st_nlink == 1 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool headless_sileo_request_allowed(
+    char *const arguments[], uint32_t argumentCount,
+    char *const controlEnvironment[], uint32_t controlEnvironmentCount,
+    const int descriptorNumbers[], uint32_t descriptorCount,
+    const char *resolvedCommand) {
+    (void)controlEnvironment;
+    if (controlEnvironmentCount != 0 || descriptorCount == 0) {
+        return false;
+    }
+    for (uint32_t index = 0; index < descriptorCount; ++index) {
+        if (descriptorNumbers[index] != STDOUT_FILENO &&
+            descriptorNumbers[index] != STDERR_FILENO) {
+            return false;
+        }
+    }
+    if (broker_command_is_named(resolvedCommand, "whoami")) {
+        return argumentCount == 1 && descriptorCount == 1 &&
+               descriptorNumbers[0] == STDOUT_FILENO;
+    }
+    return broker_command_is_named(resolvedCommand, "dpkg") &&
+           argumentCount == 3 && strcmp(arguments[1], "-i") == 0 &&
+           is_managed_documents_deb_path(arguments[2]);
 }
 
 static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
@@ -951,8 +1071,38 @@ static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
         char *arguments[] = {
             "/var/jb/usr/bin/dpkg-deb", "-x",
             (char *)[path fileSystemRepresentation], stagingPath, NULL};
-        int extractStatus =
-            run_and_wait_bounded(arguments[0], arguments, 30000);
+        char captureTemplate[] =
+            "/var/tmp/codex-runtime-trust-extract.XXXXXX";
+        int capture = mkstemp(captureTemplate);
+        if (capture >= 0) {
+            (void)unlink(captureTemplate);
+        }
+        int extractStatus = capture >= 0
+            ? run_and_wait_bounded_to_fd(arguments[0], arguments, 30000,
+                                         capture)
+            : run_and_wait_bounded(arguments[0], arguments, 30000);
+        if (capture >= 0) {
+            char output[4096] = {0};
+            if (lseek(capture, 0, SEEK_SET) >= 0) {
+                ssize_t outputLength;
+                do {
+                    outputLength = read(capture, output, sizeof(output) - 1U);
+                } while (outputLength < 0 && errno == EINTR);
+                if (outputLength > 0) {
+                    for (ssize_t index = 0; index < outputLength; ++index) {
+                        unsigned char character = (unsigned char)output[index];
+                        if (character == '\n' || character == '\r' ||
+                            character == '\t' || character < 0x20U) {
+                            output[index] = ' ';
+                        }
+                    }
+                    log_message("runtimeTrustDebExtractOutput path=%s "
+                                "output=%s",
+                                [path UTF8String], output);
+                }
+            }
+            close(capture);
+        }
         log_message("runtimeTrustDebExtract path=%s status=%d",
                     [path UTF8String], extractStatus);
         if (extractStatus != 0) {
@@ -963,16 +1113,25 @@ static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
     }
     bool containsMachO = success && extracted != 0 &&
                          path_contains_macho(staging);
-    /*
-     * iOS 27 can reject post-boot trust-cache loads after successful Generic
-     * Cryptex personalization.  Package payloads therefore stay out of the
-     * immutable trust cache: fixed Procursus parents carry the interposer and
-     * route non-baseline executables into the fixed debugger-softened worker.
-     * Keep extracting here so malformed archives are rejected before dpkg,
-     * but do not make package installation depend on a per-payload cdhash.
-     */
-    int admissionStatus = success && extracted != 0 ? 0 : 1;
-    if (success && extracted != 0) {
+    int trustStatus = 0;
+    bool payloadTrustCached = false;
+    if (success && containsMachO) {
+        char *trustArguments[] = {
+            (char *)[kRuntimeTrustHelperExecutable fileSystemRepresentation],
+            "trust", stagingPath, NULL};
+        trustStatus = run_and_wait_bounded(
+            trustArguments[0], trustArguments, 90000);
+        payloadTrustCached = trustStatus == 0;
+        log_message("runtimeTrustDebLoad path=%s status=%d cached=%s",
+                    stagingPath, trustStatus,
+                    payloadTrustCached ? "true" : "false");
+        if (!payloadTrustCached) {
+            success = false;
+        }
+    }
+    int admissionStatus = success && extracted != 0 ? 0 :
+                          (trustStatus != 0 ? trustStatus : 1);
+    if (extracted != 0) {
         NSString *recordDirectory =
             @"/var/jb/var/lib/codex-runtime-admission";
         NSError *recordError = nil;
@@ -986,12 +1145,16 @@ static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
                        }
                             error:&recordError];
         NSDictionary *record = @{
-            @"Backend" : @"debugged-worker-v1",
-            @"AdmissionMode" : @"fixed-loader-no-payload-trust-cache",
+            @"Backend" : @"postboot-gtcd-v1",
+            @"AdmissionMode" : containsMachO
+                ? @"post-boot-cryptex1-generic-trust-cache"
+                : @"no-macho-payload",
             @"Reason" : [NSString stringWithUTF8String:reason],
             @"Archives" : paths,
             @"ArchiveCount" : @(extracted),
             @"ContainsMachO" : @(containsMachO),
+            @"PayloadTrustCached" : @(payloadTrustCached),
+            @"TrustStatus" : @(trustStatus),
             @"AdmissionStatus" : @(admissionStatus),
             @"RecordedAt" : [NSDate date],
         };
@@ -1013,10 +1176,11 @@ static bool runtime_trust_deb_paths(NSArray<NSString *> *paths,
                     [[cleanupError description] UTF8String]);
     }
     log_message("runtimeAdmissionDebResult reason=%s archives=%lu macho=%s "
-                "admissionStatus=%d backend=debugged-worker-v1 "
-                "payloadTrustCache=false status=%s",
+                "admissionStatus=%d trustStatus=%d backend=postboot-gtcd-v1 "
+                "payloadTrustCache=%s status=%s",
                 reason, (unsigned long)extracted,
                 containsMachO ? "true" : "false", admissionStatus,
+                trustStatus, payloadTrustCached ? "true" : "false",
                 success ? "success" : "failed");
     return success;
 }
@@ -1074,7 +1238,7 @@ static int32_t run_root_broker_command(
     if (broker_command_is_named(resolvedCommand, "dpkg") &&
         !runtime_trust_deb_arguments(arguments, "dpkg-pre-install")) {
         log_message("sileoRootBrokerPreAdmission=false command=%s "
-                    "backend=debugged-worker-v1",
+                    "backend=postboot-gtcd-v1",
                     resolvedCommand);
         return 72 << 8;
     }
@@ -1327,6 +1491,143 @@ static bool is_ellekit_target_process(pid_t pid, const char *path) {
            (flags & CODEX_CS_PLATFORM_BINARY) == 0;
 }
 
+static bool valid_tweak_notification_name(NSString *name) {
+    if (![name isKindOfClass:[NSString class]]) {
+        return false;
+    }
+    const char *bytes = [name UTF8String];
+    if (bytes == NULL) {
+        return false;
+    }
+    size_t length = strnlen(bytes, 257U);
+    if (length == 0 || length > 256U) {
+        return false;
+    }
+    for (size_t index = 0; index < length; ++index) {
+        unsigned char character = (unsigned char)bytes[index];
+        if (character <= 0x20U || character >= 0x7fU) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void collect_tweak_post_notifications(
+    id object, NSMutableOrderedSet<NSString *> *notifications,
+    NSUInteger depth) {
+    if (object == nil || depth > 16U || notifications.count >= 256U) {
+        return;
+    }
+    if ([object isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dictionary = (NSDictionary *)object;
+        for (id key in dictionary) {
+            id value = dictionary[key];
+            if ([key isKindOfClass:[NSString class]] &&
+                [(NSString *)key caseInsensitiveCompare:@"PostNotification"] ==
+                    NSOrderedSame &&
+                valid_tweak_notification_name(value)) {
+                [notifications addObject:(NSString *)value];
+            }
+            collect_tweak_post_notifications(value, notifications,
+                                             depth + 1U);
+            if (notifications.count >= 256U) {
+                break;
+            }
+        }
+        return;
+    }
+    if ([object isKindOfClass:[NSArray class]]) {
+        for (id value in (NSArray *)object) {
+            collect_tweak_post_notifications(value, notifications,
+                                             depth + 1U);
+            if (notifications.count >= 256U) {
+                break;
+            }
+        }
+    }
+}
+
+static NSArray<NSString *> *installed_tweak_post_notifications(void) {
+    static const off_t maximumPlistSize = 1024 * 1024;
+    static const NSUInteger maximumVisitedFiles = 4096U;
+    NSArray<NSString *> *roots = @[
+        @"/var/jb/Library/PreferenceBundles",
+        @"/var/jb/Library/PreferenceLoader/Preferences",
+    ];
+    NSMutableOrderedSet<NSString *> *notifications =
+        [NSMutableOrderedSet orderedSet];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSUInteger visitedFiles = 0;
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator<NSString *> *enumerator =
+            [manager enumeratorAtPath:root];
+        for (NSString *relativePath in enumerator) {
+            if (++visitedFiles > maximumVisitedFiles ||
+                notifications.count >= 256U) {
+                break;
+            }
+            if ([[relativePath pathExtension]
+                    caseInsensitiveCompare:@"plist"] != NSOrderedSame) {
+                continue;
+            }
+            NSString *path = [root stringByAppendingPathComponent:relativePath];
+            struct stat status;
+            if (lstat([path fileSystemRepresentation], &status) != 0 ||
+                !S_ISREG(status.st_mode) || status.st_uid != 0 ||
+                status.st_nlink != 1 || status.st_size <= 0 ||
+                status.st_size > maximumPlistSize ||
+                (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+                continue;
+            }
+            NSData *data = [NSData dataWithContentsOfFile:path
+                                                  options:NSDataReadingMappedIfSafe
+                                                    error:nil];
+            if (data == nil) {
+                continue;
+            }
+            id propertyList = [NSPropertyListSerialization
+                propertyListWithData:data
+                             options:NSPropertyListImmutable
+                              format:NULL
+                               error:nil];
+            collect_tweak_post_notifications(propertyList, notifications, 0);
+        }
+        if (visitedFiles > maximumVisitedFiles ||
+            notifications.count >= 256U) {
+            break;
+        }
+    }
+    return notifications.array;
+}
+
+static void replay_tweak_post_notifications(pid_t pid, const char *reason) {
+    if (access("/var/mobile/.eksafemode", F_OK) == 0) {
+        log_message("tweakPostNotificationReplay reason=%s pid=%d "
+                    "skipped=safe-mode",
+                    reason, pid);
+        return;
+    }
+    NSArray<NSString *> *notifications =
+        installed_tweak_post_notifications();
+    NSUInteger posted = 0;
+    NSUInteger failed = 0;
+    for (NSString *notification in notifications) {
+        uint32_t status = notify_post([notification UTF8String]);
+        if (status == NOTIFY_STATUS_OK) {
+            ++posted;
+        } else {
+            ++failed;
+            log_message("tweakPostNotificationFailed reason=%s pid=%d "
+                        "name=%s status=%u",
+                        reason, pid, [notification UTF8String], status);
+        }
+    }
+    log_message("tweakPostNotificationReplay reason=%s pid=%d "
+                "discovered=%lu posted=%lu failed=%lu",
+                reason, pid, (unsigned long)notifications.count,
+                (unsigned long)posted, (unsigned long)failed);
+}
+
 static void serve_ellekit_per_process_injector(bool springBoardOnly) {
     NSMutableDictionary<NSNumber *, NSDictionary *> *states =
         [NSMutableDictionary dictionary];
@@ -1422,6 +1723,18 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                             "path=%s attempt=%lu elleKitStatus=%d status=%d",
                             lane, pid, path, (unsigned long)attempts,
                             elleKitStatus, status);
+                if (status == 0 && springBoardProcess) {
+                    /*
+                     * Post-start injection can complete after a tweak's
+                     * applicationDidFinishLaunching: hook point. Preference
+                     * bundles already declare their supported Darwin refresh
+                     * notification, so replay those declarations on-device
+                     * once the tweak constructors and observers are loaded.
+                     */
+                    usleep(100 * 1000);
+                    replay_tweak_post_notifications(
+                        pid, "springboard-post-injection");
+                }
             }
             free(pids);
             for (NSNumber *key in [states.allKeys copy]) {
@@ -1453,7 +1766,8 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
                                      NSString *expectedMain,
                                      NSString *expectedHelper,
                                      NSString *jailbreakRoot,
-                                     bool runtimeTrustClient) {
+                                     bool runtimeTrustClient,
+                                     bool headlessSileoClient) {
     xpc_object_t reply = xpc_dictionary_create_reply(message);
     if (reply == NULL) {
         return;
@@ -1464,7 +1778,10 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     if (peerPid > 1 && proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0) {
         NSString *path = [NSString stringWithUTF8String:peerPath];
         bool sileoClient = executable_paths_match(expectedMain, path) ||
-                           executable_paths_match(expectedHelper, path);
+                           executable_paths_match(expectedHelper, path) ||
+                           (headlessSileoClient &&
+                            executable_paths_match(kHeadlessSileoExecutable,
+                                                   path));
         accepted = sileoClient ||
             (runtimeTrustClient &&
              executable_paths_match(kRuntimeTrustClientExecutable, path));
@@ -1578,11 +1895,17 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
         [trustPaths addObject:path];
     }
     char resolved[PATH_MAX] = {0};
+    bool resolvedBrokerCommand = valid && !runtimeTrustClient &&
+        resolve_broker_command(arguments[0], jailbreakRoot, resolved,
+                               sizeof(resolved));
     bool allowed = valid &&
         (runtimeTrustRequest ||
-         (!runtimeTrustClient &&
-          resolve_broker_command(arguments[0], jailbreakRoot, resolved,
-                                 sizeof(resolved))));
+         (resolvedBrokerCommand &&
+          (!headlessSileoClient ||
+           headless_sileo_request_allowed(
+               arguments, argumentCount, controlEnvironment,
+               controlEnvironmentCount, descriptorNumbers, descriptorCount,
+               resolved))));
     log_message("sileoXpcBrokerRequestStart pid=%d accepted=%s valid=%s "
                 "allowed=%s command=%s",
                 peerPid, accepted ? "true" : "false",
@@ -1664,9 +1987,12 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
         bool sileoClient = peerUser == 501 &&
             (executable_paths_match(expectedMain, path) ||
              executable_paths_match(expectedHelper, path));
+        bool headlessSileoClient = peerUser == 501 &&
+            executable_paths_match(kHeadlessSileoExecutable, path);
         bool runtimeTrustClient = peerUser == 0 &&
             executable_paths_match(kRuntimeTrustClientExecutable, path);
-        bool accepted = sileoClient || runtimeTrustClient;
+        bool accepted = sileoClient || headlessSileoClient ||
+                        runtimeTrustClient;
         if (!accepted) {
             log_message("sileoXpcBrokerRejected pid=%d uid=%u path=%s",
                         peerPid, peerUser,
@@ -1678,7 +2004,8 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
             if (xpc_get_type(message) == XPC_TYPE_DICTIONARY) {
                 handle_sileo_xpc_request(
                     peer, message, peerPid, expectedMain, expectedHelper,
-                    jailbreakRoot, runtimeTrustClient);
+                    jailbreakRoot, runtimeTrustClient,
+                    headlessSileoClient);
             }
         });
         xpc_connection_resume(peer);
@@ -2766,9 +3093,10 @@ static int run_and_wait(const char *executable, char *const arguments[]) {
     return 255;
 }
 
-static int run_and_wait_bounded(const char *executable,
-                                char *const arguments[],
-                                unsigned int timeoutMilliseconds) {
+static int run_and_wait_bounded_to_fd(const char *executable,
+                                      char *const arguments[],
+                                      unsigned int timeoutMilliseconds,
+                                      int outputDescriptor) {
     pid_t child = 0;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes = NULL;
@@ -2776,8 +3104,10 @@ static int run_and_wait_bounded(const char *executable,
     if (result != 0) {
         return 255;
     }
-    posix_spawn_file_actions_adddup2(&actions, gLog, STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&actions, gLog, STDERR_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, outputDescriptor,
+                                     STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, outputDescriptor,
+                                     STDERR_FILENO);
     result = posix_spawnattr_init(&attributes);
     if (result == 0) {
         result = posix_spawnattr_setpgroup(&attributes, 0);
@@ -2847,6 +3177,13 @@ static int run_and_wait_bounded(const char *executable,
         usleep(pollInterval);
         elapsed += 10;
     }
+}
+
+static int run_and_wait_bounded(const char *executable,
+                                char *const arguments[],
+                                unsigned int timeoutMilliseconds) {
+    return run_and_wait_bounded_to_fd(executable, arguments,
+                                      timeoutMilliseconds, gLog);
 }
 
 static NSString *dpkg_control_field(NSString *paragraph, NSString *field) {
@@ -3341,6 +3678,30 @@ int main(int argc, char *argv[]) {
                 log_message("sileoRootBrokerModeValidation=false");
                 return 1;
             }
+            if (!configure_managed_environment(jailbreakRoot)) {
+                log_message("sileoRootBrokerEnvironment=false");
+                return 1;
+            }
+            log_message("sileoRootBrokerEnvironment=true root=%s",
+                        [jailbreakRoot UTF8String]);
+            log_message("deviceAutonomyVersion=1 aptPreInstallTrust=true "
+                        "lateTweakNotificationReplay=true");
+            bool startupAdmission =
+                runtime_admission_infrastructure_ready("broker-start");
+            log_message("runtimeAdmissionStartup=%s backend=postboot-gtcd-v1",
+                        startupAdmission ? "success" : "failed");
+            log_message("runtimePayloadAdmissionStartup=%s "
+                        "backend=postboot-gtcd-v1 "
+                        "payloadTrustCache=true",
+                        startupAdmission ? "success" : "failed");
+            if (!startupAdmission ||
+                !replay_runtime_trust_caches("broker-start")) {
+                log_message("runtimeTrustReplayStartup=failed "
+                            "backend=postboot-gtcd-v1");
+                return 1;
+            }
+            log_message("runtimeTrustReplayStartup=success "
+                        "backend=postboot-gtcd-v1");
             if (!start_sileo_xpc_broker(registeredPath, jailbreakRoot)) {
                 log_message("sileoRootBrokerModeListener=false");
                 return 1;
@@ -3348,14 +3709,6 @@ int main(int argc, char *argv[]) {
             log_message("sileoRootBrokerModeReady=true path=%s root=%s",
                         [registeredPath UTF8String],
                         [jailbreakRoot UTF8String]);
-            bool startupAdmission =
-                runtime_admission_infrastructure_ready("broker-start");
-            log_message("runtimeAdmissionStartup=%s backend=debugged-worker",
-                        startupAdmission ? "success" : "failed");
-            log_message("runtimePayloadAdmissionStartup=%s "
-                        "backend=debugged-worker-v1 "
-                        "payloadTrustCache=false",
-                        startupAdmission ? "success" : "failed");
             dispatch_queue_t springBoardInjectionQueue =
                 dispatch_queue_create(
                 "com.openai.codex.dopamine.ellekit-springboard",
@@ -3378,6 +3731,10 @@ int main(int argc, char *argv[]) {
             NSString *managedRoot = managed_jailbreak_root();
             if (geteuid() != 0 || managedRoot == nil) {
                 log_message("runtimeTrustAptHookValidation=false");
+                return 1;
+            }
+            if (!configure_managed_environment(managedRoot)) {
+                log_message("runtimeTrustAptHookEnvironment=false");
                 return 1;
             }
             bool trusted = runtime_trust_debs_from_standard_input();

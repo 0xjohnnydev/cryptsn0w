@@ -26,13 +26,13 @@ __attribute__((constructor)) static void codex_broker_probe_loaded(void) {
     os_log_t log =
         os_log_create("com.openai.codex.broker-probe", "tweak");
     os_log_with_type(log, OS_LOG_TYPE_DEFAULT,
-                     "BROKER_PROBE_LOADED version=1.0.14 pid=%d uid=%u gid=%u marker=%{public}s",
+                     "BROKER_PROBE_LOADED version=1.0.18 pid=%d uid=%u gid=%u marker=%{public}s",
                      getpid(), getuid(), getgid(), marker);
 
     int loaded = open(kLoadedMarkerPath,
                       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (loaded >= 0) {
-        dprintf(loaded, "BROKER_PROBE_LOADED version=1.0.14 pid=%d uid=%u gid=%u %s\n",
+        dprintf(loaded, "BROKER_PROBE_LOADED version=1.0.18 pid=%d uid=%u gid=%u %s\n",
                 getpid(), getuid(), getgid(), marker);
         fsync(loaded);
         close(loaded);

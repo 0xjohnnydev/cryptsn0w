@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--expected-name", default="execution-probe-dynamic-only")
     parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--attach-detach-only",
+        action="store_true",
+        help="validate debugger attachment, then detach without continuing the target",
+    )
     return parser.parse_args()
 
 
@@ -255,6 +260,14 @@ async def run(args: argparse.Namespace) -> int:
             validate_process_info(
                 await remote.command("qProcessInfo"), args.pid, args.expected_name
             )
+
+            if args.attach_detach_only:
+                response = await remote.command("D")
+                if response not in {"OK", ""}:
+                    raise ProtocolError(f"detach failed: {response!r}")
+                attached = False
+                print("attach-detach-only=success")
+                return 0
 
             prepare_count = 0
             while True:

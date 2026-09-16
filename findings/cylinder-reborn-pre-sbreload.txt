@@ -1,0 +1,162 @@
+requested_package=com.ryannair05.cylinder
+codex-exec-interposer pid=856 phase=libiosexec-rebind images=1 execve=0 posix_spawn=0 posix_spawnp=0
+package=com.ryannair05.cylinder
+version=1.1.2
+status=installed
+architecture=iphoneos-arm64
+installed_files_begin
+codex-exec-interposer pid=857 phase=libiosexec-rebind images=1 execve=0 posix_spawn=0 posix_spawnp=0
+/.
+/var
+/var/jb
+/var/jb/Library
+/var/jb/Library/Cylinder
+/var/jb/Library/Cylinder/Beta382
+/var/jb/Library/Cylinder/Beta382/Beta382's personal Rubik's Cube.lua
+/var/jb/Library/Cylinder/Beta382/Cube (inside) (no zoom).lua
+/var/jb/Library/Cylinder/Beta382/Cube (outside) (no zoom).lua
+/var/jb/Library/Cylinder/Beta382/Curl and Roll Away Alternate.lua
+/var/jb/Library/Cylinder/Beta382/Curl and Roll Away.lua
+/var/jb/Library/Cylinder/Beta382/Page Squeeze.lua
+/var/jb/Library/Cylinder/Beta382/Rubik's Cube (complex).lua
+/var/jb/Library/Cylinder/Beta382/Rubik's Cube.lua
+/var/jb/Library/Cylinder/Beta382/Snake.lua
+/var/jb/Library/Cylinder/Beta382/Vertical Scrolling.lua
+/var/jb/Library/Cylinder/Beta382/Vortex.lua
+/var/jb/Library/Cylinder/Beta382/Wave.lua
+/var/jb/Library/Cylinder/Beta382/include
+/var/jb/Library/Cylinder/Beta382/include/iconCube.lua
+/var/jb/Library/Cylinder/Beta382/include/pageCube.lua
+/var/jb/Library/Cylinder/EXAMPLE.lua
+/var/jb/Library/Cylinder/JGTweaks
+/var/jb/Library/Cylinder/JGTweaks/Cube overlap.lua
+/var/jb/Library/Cylinder/KnifeOfPi
+/var/jb/Library/Cylinder/KnifeOfPi/Burst.lua
+/var/jb/Library/Cylinder/KnifeOfPi/Focus.lua
+/var/jb/Library/Cylinder/KnifeOfPi/Helix.lua
+/var/jb/Library/Cylinder/KnifeOfPi/Radar.lua
+/var/jb/Library/Cylinder/Qaanol
+/var/jb/Library/Cylinder/Qaanol/Dominoes.lua
+/var/jb/Library/Cylinder/Qaanol/Foosball.lua
+/var/jb/Library/Cylinder/Qaanol/Roadrunner.lua
+/var/jb/Library/Cylinder/Qaanol/Spinners.lua
+/var/jb/Library/Cylinder/Qaanol/include
+/var/jb/Library/Cylinder/Qaanol/include/flick.lua
+/var/jb/Library/Cylinder/Qaanol/include/slideVelocity.lua
+/var/jb/Library/Cylinder/ViktorX11
+/var/jb/Library/Cylinder/ViktorX11/Stretch.lua
+/var/jb/Library/Cylinder/ViktorX11/Turn.lua
+/var/jb/Library/Cylinder/ViktorX11/Wheel Simple.lua
+/var/jb/Library/Cylinder/ViktorX11/Wheel.lua
+/var/jb/Library/Cylinder/cylgom
+/var/jb/Library/Cylinder/cylgom/Hyperspace.lua
+/var/jb/Library/Cylinder/cylgom/Psychospiral.lua
+/var/jb/Library/Cylinder/cylgom/Suck.lua
+/var/jb/Library/Cylinder/gertab
+/var/jb/Library/Cylinder/gertab/Backwards.lua
+/var/jb/Library/Cylinder/gertab/Double Door.lua
+/var/jb/Library/Cylinder/r_idn
+/var/jb/Library/Cylinder/r_idn/Bubble.lua
+/var/jb/Library/Cylinder/r_idn/Carousel (left).lua
+/var/jb/Library/Cylinder/r_idn/Carousel (right).lua
+/var/jb/Library/Cylinder/r_idn/Checkerboard scatter.lua
+/var/jb/Library/Cylinder/r_idn/Zoom and Fade (alt).lua
+/var/jb/Library/Cylinder/r_idn/Zoom and Fade.lua
+/var/jb/Library/Cylinder/rweichler
+/var/jb/Library/Cylinder/rweichler/Blinds.lua
+/var/jb/Library/Cylinder/rweichler/Card (horizontal).lua
+/var/jb/Library/Cylinder/rweichler/Card (vertical).lua
+/var/jb/Library/Cylinder/rweichler/Chomp.lua
+/var/jb/Library/Cylinder/rweichler/Cube (inside).lua
+/var/jb/Library/Cylinder/rweichler/Cube (outside).lua
+/var/jb/Library/Cylinder/rweichler/Hella Far.lua
+/var/jb/Library/Cylinder/rweichler/Hinge.lua
+/var/jb/Library/Cylinder/rweichler/Icon Collection.lua
+/var/jb/Library/Cylinder/rweichler/Page Fade.lua
+/var/jb/Library/Cylinder/rweichler/Shrink completely.lua
+/var/jb/Library/Cylinder/rweichler/Shrink.lua
+/var/jb/Library/Cylinder/rweichler/Spin.lua
+/var/jb/Library/Cylinder/rweichler/Stairs (left down).lua
+/var/jb/Library/Cylinder/rweichler/Stairs (right down).lua
+/var/jb/Library/Cylinder/rweichler/Stay put (combine with others).lua
+/var/jb/Library/Cylinder/rweichler/include
+/var/jb/Library/Cylinder/rweichler/include/cube.lua
+/var/jb/Library/Cylinder/rweichler/include/icon_random.lua
+/var/jb/Library/Cylinder/rweichler/include/stairs.lua
+/var/jb/Library/Cylinder/supermamon
+/var/jb/Library/Cylinder/supermamon/Alternate Spin.lua
+/var/jb/Library/Cylinder/supermamon/Ant Lines (Horizontal).lua
+/var/jb/Library/Cylinder/supermamon/Ant Lines (Vertical).lua
+/var/jb/Library/Cylinder/supermamon/Explosion.lua
+/var/jb/Library/Cylinder/supermamon/Flip icons (horizontal).lua
+/var/jb/Library/Cylinder/supermamon/Flip icons (vertical).lua
+/var/jb/Library/Cylinder/supermamon/Icon Roll.lua
+/var/jb/Library/Cylinder/supermamon/Page Twist.lua
+/var/jb/Library/Cylinder/supermamon/Page flip.lua
+/var/jb/Library/Cylinder/supermamon/Page spin.lua
+/var/jb/Library/Cylinder/supermamon/include
+/var/jb/Library/Cylinder/supermamon/include/fade.lua
+/var/jb/Library/Cylinder/supermamon/include/iconFlip.lua
+/var/jb/Library/Cylinder/supermamon/include/iconSpin.lua
+/var/jb/Library/Cylinder/supermamon/include/stayPut.lua
+/var/jb/Library/MobileSubstrate
+/var/jb/Library/MobileSubstrate/DynamicLibraries
+/var/jb/Library/MobileSubstrate/DynamicLibraries/Cylinder.dylib
+/var/jb/Library/MobileSubstrate/DynamicLibraries/Cylinder.plist
+/var/jb/Library/PreferenceBundles
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/CylinderSettings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/CylinderSettings.plist
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/Icon.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/Icon@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/Icon@3x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/Info.plist
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/Twitter@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ar.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ar.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/barrel@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/cs.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/cs.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/da.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/da.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/de.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/de.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/en.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/en.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/error.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/error@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/es_MX.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/es_MX.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/fr.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/fr.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/github@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/he.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/he.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/hr.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/hr.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/iloveyou.mp3
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/it.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/it.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ja.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ja.lproj/Localizable.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/nl.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/nl.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/plus.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/plus@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/pt.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/pt.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/reddit@2x.png
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ru.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/ru.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/sv.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/sv.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/tr.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/tr.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/zh_CN.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/zh_CN.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/zh_TW.lproj
+/var/jb/Library/PreferenceBundles/CylinderSettings.bundle/zh_TW.lproj/CylinderSettings.strings
+/var/jb/Library/PreferenceLoader
+/var/jb/Library/PreferenceLoader/Preferences
+/var/jb/Library/PreferenceLoader/Preferences/Cylinder.plist
+installed_files_end

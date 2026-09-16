@@ -119,20 +119,20 @@ package outside the exact removal set depends on it.
 
 ## Latest iPhone 12 mini acceptance
 
-Cryptex version `1.0.20260915200055.800872` installed successfully with a
-validated 459-entry trust cache. The runtime worker self-test, root-broker
-`whoami`, package configuration, and `apt-get check` exited 0; the guarded
-ElleKit loader also verified its SpringBoard injection with status 0. PID 1 is
-excluded by explicit guards.
-
-BrokerProbe 1.0.14 subsequently failed three update attempts before unpack or
-`postinst` because the installed image's obsolete APT pre-install client
-returned 100. The checked-in policy now removes that hook, but this revision has
-not yet been rebuilt and installed for a passing BrokerProbe run.
-
-## Runtime model
+Cryptex version `1.0.20260916131317.993376` installed successfully with a
+validated 459-entry trust cache whose SHA-256 is
+`4c8d76c52cfc0d111ce17e1b7ee9c0db12382b11ab34882a46965dc888db4c19`.
+Its corrected trust-cached loader reproduced hookd's `RW|COPY -> write -> RX`
+sequence on the device, verified effective protection `0x5`, and called the
+generated function for return value 42. The final trusted ElleKit injection
+into SpringBoard returned status 0, and the injector heartbeat reports
+`safeMode=false`. PID 1 remains excluded by explicit guards.
+[REDACTED: TSS/Cryptex personalization and installation details are redacted from this educational source release.]
 
 [REDACTED: Related request, payload, or installation details omitted.]
+
+## Runtime model
+[REDACTED: TSS/Cryptex personalization and installation details are redacted from this educational source release.]
 
 Sileo's Featured cards can reference optional repositories in addition to the
 standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's

@@ -65,6 +65,8 @@ TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
+ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
+EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 RUNTIME_TRUST_SOURCE=${CODEX_RUNTIME_TRUST_HELPER:-"$SCRIPT_DIR/../../build/appregistrard-srd-trust-derived/Build/Products/Release-iphoneos/appregistrard"}
 RUNTIME_TRUST_HELPER="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust"
 RUNTIME_TRUST_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust-client"
@@ -150,6 +152,17 @@ print(value)
 PY
 }
 
+require_true_entitlement() {
+    local plist=$1
+    local key_path=$2
+    local display_name=$3
+    local value
+    value=$(plutil -extract "$key_path" raw -o - "$plist" 2>/dev/null) || \
+        die "missing required entitlement $display_name in ${plist:t}"
+    [[ "$value" == true ]] || \
+        die "required entitlement $display_name is not true in ${plist:t}"
+}
+
 enable_procursus_runtime_admission() {
     local candidate=$1
     local identifier
@@ -206,6 +219,19 @@ enable_procursus_runtime_admission() {
 for tool in awk codesign curl dpkg-deb file find gpg ldid lipo nm plutil python3 rg security shasum tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
+for plist in "$ELLEKIT_COMPAT_ENTITLEMENTS" "$EXEC_WORKER_ENTITLEMENTS"; do
+    [[ -f "$plist" ]] || die "missing runtime entitlement file: $plist"
+    plutil -lint "$plist" >/dev/null || \
+        die "invalid runtime entitlement file: $plist"
+done
+require_true_entitlement "$ELLEKIT_COMPAT_ENTITLEMENTS" \
+    'com\.apple\.private\.cs\.debugger' \
+    'com.apple.private.cs.debugger'
+require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" \
+    'com\.apple\.private\.cs\.debugger' \
+    'com.apple.private.cs.debugger'
+require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
+    'get-task-allow'
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
 [[ -f "$SILEO_DEB" ]] || die "missing opa334 Sileo package: $SILEO_DEB"
 [[ -f "$DEFAULT_SOURCES" ]] || die "missing Dopamine default APT sources"
@@ -519,7 +545,7 @@ xcrun --sdk iphoneos clang \
     "$OPAINJECT_DIR/arm64.m" \
     -o "$ELLEKIT_COMPAT_LOADER"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
-    --entitlements "$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist" \
+    --entitlements "$ELLEKIT_COMPAT_ENTITLEMENTS" \
     "$ELLEKIT_COMPAT_LOADER"
 codesign --verify --strict --all-architectures "$ELLEKIT_COMPAT_LOADER" || \
     die "ElleKit compatibility loader signature is invalid"
@@ -532,7 +558,7 @@ xcrun --sdk iphoneos clang \
     "$SCRIPT_DIR/codex_exec_worker.c" \
     -o "$EXEC_WORKER"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
-    --entitlements "$SCRIPT_DIR/exec-worker-entitlements.plist" \
+    --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
     "$EXEC_WORKER"
 codesign --verify --strict --all-architectures "$EXEC_WORKER" || \
     die "execution worker signature is invalid"
