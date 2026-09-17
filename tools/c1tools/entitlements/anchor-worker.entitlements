@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <!-- anchor: route A's worker (see anchor.c).
+
+         The one key that matters is the BARE `get-task-allow`, and it is here because
+         we measured it: an ad-hoc, trust-cached binary declaring this spelling gets
+         CS_GET_TASK_ALLOW, with a control proving the key did it -
+
+             tfpid-gta (get-task-allow) csflags=0x26003305   <- the 0x4 is set
+             tfpid-ctl (orthogonal key) csflags=0x26003301   <- and the control proves it
+
+         Note what is deliberately NOT here: the macOS spelling
+         `com.apple.security.get-task-allow` (which does NOT set the bit, and is what our
+         earlier JIT probes carried), and the `com.apple.developer.cs.allow-jit` pair
+         (which we measured as FATAL at exec in an ad-hoc signature).
+
+         The rest is the debug-client set: the parent side of the chain needs a task
+         port on its own child and thread state access, and the attach is what triggers
+         cs_allow_invalid on the target. -->
+    <key>get-task-allow</key><true/>
+    <key>task_for_pid-allow</key><true/>
+    <key>com.apple.private.cs.debugger</key><true/>
+    <key>com.apple.private.thread-set-state</key><true/>
+    <key>com.apple.private.set-exception-port</key><true/>
+    <key>com.apple.private.memorystatus</key><true/>
+</dict></plist>

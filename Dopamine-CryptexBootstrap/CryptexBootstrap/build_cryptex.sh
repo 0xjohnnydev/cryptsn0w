@@ -18,6 +18,19 @@ ALTLIST_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/altlist_1
 ALTLIST_SHA256=26718f617288f93b91f961d8a363d04c11d295f0de76acda4f5df057a5189975
 UIKITTOOLS_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/uikittools/uikittools_2.1.8_iphoneos-arm64.deb
 UIKITTOOLS_SHA256=5e634f0c7fb67f6344a6646583a9f1662cc9299a3d51817c1814bab4ecb3ecfb
+
+# c1tools: the campaign's toolkit, built by tools/c1tools/build_toolkit_deb.sh INSIDE this
+# repository, so the lane build and the tools that go into it come from one checkout.
+# The default points at the deb that script produces; C1TOOLS_SHA256 changes whenever the
+# tools change, and the build script prints the new value. Override either for a deb built
+# elsewhere.
+#
+# What rides in on this: cs-loader, tfpid and injprobe (plus the agent dylib injprobe
+# injects). cs-loader is the reason the package exists - it runs an arbitrary UNSIGNED
+# Mach-O as the code of a debug-authorised child, so the payloads it runs need no trust
+# cache entry and cost no rebuild, while only the loader itself does.
+C1TOOLS_URL=${C1TOOLS_URL:-file:///Users/varikmatevosyan/Documents/hacks/ios_research/audit/research/audit/cryptex-srd-bug/jb-27-new/build/c1tools_1.0_iphoneos-arm64.deb}
+C1TOOLS_SHA256=${C1TOOLS_SHA256:-8d18e8eac5f1d4d5b512bba1c2aa5ee57d47edd865d81a4a8dff9b2f80f64d11}
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
@@ -38,6 +51,7 @@ PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.2.8_iphoneos-arm64.deb"
 CHOICY_DEB="$CACHE_DIR/choicy_1.5.4-2_iphoneos-arm64.deb"
 ALTLIST_DEB="$CACHE_DIR/altlist_1.0.11_iphoneos-arm64.deb"
 UIKITTOOLS_DEB="$CACHE_DIR/uikittools_2.1.8_iphoneos-arm64.deb"
+C1TOOLS_DEB="$CACHE_DIR/c1tools_1.0_iphoneos-arm64.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
 RUNTIME_TRUST_APT_CONFIG="$SCRIPT_DIR/runtime-trust.conf"
@@ -293,11 +307,13 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 fetch_pinned "$CHOICY_URL" "$CHOICY_SHA256" "$CHOICY_DEB"
 fetch_pinned "$ALTLIST_URL" "$ALTLIST_SHA256" "$ALTLIST_DEB"
 fetch_pinned "$UIKITTOOLS_URL" "$UIKITTOOLS_SHA256" "$UIKITTOOLS_DEB"
+fetch_pinned "$C1TOOLS_URL" "$C1TOOLS_SHA256" "$C1TOOLS_DEB"
 verify_deb_identity "$ELLEKIT_DEB" ellekit 1.2
 verify_deb_identity "$PREFERENCELOADER_DEB" preferenceloader 2.2.8
 verify_deb_identity "$CHOICY_DEB" com.opa334.choicy 1.5.4-2
 verify_deb_identity "$ALTLIST_DEB" com.opa334.altlist 1.0.11
 verify_deb_identity "$UIKITTOOLS_DEB" uikittools 2.1.8
+verify_deb_identity "$C1TOOLS_DEB" com.research.c1tools 1.0
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
@@ -473,6 +489,7 @@ dpkg-deb -x "$PREFERENCELOADER_DEB" \
 dpkg-deb -x "$CHOICY_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/choicy"
 dpkg-deb -x "$ALTLIST_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/altlist"
 dpkg-deb -x "$UIKITTOOLS_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/uikittools"
+dpkg-deb -x "$C1TOOLS_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/c1tools"
 ditto --noqtn "$ORIGINAL_TRUSTED_PACKAGE_ROOT" "$TRUSTED_PACKAGE_ROOT"
 
 # These jailbreak packages use legacy signatures that iOS 27 rejects even
