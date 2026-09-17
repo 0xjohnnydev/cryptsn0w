@@ -34,7 +34,7 @@ CRYPTEXCTL = Path(
     "/System/Library/SecurityResearch/usr/bin/cryptexctl.research"
 )
 
-PRODUCT = "iPhone18,2"
+PRODUCTS = ("iPhone18,2", "iPhone14,5")
 VERSION = "27.0"
 BUILD = "24A435"
 IDENTIFIER = "com.0xjohnnydev.untitled"
@@ -133,7 +133,7 @@ def compatible_devices(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
         udid = hardware.get("udid")
         if not (
             hardware.get("reality") == "physical"
-            and hardware.get("productType") == PRODUCT
+            and hardware.get("productType") in PRODUCTS
             and connection.get("pairingState") == "paired"
             and connection.get("state") == "connected"
             and device_version(properties) == VERSION
@@ -148,8 +148,8 @@ def compatible_devices(devices: list[dict[str, Any]]) -> list[dict[str, str]]:
         }.get(connection.get("transportType"), "connected")
         matches.append(
             {
-                "name": state.get("name") or PRODUCT,
-                "model": hardware.get("marketingName") or PRODUCT,
+                "name": state.get("name") or hardware["productType"],
+                "model": hardware.get("marketingName") or hardware["productType"],
                 "transport": transport,
                 "udid": udid,
             }
@@ -167,7 +167,7 @@ def compatible_usbmux_devices(devices: Any) -> list[dict[str, str]]:
         udid = device.get("UniqueDeviceID") or device.get("Identifier")
         connection_type = device.get("ConnectionType")
         if not (
-            device.get("ProductType") == PRODUCT
+            device.get("ProductType") in PRODUCTS
             and device.get("ProductVersion") == VERSION
             and device.get("BuildVersion") == BUILD
             and isinstance(connection_type, str)
@@ -178,8 +178,8 @@ def compatible_usbmux_devices(devices: Any) -> list[dict[str, str]]:
             continue
         matches.append(
             {
-                "name": device.get("DeviceName") or PRODUCT,
-                "model": PRODUCT,
+                "name": device.get("DeviceName") or device["ProductType"],
+                "model": device["ProductType"],
                 "transport": "USB",
                 "udid": udid,
             }
@@ -200,14 +200,26 @@ def resolve_device(requested: str | None) -> str:
         "-",
         "--omit-deprecated-fields-in-json",
     ]
-    completed = subprocess.run(
-        command,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        timeout=12,
-    )
-    devices = compatible_devices(json.loads(completed.stdout)["result"]["devices"])
+    devices: list[dict[str, str]] = []
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=12,
+        )
+        devices = compatible_devices(
+            json.loads(completed.stdout)["result"]["devices"]
+        )
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+        KeyError,
+    ):
+        pass
     try:
         usbmux_completed = subprocess.run(
             [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"],
@@ -237,14 +249,14 @@ def resolve_device(requested: str | None) -> str:
             if device["udid"].casefold() == requested.casefold():
                 return device["udid"]
         raise UntitledError(
-            f"{requested} is not a connected paired {PRODUCT} on "
+            f"{requested} is not a connected paired {PRODUCTS} on "
             f"iOS {VERSION} ({BUILD})"
         )
     if len(devices) == 1:
         return devices[0]["udid"]
     if not devices:
         raise UntitledError(
-            f"no connected paired {PRODUCT} on iOS {VERSION} ({BUILD}) found"
+            f"no connected paired {PRODUCTS} on iOS {VERSION} ({BUILD}) found"
         )
     if not sys.stdin.isatty():
         raise UntitledError("multiple compatible devices found; pass --device")

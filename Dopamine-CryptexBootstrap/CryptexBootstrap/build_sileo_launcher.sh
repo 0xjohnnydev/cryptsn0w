@@ -64,7 +64,7 @@ OUTPUT_SUMMARY=${CODEX_SILEO_LAUNCHER_SUMMARY:-$SCRIPT_DIR/out/sileo-brokered-$S
 security find-identity -v -p codesigning | rg -q "$DEVELOPMENT_IDENTITY" || \
     die "development identity is unavailable: $DEVELOPMENT_IDENTITY"
 
-STAGE_DIR=$(mktemp -d /private/tmp/codex-sileo-brokered.XXXXXX)
+STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/codex-sileo-brokered.XXXXXX")
 PAYLOAD_DIR="$STAGE_DIR/Payload"
 APP_DIR="$PAYLOAD_DIR/Sileo.app"
 FRAMEWORKS_DIR="$APP_DIR/F"

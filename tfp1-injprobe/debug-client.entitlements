@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <!-- For the daemon and the probe, to test the open question directly:
+         does AMFI honour entitlements declared in our ad-hoc signatures?
+         debugserver is the precedent that it can - it is itself ad-hoc signed
+         (flags=0x2(adhoc), TeamIdentifier=not set) yet carries the full debug
+         entitlement set, trusted via a trust cache. Our payload lives in the
+         same situation: ad-hoc signed, vouched for by the cryptex trust cache,
+         and reported platform_binary=1.
+
+         If these are honoured, task_for_pid works for pids we did not spawn,
+         which is the difference between "debug our own processes" and
+         "debug the running root daemons". tfpid reports which. -->
+    <key>com.apple.private.cs.debugger</key><true/>
+    <key>com.apple.private.set-exception-port</key><true/>
+    <key>com.apple.private.thread-set-state</key><true/>
+    <key>com.apple.private.memorystatus</key><true/>
+    <key>com.apple.security.get-task-allow</key><true/>
+    <key>task_for_pid-allow</key><true/>
+</dict></plist>

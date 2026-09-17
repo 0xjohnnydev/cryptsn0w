@@ -6,6 +6,40 @@ for educational reference.
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
+For the SpringBoard JIT spawn path, set `CODEX_SPRINGBOARD_SOURCE` to the
+`SpringBoard` executable inside a complete `SpringBoard.app` copied from the
+**same OS build as the target device** before building. The build copies and
+reseals the app with its existing entitlements plus bare `get-task-allow` and
+`dynamic-codesigning`,
+embeds the result at
+`usr/local/share/codex-bootstrap/SpringBoard.app/SpringBoard`, and verifies its
+CDHash in the Cryptex trust cache. The build fails if the source is absent or
+does not have the `com.apple.springboard` identifier. The iPhone14,5 / 24A435
+source is available at `build/iphone13-24A435/SpringBoard.app/SpringBoard` after
+the root SSH extraction. This packaging step does
+not itself install a launchd spawn redirect or prove that SpringBoard launches
+from the copied path.
+
+On iPhone14,5 / 24A435, version `1.0.20260917080208.373171` replaced only
+`com.openai.codex.dopamine.bootstrap`; the separate SSH Cryptex remained mounted.
+The mounted SpringBoard SHA-256 matched the build's signed executable:
+`0c77ab5d13a72da74e34d95a844fb1c4250697b3e8274804c1b531f7290f665b`.
+The live `com.apple.SpringBoard` service still uses the system executable.
+`launchctl debug` returned 45 (operation not supported) for both `user/501`
+and `user/foreground`, so no test restart was attempted. The device's launchd
+binary imports both `posix_spawn` and `posix_spawnp` from libSystem and uses
+chained fixups. PID 1 injection, spawn redirection, and JIT tweak loading are
+still unverified on this device.
+
+The next build additionally requires `CODEX_LAUNCHD_SOURCE` to point to the
+same device's `/sbin/launchd` copy. The build verifies its UUID and the two
+authenticated `posix_spawn`/`posix_spawnp` import slots before packaging the
+trust-cached `codex-launchd-spawn-redirect.dylib`. The explicit
+`codex-ellekit-loader --inject-launchd <mounted-dylib-path>` route uses
+opainject's task-port lane and deliberately does not ptrace PID 1. This source
+path has not yet been installed or run in launchd; a successful `task_for_pid`
+or memory write alone is not injection proof.
+
 ## Working layout
 
 The device has two deliberately separate pieces:

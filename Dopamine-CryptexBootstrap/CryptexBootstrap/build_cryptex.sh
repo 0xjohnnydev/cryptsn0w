@@ -27,6 +27,8 @@ TARGET_UDID=${CODEX_TARGET_UDID:-}
 SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
 SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
 SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}
+SPRINGBOARD_SOURCE=${CODEX_SPRINGBOARD_SOURCE:-}
+LAUNCHD_SOURCE=${CODEX_LAUNCHD_SOURCE:-}
 
 CACHE_DIR="$SCRIPT_DIR/cache"
 WORK_DIR="$SCRIPT_DIR/work"
@@ -65,6 +67,8 @@ TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
+LAUNCHD_REDIRECT_HOOK="$IMAGE_ROOT/usr/local/lib/codex-launchd-spawn-redirect.dylib"
+SPRINGBOARD_COPY="$IMAGE_ROOT/usr/local/share/codex-bootstrap/SpringBoard.app/SpringBoard"
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 RUNTIME_TRUST_SOURCE=${CODEX_RUNTIME_TRUST_HELPER:-"$SCRIPT_DIR/../../build/appregistrard-srd-trust-derived/Build/Products/Release-iphoneos/appregistrard"}
@@ -79,6 +83,7 @@ REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
 SIGNING_DIR="$WORK_DIR/signing"
+SPRINGBOARD_ENTITLEMENTS="$SIGNING_DIR/springboard-get-task-allow.plist"
 SIGNING_CONFIG="$SIGNING_DIR/config.json"
 GENERATED_ENTITLEMENTS="$SIGNING_DIR/sileo-development-entitlements.plist"
 PROCURSUS_RUNTIME_ENTITLEMENTS="$SIGNING_DIR/procursus-runtime-entitlements.plist"
@@ -250,6 +255,8 @@ verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
     die "missing runtime trust broker client source"
 [[ -f "$SCRIPT_DIR/codex_exec_interposer.c" ]] || \
     die "missing runtime execution interposer source"
+[[ -f "$SCRIPT_DIR/launchd_spawn_redirect.c" ]] || \
+    die "missing launchd SpringBoard spawn redirect source"
 [[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
     die "missing runtime interposer load-command patch"
 [[ -f "$SCRIPT_DIR/prepare_runtime_baseline_history.py" ]] || \
@@ -286,6 +293,26 @@ SILEO_APPLICATION_IDENTIFIER=$(plutil -extract application-identifier raw -o - \
 security find-identity -v -p codesigning | \
     rg -q "$SILEO_DEVELOPMENT_IDENTITY" || \
     die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
+[[ -n "$SPRINGBOARD_SOURCE" && -f "$SPRINGBOARD_SOURCE" ]] || \
+    die "set CODEX_SPRINGBOARD_SOURCE to the target OS's SpringBoard executable"
+[[ -n "$LAUNCHD_SOURCE" && -f "$LAUNCHD_SOURCE" ]] || \
+    die "set CODEX_LAUNCHD_SOURCE to the target OS's launchd executable"
+codesign --verify --strict --all-architectures "$LAUNCHD_SOURCE" || \
+    die "target launchd signature is invalid"
+dwarfdump --uuid "$LAUNCHD_SOURCE" >"$WORK_DIR/launchd-uuid.txt"
+rg -q \
+    'CA54230D-4005-3131-8DC3-CCB7E7EF18E6' \
+    "$WORK_DIR/launchd-uuid.txt" || \
+    die "target launchd UUID does not match the iPhone14,5 redirect hook"
+dyld_info -fixups "$LAUNCHD_SOURCE" >"$WORK_DIR/launchd-fixups.txt"
+rg -q \
+    '0x1000824F8.*auth-bind.*libSystem/_posix_spawn \(div=0x0000 ad=1 key=IA\)' \
+    "$WORK_DIR/launchd-fixups.txt" || \
+    die "target launchd posix_spawn slot does not match the redirect hook"
+rg -q \
+    '0x1000826A0.*auth-bind.*libSystem/_posix_spawnp \(div=0x0000 ad=1 key=IA\)' \
+    "$WORK_DIR/launchd-fixups.txt" || \
+    die "target launchd posix_spawnp slot does not match the redirect hook"
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
@@ -464,6 +491,13 @@ cp "$REPACKED_SILEO" \
 ditto --noqtn "$APP_DIR" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/Sileo.app"
 
+# This exact resigned executable is the launchd spawn redirect target. It must
+# be inside the Cryptex before personalization so its CDHash is in the static
+# trust cache. Preserve the source's Apple entitlements and add bare GTA and
+# dynamic code signing for the redirected JIT process.
+python3 "$SCRIPT_DIR/prepare_springboard.py" \
+    "$SPRINGBOARD_SOURCE" "$SPRINGBOARD_COPY" "$SPRINGBOARD_ENTITLEMENTS"
+
 # A Cryptex trust cache is immutable after personalization. Embed exact copies
 # of the default tweak stack's package payloads so their later /var/jb copies
 # carry code directories already represented by this Cryptex.
@@ -579,6 +613,20 @@ codesign --verify --strict --all-architectures "$EXEC_INTERPOSER" || \
     die "execution interposer signature is invalid"
 
 xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -install_name /usr/local/lib/codex-launchd-spawn-redirect.dylib \
+    -Os -Wall -Wextra -Werror \
+    "$SCRIPT_DIR/launchd_spawn_redirect.c" \
+    -o "$LAUNCHD_REDIRECT_HOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$LAUNCHD_REDIRECT_HOOK"
+codesign --verify --strict --all-architectures "$LAUNCHD_REDIRECT_HOOK" || \
+    die "launchd redirect hook signature is invalid"
+
+xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
@@ -610,8 +658,10 @@ for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
     "$EXEC_INTERPOSER" \
+    "$LAUNCHD_REDIRECT_HOOK" \
     "$RUNTIME_TRUST_CLIENT" \
-    "$RUNTIME_TRUST_HELPER"; do
+    "$RUNTIME_TRUST_HELPER" \
+    "$SPRINGBOARD_COPY"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
             2>&1 | sed -n 's/^CDHash=//p')

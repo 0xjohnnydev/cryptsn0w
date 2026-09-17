@@ -31,6 +31,7 @@ static const char *const kInspectPid = "--inspect-pid";
 static const char *const kPreflightPid = "--preflight-pid";
 static const char *const kCheckPidImage = "--check-pid-image";
 static const char *const kInjectPid = "--inject-pid";
+static const char *const kInjectLaunchd = "--inject-launchd";
 static const char *const kPageProbePid = "--page-probe-pid";
 
 #define CODEX_PT_DETACH 11
@@ -273,10 +274,28 @@ static bool path_has_prefix(const char *path, const char *prefix) {
     return strncmp(path, prefix, length) == 0;
 }
 
+static bool is_springboard_target_path(const char *path) {
+    if (strcmp(path,
+               "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+        0) {
+        return true;
+    }
+    static const char prefix[] =
+        "/private/var/run/com.apple.security.cryptexd/mnt/"
+        "com.openai.codex.dopamine.bootstrap.";
+    static const char suffix[] =
+        "/usr/local/share/codex-bootstrap/SpringBoard.app/SpringBoard";
+    if (strncmp(path, prefix, sizeof(prefix) - 1U) != 0) {
+        return false;
+    }
+    const char *mountEnd = strchr(path + sizeof(prefix) - 1U, '/');
+    return mountEnd != NULL &&
+           mountEnd > path + sizeof(prefix) - 1U &&
+           strcmp(mountEnd, suffix) == 0;
+}
+
 static bool supported_target_path(const char *path) {
-    return strcmp(path,
-                  "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
-               0 ||
+    return is_springboard_target_path(path) ||
            path_has_prefix(path,
                            "/private/var/containers/Bundle/Application/") ||
            path_has_prefix(path, "/var/containers/Bundle/Application/") ||
@@ -293,6 +312,28 @@ static bool read_supported_target(pid_t pid, char path[PATH_MAX]) {
            strcmp(strrchr(path, '/') != NULL ? strrchr(path, '/') + 1 : path,
                   "launchd") != 0 &&
            supported_target_path(path);
+}
+
+static bool read_injection_target(pid_t pid, bool launchdMode,
+                                  char path[PATH_MAX]) {
+    if (!launchdMode) {
+        return read_supported_target(pid, path);
+    }
+    path[0] = '\0';
+    return pid == 1 && proc_pidpath(pid, path, PATH_MAX) > 0 &&
+           strcmp(path, "/sbin/launchd") == 0;
+}
+
+static bool is_launchd_redirect_hook_path(const char *path) {
+    static const char prefix[] =
+        "/private/var/run/com.apple.security.cryptexd/mnt/"
+        "com.openai.codex.dopamine.bootstrap.";
+    static const char suffix[] =
+        "/usr/local/lib/codex-launchd-spawn-redirect.dylib";
+    size_t length = strlen(path);
+    return strncmp(path, prefix, sizeof(prefix) - 1U) == 0 &&
+           length > sizeof(prefix) + sizeof(suffix) - 2U &&
+           strcmp(path + length - (sizeof(suffix) - 1U), suffix) == 0;
 }
 
 static bool wait_for_trace_stop(pid_t pid, int *status) {
@@ -588,21 +629,26 @@ int main(int argc, char *argv[]) {
                              strcmp(argv[1], kCheckPidImage) == 0;
         bool injectPid = userArgumentCount == 4 &&
                          strcmp(argv[1], kInjectPid) == 0;
+        bool injectLaunchd = userArgumentCount == 3 &&
+                             strcmp(argv[1], kInjectLaunchd) == 0;
         bool pageProbePid = userArgumentCount == 3 &&
                             strcmp(argv[1], kPageProbePid) == 0;
         if (!inspectOnly && !preflightOnly && !checkPidImage && !injectPid &&
+            !injectLaunchd &&
             !pageProbePid) {
             fprintf(stderr,
                     "usage: %s --inspect-pid pid|--preflight-pid pid|"
                     "--check-pid-image pid absolute-image-path|"
                     "--inject-pid pid absolute-dylib-path|"
+                    "--inject-launchd mounted-redirect-dylib-path|"
                     "--page-probe-pid pid\n",
                     argv[0]);
             return 64;
         }
-        bool dylibOperation = checkPidImage || injectPid;
+        bool dylibOperation = checkPidImage || injectPid || injectLaunchd;
         const char *requestedPath =
-            dylibOperation ? argv[3] : kDefaultDylib;
+            injectLaunchd ? argv[2] :
+            (dylibOperation ? argv[3] : kDefaultDylib);
         if (dylibOperation && requestedPath[0] != '/') {
             fprintf(stderr, "compat-loader: dylib path must be absolute\n");
             return 65;
@@ -615,6 +661,11 @@ int main(int argc, char *argv[]) {
                     requestedPath, strerror(errno));
             return 66;
         }
+        if (injectLaunchd && !is_launchd_redirect_hook_path(resolvedPath)) {
+            fprintf(stderr, "compat-loader: only the mounted launchd redirect "
+                            "hook is admitted for pid 1\n");
+            return 65;
+        }
         if (getuid() != 0) {
             fprintf(stderr, "compat-loader: root is required\n");
             return 67;
@@ -622,24 +673,25 @@ int main(int argc, char *argv[]) {
 
         char *end = NULL;
         errno = 0;
-        long value = strtol(argv[2], &end, 10);
-        if (errno != 0 || end == argv[2] || *end != '\0' || value <= 1 ||
-            value > INT_MAX) {
+        long value = injectLaunchd ? 1 : strtol(argv[2], &end, 10);
+        if (!injectLaunchd &&
+            (errno != 0 || end == argv[2] || *end != '\0' || value <= 1 ||
+             value > INT_MAX)) {
             fprintf(stderr, "compat-loader: invalid/forbidden target pid: %s\n",
                     argv[2]);
             return 64;
         }
         pid_t targetPid = (pid_t)value;
         char targetPath[PATH_MAX];
-        if (!read_supported_target(targetPid, targetPath)) {
+        if (!read_injection_target(targetPid, injectLaunchd, targetPath)) {
             fprintf(stderr,
                     "compat-loader: pid=%d is not an admitted app target\n",
                     targetPid);
             return 78;
         }
-        bool runtimeMutation = injectPid || pageProbePid;
+        bool runtimeMutation = injectPid || injectLaunchd || pageProbePid;
         bool softened = true;
-        if (runtimeMutation && !isPtrauthChild) {
+        if (runtimeMutation && !isPtrauthChild && !injectLaunchd) {
             softened = soften_target(targetPid, targetPath);
         }
         if (runtimeMutation && !isPtrauthChild && !softened) {
@@ -743,7 +795,8 @@ int main(int argc, char *argv[]) {
         if (!image_is_loaded(targetTask, dyldInfo.all_image_info_addr,
                              resolvedPath)) {
             char currentPath[PATH_MAX];
-            if (!read_supported_target(targetPid, currentPath) ||
+            if (!read_injection_target(targetPid, injectLaunchd,
+                                       currentPath) ||
                 strcmp(currentPath, targetPath) != 0) {
                 mach_port_deallocate(mach_task_self(), targetTask);
                 return 80;

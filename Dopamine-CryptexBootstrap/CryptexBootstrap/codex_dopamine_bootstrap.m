@@ -1448,6 +1448,26 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
     }
 }
 
+static bool is_springboard_process_path(const char *path) {
+    if (strcmp(path,
+               "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+        0) {
+        return true;
+    }
+    static const char prefix[] =
+        "/private/var/run/com.apple.security.cryptexd/mnt/"
+        "com.openai.codex.dopamine.bootstrap.";
+    static const char suffix[] =
+        "/usr/local/share/codex-bootstrap/SpringBoard.app/SpringBoard";
+    if (strncmp(path, prefix, sizeof(prefix) - 1U) != 0) {
+        return false;
+    }
+    const char *mountEnd = strchr(path + sizeof(prefix) - 1U, '/');
+    return mountEnd != NULL &&
+           mountEnd > path + sizeof(prefix) - 1U &&
+           strcmp(mountEnd, suffix) == 0;
+}
+
 static bool is_ellekit_target_process(pid_t pid, const char *path) {
     static const char *const jailbreakApplications =
         "/var/jb/Applications/";
@@ -1471,9 +1491,7 @@ static bool is_ellekit_target_process(pid_t pid, const char *path) {
         // crash if a second late loader mutates the process.
         return false;
     }
-    if (strcmp(path,
-               "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
-        0) {
+    if (is_springboard_process_path(path)) {
         return true;
     }
     if (strncmp(path, jailbreakApplications,
@@ -1682,9 +1700,7 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                     continue;
                 }
                 bool springBoardProcess =
-                    strcmp(path,
-                           "/System/Library/CoreServices/"
-                           "SpringBoard.app/SpringBoard") == 0;
+                    is_springboard_process_path(path);
                 if (springBoardProcess != springBoardOnly) {
                     continue;
                 }

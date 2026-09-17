@@ -49,6 +49,8 @@ Optional signing overrides:
   CODEX_SILEO_PROVISIONING_PROFILE
   CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS
   CODEX_SILEO_BUNDLE_IDENTIFIER
+  CODEX_SPRINGBOARD_SOURCE (required for build/install; target OS SpringBoard)
+  CODEX_LAUNCHD_SOURCE (required for build/install; target OS launchd)
 EOF
 }
 
