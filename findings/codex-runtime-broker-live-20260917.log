@@ -1,0 +1,6 @@
+phase=start pid=2470 uid=0 euid=0
+phase=thread result=0
+phase=server socket=4 errno=0 path=/var/run/codex-runtime-broker.sock
+phase=hwbp-attach pid=2455 attach=0 errno=0 stopped=1 status=0x117f initialCs=0 initialFlags=0x26003301 primeContinue=0 primeContinueErrno=0 primeSignal=0 primeSignalErrno=0 primeStopped=1 primeStatus=0x117f cs=0 flags=0x26003301 softened=0 taskKr=5 task=0x0 admitted=0
+phase=hwbp-target pid=2455 attached=0 stopped=0 flags=0x26003301 task=0x0
+phase=ready pid=2470 startup=12

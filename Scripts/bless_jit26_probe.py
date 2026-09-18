@@ -38,10 +38,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--expected-name", default="execution-probe-dynamic-only")
     parser.add_argument("--timeout", type=float, default=20.0)
-    parser.add_argument(
+    inspection_modes = parser.add_mutually_exclusive_group()
+    inspection_modes.add_argument(
         "--attach-detach-only",
         action="store_true",
         help="validate debugger attachment, then detach without continuing the target",
+    )
+    inspection_modes.add_argument(
+        "--inspect-read-only",
+        action="store_true",
+        help="read the stopped PC/register and four instruction bytes, then detach",
+    )
+    inspection_modes.add_argument(
+        "--same-value-register-write",
+        action="store_true",
+        help="write x8's exact current value back, verify it is unchanged, then detach",
+    )
+    inspection_modes.add_argument(
+        "--same-value-memory-write",
+        action="store_true",
+        help="write eight stack bytes back unchanged, verify them, then detach",
+    )
+    inspection_modes.add_argument(
+        "--same-value-full-register-write",
+        action="store_true",
+        help="write the complete register blob back unchanged, verify it, then detach",
+    )
+    inspection_modes.add_argument(
+        "--save-restore-register-state",
+        action="store_true",
+        help="transactionally save and restore all register sets, then detach",
     )
     return parser.parse_args()
 
@@ -256,17 +282,173 @@ async def run(args: argparse.Namespace) -> int:
 
             attach_response = await remote.command(f"vAttach;{args.pid:x}")
             attached = True
-            StopState.parse(attach_response)
+            initial_state = StopState.parse(attach_response)
             validate_process_info(
                 await remote.command("qProcessInfo"), args.pid, args.expected_name
             )
 
-            if args.attach_detach_only:
+            if args.inspect_read_only:
+                instruction = await remote.command(f"m{initial_state.pc:x},4")
+                pc_register = await remote.command(
+                    f"p20;thread:{initial_state.thread};"
+                )
+                print(
+                    "read-only-inspection "
+                    f"thread={initial_state.thread} pc=0x{initial_state.pc:x} "
+                    f"instruction={instruction!r} pc-register={pc_register!r}"
+                )
+
+            if args.same_value_register_write:
+                x8_before = await remote.command(
+                    f"p8;thread:{initial_state.thread};"
+                )
+                if not re.fullmatch(r"[0-9a-fA-F]{16}", x8_before):
+                    raise ProtocolError(
+                        f"unexpected x8 register value: {x8_before!r}"
+                    )
+                write_response = await remote.command(
+                    f"P8={x8_before};thread:{initial_state.thread};"
+                )
+                if write_response != "OK":
+                    raise ProtocolError(
+                        f"same-value x8 write failed: {write_response!r}"
+                    )
+                x8_after = await remote.command(
+                    f"p8;thread:{initial_state.thread};"
+                )
+                if x8_after.lower() != x8_before.lower():
+                    raise ProtocolError(
+                        f"x8 changed after same-value write: "
+                        f"before={x8_before!r} after={x8_after!r}"
+                    )
+                print(
+                    "same-value-register-write "
+                    f"thread={initial_state.thread} x8={x8_after} status=success"
+                )
+
+            if args.same_value_memory_write:
+                sp_raw = await remote.command(
+                    f"p1f;thread:{initial_state.thread};"
+                )
+                if not re.fullmatch(r"[0-9a-fA-F]{16}", sp_raw):
+                    raise ProtocolError(
+                        f"unexpected sp register value: {sp_raw!r}"
+                    )
+                sp = decode_hex_le(sp_raw)
+                if sp == 0 or sp & 0xF:
+                    raise ProtocolError(f"refusing invalid stack pointer 0x{sp:x}")
+                stack_bytes = await remote.command(f"m{sp:x},8")
+                if not re.fullmatch(r"[0-9a-fA-F]{16}", stack_bytes):
+                    raise ProtocolError(
+                        f"unexpected stack bytes: {stack_bytes!r}"
+                    )
+                write_response = await remote.command(
+                    f"M{sp:x},8:{stack_bytes}"
+                )
+                if write_response != "OK":
+                    raise ProtocolError(
+                        f"same-value stack write failed: {write_response!r}"
+                    )
+                stack_after = await remote.command(f"m{sp:x},8")
+                if stack_after.lower() != stack_bytes.lower():
+                    raise ProtocolError(
+                        f"stack changed after same-value write: "
+                        f"before={stack_bytes!r} after={stack_after!r}"
+                    )
+                print(
+                    "same-value-memory-write "
+                    f"thread={initial_state.thread} sp=0x{sp:x} "
+                    f"bytes={stack_after} status=success"
+                )
+
+            if args.same_value_full_register_write:
+                registers_before = await remote.command(
+                    f"g;thread:{initial_state.thread};"
+                )
+                if (
+                    len(registers_before) < 128
+                    or len(registers_before) % 2 != 0
+                    or not re.fullmatch(r"[0-9a-fA-F]+", registers_before)
+                ):
+                    raise ProtocolError(
+                        f"unexpected full register blob: {registers_before!r}"
+                    )
+                write_response = await remote.command(
+                    f"G{registers_before};thread:{initial_state.thread};"
+                )
+                if write_response != "OK":
+                    raise ProtocolError(
+                        f"same-value full register write failed: {write_response!r}"
+                    )
+                registers_after = await remote.command(
+                    f"g;thread:{initial_state.thread};"
+                )
+                if registers_after.lower() != registers_before.lower():
+                    raise ProtocolError("register blob changed after same-value write")
+                print(
+                    "same-value-full-register-write "
+                    f"thread={initial_state.thread} bytes={len(registers_after) // 2} "
+                    "status=success"
+                )
+
+            if args.save_restore_register_state:
+                pc_before = await remote.command(
+                    f"p20;thread:{initial_state.thread};"
+                )
+                save_identifier = await remote.command(
+                    f"QSaveRegisterState;thread:{initial_state.thread};"
+                )
+                if not re.fullmatch(r"[0-9]+", save_identifier):
+                    raise ProtocolError(
+                        f"register-state save failed: {save_identifier!r}"
+                    )
+                restore_response = await remote.command(
+                    f"QRestoreRegisterState:{save_identifier};"
+                    f"thread:{initial_state.thread};"
+                )
+                if restore_response != "OK":
+                    raise ProtocolError(
+                        f"register-state restore failed: {restore_response!r}"
+                    )
+                pc_after = await remote.command(
+                    f"p20;thread:{initial_state.thread};"
+                )
+                if pc_after.lower() != pc_before.lower():
+                    raise ProtocolError(
+                        f"PC changed across save/restore: "
+                        f"before={pc_before!r} after={pc_after!r}"
+                    )
+                print(
+                    "save-restore-register-state "
+                    f"thread={initial_state.thread} save={save_identifier} "
+                    f"pc={pc_after} status=success"
+                )
+
+            if (
+                args.attach_detach_only
+                or args.inspect_read_only
+                or args.same_value_register_write
+                or args.same_value_memory_write
+                or args.same_value_full_register_write
+                or args.save_restore_register_state
+            ):
                 response = await remote.command("D")
                 if response not in {"OK", ""}:
                     raise ProtocolError(f"detach failed: {response!r}")
                 attached = False
-                print("attach-detach-only=success")
+                if args.inspect_read_only:
+                    mode = "inspect-read-only"
+                elif args.same_value_register_write:
+                    mode = "same-value-register-write"
+                elif args.same_value_memory_write:
+                    mode = "same-value-memory-write"
+                elif args.same_value_full_register_write:
+                    mode = "same-value-full-register-write"
+                elif args.save_restore_register_state:
+                    mode = "save-restore-register-state"
+                else:
+                    mode = "attach-detach-only"
+                print(f"{mode}=success")
                 return 0
 
             prepare_count = 0

@@ -54,7 +54,9 @@ extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 #define CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES 8
 #define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 64
 #define CODEX_CS_OPS_STATUS 0
+#define CODEX_CS_OPS_CDHASH 5
 #define CODEX_CS_PLATFORM_BINARY 0x04000000U
+#define CODEX_CDHASH_SIZE 20U
 
 typedef struct codex_memorystatus_memlimit_properties {
     int32_t memlimit_active;
@@ -142,10 +144,15 @@ static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
 static NSString *const kExecInterposerLibrary =
     @"/var/jb/usr/lib/codex-exec-interposer.dylib";
+static NSString *const kDyldJBAdmissionHookLibrary =
+    @"/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib";
 static NSString *const kRuntimeTrustClientExecutable =
     @"/var/jb/usr/libexec/codex-runtime-trust-client";
 static NSString *const kRuntimeTrustHelperExecutable =
     @"/var/jb/usr/libexec/codex-runtime-trust";
+static NSString *const kSpringBoardCandidateExecutable =
+    @"/var/jb/usr/libexec/codex-springboard-candidate/"
+     "SpringBoard.app/SpringBoard";
 static NSString *const kHeadlessSileoExecutable =
     @"/var/jb/Applications/Sileo.app/Sileo";
 static NSString *const kElleKitInjectorExecutable =
@@ -1222,6 +1229,11 @@ static bool broker_spawn_error_is_admission_failure(int error) {
     if (error == EACCES || error == EPERM || error == ENOEXEC) {
         return true;
     }
+#ifdef EBADEXEC
+    if (error == EBADEXEC) {
+        return true;
+    }
+#endif
 #ifdef EBADARCH
     if (error == EBADARCH) {
         return true;
@@ -1448,6 +1460,32 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
     }
 }
 
+static const uint8_t kSpringBoardCandidateCDHash[CODEX_CDHASH_SIZE] = {
+    0x9b, 0x29, 0x8e, 0x84, 0x6a, 0xb9, 0x1a, 0xaa, 0x1f, 0xba,
+    0x30, 0x3f, 0x2c, 0x89, 0x2d, 0x82, 0x8e, 0x9e, 0x92, 0x1c,
+};
+
+static bool is_exact_springboard_candidate_process(pid_t pid,
+                                                    const char *path) {
+    const char *configured =
+        [kSpringBoardCandidateExecutable fileSystemRepresentation];
+    char resolved[CODEX_PROC_PIDPATH_MAX] = {0};
+    bool pathExact = strcmp(path, configured) == 0 ||
+        (realpath(configured, resolved) != NULL &&
+         strcmp(path, resolved) == 0);
+    uint8_t cdhash[CODEX_CDHASH_SIZE] = {0};
+    return pathExact &&
+           csops(pid, CODEX_CS_OPS_CDHASH, cdhash, sizeof(cdhash)) == 0 &&
+           memcmp(cdhash, kSpringBoardCandidateCDHash, sizeof(cdhash)) == 0;
+}
+
+static bool is_springboard_target_process(pid_t pid, const char *path) {
+    return strcmp(path,
+                  "/System/Library/CoreServices/"
+                  "SpringBoard.app/SpringBoard") == 0 ||
+           is_exact_springboard_candidate_process(pid, path);
+}
+
 static bool is_ellekit_target_process(pid_t pid, const char *path) {
     static const char *const jailbreakApplications =
         "/var/jb/Applications/";
@@ -1471,9 +1509,7 @@ static bool is_ellekit_target_process(pid_t pid, const char *path) {
         // crash if a second late loader mutates the process.
         return false;
     }
-    if (strcmp(path,
-               "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
-        0) {
+    if (is_springboard_target_process(pid, path)) {
         return true;
     }
     if (strncmp(path, jailbreakApplications,
@@ -1642,6 +1678,8 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                 access([kElleKitInjectorDylib fileSystemRepresentation],
                        R_OK) != 0 ||
                 access([kExecInterposerLibrary fileSystemRepresentation],
+                       R_OK) != 0 ||
+                access([kDyldJBAdmissionHookLibrary fileSystemRepresentation],
                        R_OK) != 0) {
                 usleep(1000 * 1000);
                 continue;
@@ -1682,9 +1720,9 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                     continue;
                 }
                 bool springBoardProcess =
-                    strcmp(path,
-                           "/System/Library/CoreServices/"
-                           "SpringBoard.app/SpringBoard") == 0;
+                    is_springboard_target_process(pid, path);
+                bool candidateSpringBoardProcess =
+                    is_exact_springboard_candidate_process(pid, path);
                 if (springBoardProcess != springBoardOnly) {
                     continue;
                 }
@@ -1710,9 +1748,24 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                     "--inject-pid", pidText,
                     (char *)[kElleKitInjectorDylib fileSystemRepresentation],
                     NULL};
-                int elleKitStatus = run_and_wait_bounded(
-                    elleKitArguments[0], elleKitArguments, 30000);
-                int status = elleKitStatus == 0 ? 0 : 1;
+                char *dyldHookArguments[] = {
+                    (char *)[kElleKitInjectorExecutable
+                        fileSystemRepresentation],
+                    "--inject-pid", pidText,
+                    (char *)[kDyldJBAdmissionHookLibrary
+                        fileSystemRepresentation],
+                    NULL};
+                int dyldHookStatus = candidateSpringBoardProcess
+                    ? run_and_wait_bounded(dyldHookArguments[0],
+                                           dyldHookArguments, 30000)
+                    : 0;
+                int elleKitStatus = dyldHookStatus == 0
+                    ? run_and_wait_bounded(elleKitArguments[0],
+                                           elleKitArguments, 30000)
+                    : dyldHookStatus;
+                int status = dyldHookStatus == 0 && elleKitStatus == 0
+                    ? 0
+                    : 1;
                 ++attempts;
                 states[key] = @{
                     @"path" : pathValue,
@@ -1720,9 +1773,11 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
                     @"complete" : @(status == 0),
                 };
                 log_message("elleKitPerProcessInjection lane=%s pid=%d "
-                            "path=%s attempt=%lu elleKitStatus=%d status=%d",
+                            "path=%s attempt=%lu candidate=%s "
+                            "dyldHookStatus=%d elleKitStatus=%d status=%d",
                             lane, pid, path, (unsigned long)attempts,
-                            elleKitStatus, status);
+                            candidateSpringBoardProcess ? "true" : "false",
+                            dyldHookStatus, elleKitStatus, status);
                 if (status == 0 && springBoardProcess) {
                     /*
                      * Post-start injection can complete after a tweak's
@@ -3809,12 +3864,24 @@ int main(int argc, char *argv[]) {
         NSString *sourceExecInterposer =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/codex-exec-interposer.dylib"];
+        NSString *sourceDyldJBAdmissionHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/"
+                            "codex-dyld-jb-admission-hook.dylib"];
         NSString *sourceRuntimeTrust =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-runtime-trust"];
         NSString *sourceRuntimeTrustClient =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-runtime-trust-client"];
+        NSString *sourceSpringBoardCandidate =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/libexec/codex-springboard-candidate/"
+                            "SpringBoard"];
+        NSString *sourceSpringBoardCandidateInfo =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/libexec/codex-springboard-candidate/"
+                            "Info.plist"];
         NSString *sourceKeyringDirectory =
             [payloadRoot stringByAppendingPathComponent:@"keyrings"];
         NSString *sourceElleKitKey =
@@ -3902,10 +3969,19 @@ int main(int argc, char *argv[]) {
             lstat([sourceExecInterposer fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceDyldJBAdmissionHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceRuntimeTrust fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceRuntimeTrustClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSpringBoardCandidate fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSpringBoardCandidateInfo fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode)) {
             return fail(@"runtime admission helpers are missing", nil);
@@ -4278,8 +4354,11 @@ int main(int argc, char *argv[]) {
         bool elleKitInjectorUpdated = false;
         bool execWorkerUpdated = false;
         bool execInterposerUpdated = false;
+        bool dyldJBAdmissionHookUpdated = false;
         bool runtimeTrustUpdated = false;
         bool runtimeTrustClientUpdated = false;
+        bool springBoardCandidateUpdated = false;
+        bool springBoardCandidateInfoUpdated = false;
         bool runtimeBaselineUpdated = false;
         NSString *runtimeAdmissionError = nil;
         if (!install_managed_apt_file(
@@ -4298,6 +4377,11 @@ int main(int argc, char *argv[]) {
                 "runtimeExecInterposer", &execInterposerUpdated,
                 &runtimeAdmissionError) ||
             !install_managed_apt_file(
+                sourceDyldJBAdmissionHook, @"/var/jb/usr/lib",
+                @"codex-dyld-jb-admission-hook.dylib", 16 * 1024 * 1024,
+                0755, "dyldJBAdmissionHook", &dyldJBAdmissionHookUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
                 sourceRuntimeTrust, @"/var/jb/usr/libexec",
                 @"codex-runtime-trust", 16 * 1024 * 1024, 0755,
                 "runtimeTrustHelper", &runtimeTrustUpdated,
@@ -4306,6 +4390,20 @@ int main(int argc, char *argv[]) {
                 sourceRuntimeTrustClient, @"/var/jb/usr/libexec",
                 @"codex-runtime-trust-client", 1024 * 1024, 0755,
                 "runtimeTrustClient", &runtimeTrustClientUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceSpringBoardCandidate,
+                [kSpringBoardCandidateExecutable
+                    stringByDeletingLastPathComponent],
+                @"SpringBoard", 16 * 1024 * 1024, 0755,
+                "springBoardCandidate", &springBoardCandidateUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceSpringBoardCandidateInfo,
+                [kSpringBoardCandidateExecutable
+                    stringByDeletingLastPathComponent],
+                @"Info.plist", 1024 * 1024, 0644,
+                "springBoardCandidateInfo", &springBoardCandidateInfoUpdated,
                 &runtimeAdmissionError) ||
             !install_managed_apt_file(
                 sourceBaseCdhashes,
@@ -4319,6 +4417,18 @@ int main(int argc, char *argv[]) {
                     runtimeBaselineUpdated ? "true" : "false",
                     "/var/jb/usr/share/codex-runtime-admission/"
                     "base-cdhashes.txt");
+        log_message("springBoardCandidate updated=%s path=%s",
+                    springBoardCandidateUpdated ? "true" : "false",
+                    [kSpringBoardCandidateExecutable UTF8String]);
+        log_message("springBoardCandidateInfo updated=%s path=%s",
+                    springBoardCandidateInfoUpdated ? "true" : "false",
+                    [[[kSpringBoardCandidateExecutable
+                        stringByDeletingLastPathComponent]
+                        stringByAppendingPathComponent:@"Info.plist"]
+                        UTF8String]);
+        log_message("dyldJBAdmissionHook updated=%s path=%s",
+                    dyldJBAdmissionHookUpdated ? "true" : "false",
+                    [kDyldJBAdmissionHookLibrary UTF8String]);
         setenv("CODEX_RUNTIME_ADMISSION", "debugged-worker-v1", 1);
         unsetenv("DYLD_INSERT_LIBRARIES");
         log_message("runtimeAdmissionEnvironment=ready transport=pinned-load "

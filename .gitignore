@@ -14,6 +14,7 @@ __pycache__/
 *.p12
 *.key
 *.ndjson
+/findings/cylinder-reborn-runtime-trust-20260916.log
 *.i64
 *.id0
 *.id1
