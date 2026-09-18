@@ -100,10 +100,18 @@ EXPECTED_WAITPID_STUB = bytes.fromhex(
 )
 
 INSTALL_PATH = "/var/jb/usr/bin/install"
+NOHUP_PATH = "/var/jb/usr/bin/nohup"
+SLEEP_PATH = "/var/jb/usr/bin/sleep"
 WORKER_PATH = "/var/jb/usr/libexec/codex-exec-worker"
 PRECURSOR_UPLOAD_PATH = "/var/mobile/Media/codex-springboard-live-precursor"
 PRECURSOR_DESTINATION_PATH = (
     "/var/jb/usr/libexec/codex-springboard-live-precursor"
+)
+CANDIDATE_BRIDGE_UPLOAD_PATH = (
+    "/var/mobile/Media/codex-candidate-injection-bridge.dylib"
+)
+CANDIDATE_BRIDGE_DESTINATION_PATH = (
+    "/var/jb/usr/lib/codex-candidate-injection-bridge.dylib"
 )
 CARRIER_LAUNCHER_PATH = (
     "/var/jb/usr/libexec/codex-carrier-ptrace-exec-probe"
@@ -120,6 +128,18 @@ CARRIER_LOG_SOURCE_PATH = (
 CARRIER_LOG_EXPORT_PATH = (
     "/var/mobile/Media/codex-carrier-ptrace-exec-probe-recovery.log"
 )
+CARRIER_V22_LOG_SOURCE_PATH = (
+    "/var/tmp/codex-carrier-ptrace-exec-probe-v22.log"
+)
+CARRIER_V22_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-carrier-ptrace-exec-probe-v22-current.log"
+)
+CARRIER_LAUNCH_TRACE_SOURCE_PATH = (
+    "/var/jb/var/log/codex-runtime-carrier-launch.log"
+)
+CARRIER_LAUNCH_TRACE_EXPORT_PATH = (
+    "/var/mobile/Media/codex-runtime-carrier-launch.log"
+)
 CARRIER_LAUNCHER_EXPORT_PATH = (
     "/var/mobile/Media/codex-carrier-ptrace-exec-probe-installed"
 )
@@ -130,6 +150,72 @@ BOOTSTRAP_LOG_EXPORT_PATH = (
 SHELL_PATH = "/var/jb/bin/sh"
 ELLEKIT_LOADER_PATH = "/var/jb/usr/libexec/codex-ellekit-loader"
 DYLD_ADMISSION_HOOK_PATH = "/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib"
+RUNTIME_BROKER_SOCKET_PATH = "/var/run/codex-runtime-broker.sock"
+RUNTIME_BROKER_LOG_SOURCE_PATH = "/var/tmp/codex-runtime-broker.log"
+RUNTIME_BROKER_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-runtime-broker-current.log"
+)
+RUNTIME_BROKER_REQUEST_LOG_SOURCE_PATH = (
+    "/var/jb/var/log/codex-runtime-broker-request.log"
+)
+RUNTIME_BROKER_REQUEST_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-runtime-broker-request.log"
+)
+RUNTIME_BROKER_HOOK_REQUEST_ARGUMENTS = (
+    "/var/jb/usr/bin/zsh",
+    "-fc",
+    "umask 077; "
+    f"readonly request_log={RUNTIME_BROKER_REQUEST_LOG_SOURCE_PATH}; "
+    "print -r -- 'phase=client-start' >| \"$request_log\"; "
+    "zmodload zsh/net/socket || { "
+    "print -r -- 'ERR client 90' >| \"$request_log\"; exit 90; }; "
+    f"zsocket {RUNTIME_BROKER_SOCKET_PATH} || {{ "
+    "print -r -- 'ERR client 91' >| \"$request_log\"; exit 91; }; "
+    "fd=$REPLY; "
+    "print -r -- 'INJECT_SPRINGBOARD "
+    f"{DYLD_ADMISSION_HOOK_PATH}' >&$fd || {{ "
+    "print -r -- 'ERR client 92' >| \"$request_log\"; exit 92; }; "
+    "IFS= read -r response <&$fd || { "
+    "print -r -- 'ERR client 93' >| \"$request_log\"; exit 93; }; "
+    "print -r -- \"$response\" >| \"$request_log\"; "
+    "[[ $response == 'OK injected' ]] || exit 94",
+)
+WORKER_HOST_PROBE_UPLOAD_PATH = (
+    "/var/mobile/Media/codex-worker-host-task-port-probe"
+)
+WORKER_HOST_PROBE_PATH = (
+    "/var/jb/usr/libexec/codex-worker-host-task-port-probe"
+)
+WORKER_HOST_PROBE_LOG_SOURCE_PATH = (
+    "/var/jb/var/log/codex-worker-host-task-port-probe.log"
+)
+WORKER_HOST_PROBE_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-worker-host-task-port-probe.log"
+)
+WORKER_HOST_BROKER_UPLOAD_PATH = (
+    "/var/mobile/Media/codex-worker-host-runtime-broker"
+)
+WORKER_HOST_BROKER_PATH = (
+    "/var/jb/usr/libexec/codex-worker-host-runtime-broker"
+)
+WORKER_HOST_BROKER_LAUNCH_LOG_SOURCE_PATH = (
+    "/var/jb/var/log/codex-worker-host-runtime-broker-launch.log"
+)
+WORKER_HOST_BROKER_LAUNCH_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-worker-host-runtime-broker-launch.log"
+)
+EXEC_CANDIDATE_TRACE_RUNNER_UPLOAD_PATH = (
+    "/var/mobile/Media/codex-exec-candidate-trace-runner"
+)
+EXEC_CANDIDATE_TRACE_RUNNER_PATH = (
+    "/var/jb/usr/libexec/codex-exec-candidate-trace-runner"
+)
+EXEC_CANDIDATE_TRACE_RUNNER_LOG_PATH = (
+    "/var/jb/var/log/codex-exec-candidate-trace-runner.log"
+)
+EXEC_CANDIDATE_TRACE_RUNNER_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-exec-candidate-trace-runner.log"
+)
 FRESH_CANARY_UPLOAD_PATH = (
     "/var/mobile/Media/codex-springboard-live-canary.dylib"
 )
@@ -137,6 +223,63 @@ FRESH_CANARY_DYLIB_PATH = "/var/jb/usr/lib/codex-springboard-live-canary.dylib"
 FRESH_CANARY_SHA256 = (
     "c2666abf214765f7103ec1b77cabe5c56328941ef7fdd90a4778440be30bc6c4"
 )
+FRIDA_TRUSTED_LAUNCHCTL_PATH = (
+    "/usr/local/share/untitled/trust-only/procursus-shell/launchctl"
+)
+FRIDA_TRUSTED_LAUNCHER_PATH = "/usr/local/bin/untitled-frida"
+FRIDA_CDHASH_HOST_LOG_SOURCE_PATH = (
+    "/var/jb/var/log/codex-frida-cdhash-host.log"
+)
+FRIDA_CDHASH_HOST_LOG_EXPORT_PATH = (
+    "/var/mobile/Media/codex-frida-cdhash-host.log"
+)
+CUSTOMD_UPLOAD_PATH = "/var/mobile/Media/customd"
+CUSTOMCTL_UPLOAD_PATH = "/var/mobile/Media/customctl"
+CUSTOMD_REGISTRAR_UPLOAD_PATH = (
+    "/var/mobile/Media/customd-candidate-registrar"
+)
+CUSTOMD_PLIST_UPLOAD_PATH = "/var/mobile/Media/com.openai.customd.plist"
+CUSTOMD_PATH = "/var/jb/usr/libexec/customd"
+CUSTOMCTL_PATH = "/var/jb/usr/libexec/customctl"
+CUSTOMD_REGISTRAR_PATH = "/var/jb/usr/libexec/customd-candidate-registrar"
+CUSTOMD_PLIST_PATH = (
+    "/var/jb/Library/LaunchDaemons/com.openai.customd.plist"
+)
+CUSTOMD_SOCKET_PATH = "/var/jb/var/run/customd.sock"
+CUSTOMD_LOG_SOURCE_PATH = "/var/jb/var/log/customd.log"
+CUSTOMD_LOG_EXPORT_PATH = "/var/mobile/Media/customd.log"
+CUSTOMD_RESULT_PATH = "/var/mobile/Media/customd-result.log"
+CUSTOMD_DEPLOY_PATH = "/var/mobile/Media/customd-deploy.log"
+CUSTOMD_LABEL = "system/com.openai.customd"
+CUSTOMD_LAUNCHCTL_PATH = "/var/jb/usr/bin/launchctl"
+CUSTOMD_SPRINGBOARD_PROBE_UPLOAD_PATH = (
+    "/var/mobile/Media/customd-springboard-live-probe.dylib"
+)
+CUSTOMD_SPRINGBOARD_PROBE_PATH = (
+    "/var/jb/usr/lib/customd-springboard-live-probe.dylib"
+)
+CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH = (
+    "/var/mobile/Media/customd-springboard-live-probe.marker"
+)
+CUSTOMD_TRACE_ME_REEXEC_PROBE_UPLOAD_PATH = (
+    "/var/mobile/Media/customd-trace-me-reexec-probe"
+)
+CUSTOMD_TRACE_ME_REEXEC_PROBE_PATH = (
+    "/var/jb/usr/libexec/customd-trace-me-reexec-probe"
+)
+CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH = (
+    "/var/mobile/Media/customd-trace-me-reexec-probe.log"
+)
+CUSTOMD_SETEXEC_HELPER_UPLOAD_PATH = (
+    "/var/mobile/Media/customd-springboard-setexec"
+)
+CUSTOMD_SETEXEC_HELPER_PATH = (
+    "/var/jb/usr/libexec/customd-springboard-setexec"
+)
+CUSTOMD_JIT_TARGET_UPLOAD_PATH = "/var/mobile/Media/customd-jit-target"
+CUSTOMD_JIT_TARGET_PATH = "/var/jb/usr/libexec/customd-jit-target"
+CUSTOMD_JIT_TARGET_PID_PATH = "/var/mobile/Media/customd-jit-target.pid"
+CUSTOMD_JIT_TARGET_LOG_PATH = "/var/mobile/Media/customd-jit-target.log"
 
 
 @dataclass(frozen=True)
@@ -167,6 +310,15 @@ def parse_args() -> argparse.Namespace:
         default=45.0,
         help="per-packet timeout in seconds (default: 45)",
     )
+    parser.add_argument(
+        "--dispatch-window",
+        type=float,
+        default=3.0,
+        help=(
+            "bounded seconds to keep an asynchronous resident launch "
+            "dispatched before restoring Sileo (default: 3)"
+        ),
+    )
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument(
         "--validate-only",
@@ -179,9 +331,22 @@ def parse_args() -> argparse.Namespace:
         help="install the fixed precursor upload at its fixed rootless path",
     )
     actions.add_argument(
+        "--stage-candidate-injection-bridge",
+        action="store_true",
+        help="install the fixed candidate bridge upload at its fixed rootless path",
+    )
+    actions.add_argument(
         "--launch-runtime-carrier",
         action="store_true",
         help="start the fixed supervising carrier launcher and intentionally do not wait",
+    )
+    actions.add_argument(
+        "--request-runtime-broker-hook",
+        action="store_true",
+        help=(
+            "ask the resident root-only runtime broker to inject the fixed "
+            "hook and retain its dlopen handle"
+        ),
     )
     actions.add_argument(
         "--stage-runtime-carrier-supervisor",
@@ -189,9 +354,173 @@ def parse_args() -> argparse.Namespace:
         help="install the fixed supervising launcher upload at its fixed rootless path",
     )
     actions.add_argument(
+        "--stage-worker-host-task-port-probe",
+        action="store_true",
+        help="install the fixed worker-host task-port probe upload",
+    )
+    actions.add_argument(
+        "--run-worker-host-task-port-probe",
+        action="store_true",
+        help="run the fixed task-port probe through the trusted worker host",
+    )
+    actions.add_argument(
+        "--export-worker-host-task-port-probe-log",
+        action="store_true",
+        help="copy the fixed task-port probe log to its Media path",
+    )
+    actions.add_argument(
+        "--stage-worker-host-runtime-broker",
+        action="store_true",
+        help="install the fixed worker-host runtime broker upload",
+    )
+    actions.add_argument(
+        "--launch-worker-host-runtime-broker",
+        action="store_true",
+        help="start the fixed worker-host runtime broker and intentionally do not wait",
+    )
+    actions.add_argument(
+        "--export-worker-host-runtime-broker-launch-log",
+        action="store_true",
+        help="copy the fixed worker-host broker launch log to its Media path",
+    )
+    actions.add_argument(
+        "--stage-exec-candidate-trace-runner",
+        action="store_true",
+        help="install the fixed disposable candidate trace runner upload",
+    )
+    actions.add_argument(
+        "--run-exec-candidate-trace-runner",
+        action="store_true",
+        help="run the fixed candidate trace runner through the debugged worker",
+    )
+    actions.add_argument(
+        "--export-exec-candidate-trace-runner-log",
+        action="store_true",
+        help="copy the fixed candidate trace runner log to Media",
+    )
+    actions.add_argument(
+        "--start-frida-cdhash-host",
+        action="store_true",
+        help="start the fixed trusted Frida policy and server hosts",
+    )
+    actions.add_argument(
+        "--export-frida-cdhash-host-log",
+        action="store_true",
+        help="copy the fixed Frida host launch log to its Media path",
+    )
+    actions.add_argument(
+        "--install-customd",
+        action="store_true",
+        help="install and bootstrap the fixed post-boot customd uploads",
+    )
+    actions.add_argument(
+        "--customd-status",
+        action="store_true",
+        help="query customd through the fixed worker-hosted customctl",
+    )
+    actions.add_argument(
+        "--customd-activate-springboard",
+        action="store_true",
+        help=(
+            "ask customd to run the fixed SpringBoard activation precursor "
+            "without a host-side trust-cache update"
+        ),
+    )
+    actions.add_argument(
+        "--customd-ensure-candidate",
+        action="store_true",
+        help=(
+            "ask customd to register and verify the fixed dormant "
+            "SpringBoard candidate entirely on-device"
+        ),
+    )
+    actions.add_argument(
+        "--customd-jit",
+        metavar="PID",
+        type=int,
+        help="ask customd to strictly JIT-enable this non-PID1 process",
+    )
+    actions.add_argument(
+        "--customd-inject-canary-in-springboard",
+        metavar="PID",
+        type=int,
+        help="ask customd to inject the fixed live canary into SpringBoard",
+    )
+    actions.add_argument(
+        "--customd-inject-hook-in-springboard",
+        metavar="PID",
+        type=int,
+        help="ask customd to install the fixed dyld admission hook",
+    )
+    actions.add_argument(
+        "--stage-customd-springboard-probe",
+        action="store_true",
+        help="install the freshly uploaded customd SpringBoard probe",
+    )
+    actions.add_argument(
+        "--customd-inject-springboard-probe",
+        action="store_true",
+        help="ask customd to inject the fresh probe into exact SpringBoard",
+    )
+    actions.add_argument(
+        "--stage-customd-trace-me-reexec-probe",
+        action="store_true",
+        help="install the disposable PT_TRACE_ME re-exec probe",
+    )
+    actions.add_argument(
+        "--customd-run-trace-me-reexec-probe",
+        action="store_true",
+        help="run the disposable re-exec handoff probe through customd",
+    )
+    actions.add_argument(
+        "--customd-run-setexec-reexec-probe",
+        action="store_true",
+        help="run the disposable SETEXEC suspended handoff probe through customd",
+    )
+    actions.add_argument(
+        "--customd-reexec-inject-springboard-probe",
+        action="store_true",
+        help="replace live SpringBoard in the same PID and inject the fresh probe",
+    )
+    actions.add_argument(
+        "--start-customd-jit-target",
+        action="store_true",
+        help="start the fixed trust-cached GTA positive-control process",
+    )
+    actions.add_argument(
+        "--export-customd-log",
+        action="store_true",
+        help="copy the fixed customd launch log to its Media path",
+    )
+    actions.add_argument(
+        "--diagnose-customd-canary-path",
+        action="store_true",
+        help="export ownership and modes for the fixed canary path",
+    )
+    actions.add_argument(
         "--export-runtime-carrier-log",
         action="store_true",
         help="copy the fixed carrier launcher log to the Media recovery path",
+    )
+    actions.add_argument(
+        "--export-runtime-carrier-v22-log",
+        action="store_true",
+        help="copy the fixed v22 carrier launcher log to its Media path",
+    )
+    actions.add_argument(
+        "--export-runtime-carrier-launch-trace",
+        action="store_true",
+        help="copy the fixed worker launch trace to its Media path",
+    )
+    actions.add_argument(
+        "--export-runtime-broker-log",
+        action="store_true",
+        help="copy the resident runtime broker log to its Media path",
+    )
+    actions.add_argument(
+        "--export-runtime-broker-request-log",
+        action="store_true",
+        help="copy the fixed broker-client response log to its Media path",
     )
     actions.add_argument(
         "--export-runtime-carrier-launcher",
@@ -407,6 +736,8 @@ async def run(args: argparse.Namespace) -> int:
         raise ProtocolError("refusing PID 1 or an invalid PID")
     if args.timeout <= 0 or args.timeout > 120:
         raise ProtocolError("timeout must be in the range (0, 120]")
+    if args.dispatch_window <= 0 or args.dispatch_window > 120:
+        raise ProtocolError("dispatch window must be in the range (0, 120]")
 
     rsd_context = (
         PreferredRsdTunnel(serial=args.userspace_udid, prefer_native=False)
@@ -466,33 +797,57 @@ async def run(args: argparse.Namespace) -> int:
             ]
             if not broker_matches:
                 # A CoreDevice --start-stopped launch can be attached before
-                # dyld has mapped the bundle-local broker.  Let dyld and the
-                # constructor run briefly, then stop and re-bind every image
-                # invariant before doing anything else.
-                await remote.connection.sendall(b"$vCont;c#a8")
-                stopped = False
-                # The bundle image appears slightly before its constructor
-                # consumes the mach-service sandbox extension.  The direct
-                # broker call is rejected as "Connection invalid" in that
-                # narrow interval, so allow the exact constructor a bounded
-                # window to finish before rebinding every invariant below.
-                await asyncio.sleep(0.35)
-                initial = StopState.parse(await remote.interrupt())
-                stopped = True
-                validate_process_info(
-                    await remote.command("qProcessInfo"), args.pid
+                # dyld has mapped the bundle-local broker.  Advance in bounded
+                # slices until that exact image is present, then give its
+                # constructor one continuous window to finish the sandbox and
+                # root-broker handshakes before rebinding every invariant.
+                deadline = asyncio.get_running_loop().time() + min(
+                    0.75, args.timeout
                 )
-                inventory = parse_inventory(
-                    await remote.command(
-                        f"jGetLoadedDynamicLibrariesInfos:{request}"
+                while not broker_matches:
+                    if asyncio.get_running_loop().time() >= deadline:
+                        break
+                    await remote.connection.sendall(b"$vCont;c#a8")
+                    stopped = False
+                    await asyncio.sleep(0.25)
+                    initial = StopState.parse(await remote.interrupt())
+                    stopped = True
+                    validate_process_info(
+                        await remote.command("qProcessInfo"), args.pid
                     )
-                )
-                broker_matches = [
-                    image
-                    for image in inventory
-                    if image.path == expected_broker_path
-                    and image.identifier in EXPECTED_BROKER_UUIDS
-                ]
+                    inventory = parse_inventory(
+                        await remote.command(
+                            f"jGetLoadedDynamicLibrariesInfos:{request}"
+                        )
+                    )
+                    broker_matches = [
+                        image
+                        for image in inventory
+                        if image.path == expected_broker_path
+                        and image.identifier in EXPECTED_BROKER_UUIDS
+                    ]
+                if broker_matches:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining > 0:
+                        await remote.connection.sendall(b"$vCont;c#a8")
+                        stopped = False
+                        await asyncio.sleep(remaining)
+                        initial = StopState.parse(await remote.interrupt())
+                        stopped = True
+                        validate_process_info(
+                            await remote.command("qProcessInfo"), args.pid
+                        )
+                        inventory = parse_inventory(
+                            await remote.command(
+                                f"jGetLoadedDynamicLibrariesInfos:{request}"
+                            )
+                        )
+                        broker_matches = [
+                            image
+                            for image in inventory
+                            if image.path == expected_broker_path
+                            and image.identifier in EXPECTED_BROKER_UUIDS
+                        ]
             if len(broker_matches) != 1:
                 raise ProtocolError(
                     "expected one exact bundle-local broker image; "
@@ -662,6 +1017,14 @@ async def run(args: argparse.Namespace) -> int:
                     PRECURSOR_UPLOAD_PATH,
                     PRECURSOR_DESTINATION_PATH,
                 )
+            elif args.stage_candidate_injection_bridge:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    CANDIDATE_BRIDGE_UPLOAD_PATH,
+                    CANDIDATE_BRIDGE_DESTINATION_PATH,
+                )
             elif args.stage_runtime_carrier_supervisor:
                 root_arguments = (
                     INSTALL_PATH,
@@ -670,6 +1033,333 @@ async def run(args: argparse.Namespace) -> int:
                     CARRIER_SUPERVISOR_UPLOAD_PATH,
                     CARRIER_SUPERVISOR_PATH,
                 )
+            elif args.stage_worker_host_task_port_probe:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0755",
+                    WORKER_HOST_PROBE_UPLOAD_PATH,
+                    WORKER_HOST_PROBE_PATH,
+                )
+            elif args.run_worker_host_task_port_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    "umask 077; exec "
+                    f"{WORKER_PATH} --macho {WORKER_HOST_PROBE_PATH} "
+                    f">{WORKER_HOST_PROBE_LOG_SOURCE_PATH} 2>&1",
+                )
+            elif args.export_worker_host_task_port_probe_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    WORKER_HOST_PROBE_LOG_SOURCE_PATH,
+                    WORKER_HOST_PROBE_LOG_EXPORT_PATH,
+                )
+            elif args.stage_worker_host_runtime_broker:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0755",
+                    WORKER_HOST_BROKER_UPLOAD_PATH,
+                    WORKER_HOST_BROKER_PATH,
+                )
+            elif args.launch_worker_host_runtime_broker:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    "umask 077; "
+                    f"{NOHUP_PATH} {WORKER_PATH} --macho "
+                    f"{WORKER_HOST_BROKER_PATH} </dev/null "
+                    f">{WORKER_HOST_BROKER_LAUNCH_LOG_SOURCE_PATH} 2>&1 &",
+                )
+            elif args.export_worker_host_runtime_broker_launch_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    WORKER_HOST_BROKER_LAUNCH_LOG_SOURCE_PATH,
+                    WORKER_HOST_BROKER_LAUNCH_LOG_EXPORT_PATH,
+                )
+            elif args.stage_exec_candidate_trace_runner:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0755",
+                    EXEC_CANDIDATE_TRACE_RUNNER_UPLOAD_PATH,
+                    EXEC_CANDIDATE_TRACE_RUNNER_PATH,
+                )
+            elif args.run_exec_candidate_trace_runner:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    "umask 077; "
+                    f"{INSTALL_PATH} -m 0755 "
+                    f"{EXEC_CANDIDATE_TRACE_RUNNER_UPLOAD_PATH} "
+                    f"{EXEC_CANDIDATE_TRACE_RUNNER_PATH} && exec "
+                    f"{WORKER_PATH} --macho "
+                    f"{EXEC_CANDIDATE_TRACE_RUNNER_PATH} "
+                    f">{EXEC_CANDIDATE_TRACE_RUNNER_LOG_PATH} 2>&1",
+                )
+            elif args.export_exec_candidate_trace_runner_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    EXEC_CANDIDATE_TRACE_RUNNER_LOG_PATH,
+                    EXEC_CANDIDATE_TRACE_RUNNER_LOG_EXPORT_PATH,
+                )
+            elif args.start_frida_cdhash_host:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    "umask 077; "
+                    f": >{FRIDA_CDHASH_HOST_LOG_SOURCE_PATH}; "
+                    f"test -x {FRIDA_TRUSTED_LAUNCHCTL_PATH} || exit 72; "
+                    f"test -x {FRIDA_TRUSTED_LAUNCHER_PATH} || exit 72; "
+                    f"{FRIDA_TRUSTED_LAUNCHCTL_PATH} kickstart -k "
+                    "system/re.frida.policyd "
+                    f">>{FRIDA_CDHASH_HOST_LOG_SOURCE_PATH} 2>&1 || exit 73; "
+                    f"{FRIDA_TRUSTED_LAUNCHER_PATH} "
+                    f">>{FRIDA_CDHASH_HOST_LOG_SOURCE_PATH} 2>&1; "
+                    "result=$?; "
+                    f"{FRIDA_TRUSTED_LAUNCHER_PATH} --status "
+                    f">>{FRIDA_CDHASH_HOST_LOG_SOURCE_PATH} 2>&1 || true; "
+                    "exit $result",
+                )
+            elif args.export_frida_cdhash_host_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    FRIDA_CDHASH_HOST_LOG_SOURCE_PATH,
+                    FRIDA_CDHASH_HOST_LOG_EXPORT_PATH,
+                )
+            elif args.install_customd:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    "set -eu; umask 077; "
+                    f"printf '%s\\n' start >{CUSTOMD_DEPLOY_PATH}; "
+                    f"{INSTALL_PATH} -d -m 0755 /var/jb/usr/libexec "
+                    "/var/jb/Library/LaunchDaemons /var/jb/var/run "
+                    "/var/jb/var/log; "
+                    f"{INSTALL_PATH} -m 0755 {CUSTOMD_UPLOAD_PATH} "
+                    f"{CUSTOMD_PATH}; "
+                    f"{INSTALL_PATH} -m 0755 {CUSTOMCTL_UPLOAD_PATH} "
+                    f"{CUSTOMCTL_PATH}; "
+                    f"{INSTALL_PATH} -m 0755 {CUSTOMD_REGISTRAR_UPLOAD_PATH} "
+                    f"{CUSTOMD_REGISTRAR_PATH}; "
+                    f"{INSTALL_PATH} -m 0755 {CUSTOMD_SETEXEC_HELPER_UPLOAD_PATH} "
+                    f"{CUSTOMD_SETEXEC_HELPER_PATH}; "
+                    f"{INSTALL_PATH} -m 0644 {CUSTOMD_PLIST_UPLOAD_PATH} "
+                    f"{CUSTOMD_PLIST_PATH}; "
+                    f"printf '%s\\n' staged >>{CUSTOMD_DEPLOY_PATH}; "
+                    f"{CUSTOMD_LAUNCHCTL_PATH} bootout "
+                    f"{CUSTOMD_LABEL} >/dev/null 2>&1 || true; "
+                    f"{SLEEP_PATH} 2; "
+                    f"printf '%s\\n' bootout >>{CUSTOMD_DEPLOY_PATH}; "
+                    f"{CUSTOMD_LAUNCHCTL_PATH} bootstrap system "
+                    f"{CUSTOMD_PLIST_PATH}; "
+                    f"printf '%s\\n' bootstrapped >>{CUSTOMD_DEPLOY_PATH}; "
+                    f"{CUSTOMD_LAUNCHCTL_PATH} kickstart -k "
+                    f"{CUSTOMD_LABEL}; "
+                    f"printf '%s\\n' kicked >>{CUSTOMD_DEPLOY_PATH}; "
+                    "attempt=0; "
+                    f"while [ ! -S {CUSTOMD_SOCKET_PATH} ] && "
+                    "[ \"$attempt\" -lt 50 ]; do "
+                    f"{SLEEP_PATH} 0.1; "
+                    "attempt=$((attempt + 1)); done; "
+                    f"[ -S {CUSTOMD_SOCKET_PATH} ]; "
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"status >{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH} "
+                    f"{CUSTOMD_DEPLOY_PATH}; exit $status",
+                )
+            elif args.customd_status:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"status >{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.customd_activate_springboard:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"activate >{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.customd_ensure_candidate:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"ensure-candidate >{CUSTOMD_RESULT_PATH} 2>&1 || "
+                    "status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.customd_jit is not None:
+                if args.customd_jit <= 1:
+                    raise ProtocolError("forbidden customd target PID")
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} jit "
+                    f"{args.customd_jit} >{CUSTOMD_RESULT_PATH} 2>&1 || "
+                    "status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.customd_inject_canary_in_springboard is not None:
+                target = args.customd_inject_canary_in_springboard
+                if target <= 1:
+                    raise ProtocolError("forbidden customd injection PID")
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"inject {target} {FRESH_CANARY_DYLIB_PATH} "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.customd_inject_hook_in_springboard is not None:
+                target = args.customd_inject_hook_in_springboard
+                if target <= 1:
+                    raise ProtocolError("forbidden customd hook target PID")
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"inject {target} {DYLD_ADMISSION_HOOK_PATH} "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.stage_customd_springboard_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"/var/jb/usr/bin/rm -f "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH}; "
+                    f"{INSTALL_PATH} -m 0644 "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_UPLOAD_PATH} "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_PATH}",
+                )
+            elif args.customd_inject_springboard_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    f"inject-springboard {CUSTOMD_SPRINGBOARD_PROBE_PATH} "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    "exit $status",
+                )
+            elif args.stage_customd_trace_me_reexec_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"/var/jb/usr/bin/rm -f "
+                    f"{CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}; "
+                    f"{INSTALL_PATH} -m 0755 "
+                    f"{CUSTOMD_TRACE_ME_REEXEC_PROBE_UPLOAD_PATH} "
+                    f"{CUSTOMD_TRACE_ME_REEXEC_PROBE_PATH}",
+                )
+            elif args.customd_run_trace_me_reexec_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    "trace-reexec-probe "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    f"if [ -f {CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH} ]; "
+                    f"then /var/jb/usr/bin/chmod 0644 "
+                    f"{CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}; fi; "
+                    "exit $status",
+                )
+            elif args.customd_run_setexec_reexec_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    "setexec-reexec-probe "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    f"if [ -f {CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH} ]; "
+                    f"then /var/jb/usr/bin/chmod 0644 "
+                    f"{CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}; fi; "
+                    "exit $status",
+                )
+            elif args.customd_reexec_inject_springboard_probe:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"/var/jb/usr/bin/rm -f "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH}; "
+                    f"status=0; {WORKER_PATH} --macho {CUSTOMCTL_PATH} "
+                    "reexec-inject-springboard "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_PATH} "
+                    f">{CUSTOMD_RESULT_PATH} 2>&1 || status=$?; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}; "
+                    f"if [ -f {CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH} ]; "
+                    f"then /var/jb/usr/bin/chmod 0644 "
+                    f"{CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH}; fi; "
+                    "exit $status",
+                )
+            elif args.start_customd_jit_target:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"/var/jb/usr/bin/rm -f {CUSTOMD_JIT_TARGET_PID_PATH} "
+                    f"{CUSTOMD_JIT_TARGET_LOG_PATH}; "
+                    f"{INSTALL_PATH} -m 0755 "
+                    f"{CUSTOMD_JIT_TARGET_UPLOAD_PATH} "
+                    f"{CUSTOMD_JIT_TARGET_PATH}; "
+                    f"{NOHUP_PATH} {CUSTOMD_JIT_TARGET_PATH} "
+                    f">{CUSTOMD_JIT_TARGET_LOG_PATH} 2>&1 </dev/null & "
+                    "target=$!; "
+                    f"printf '%s\\n' \"$target\" "
+                    f">{CUSTOMD_JIT_TARGET_PID_PATH}; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_JIT_TARGET_PID_PATH} "
+                    f"{CUSTOMD_JIT_TARGET_LOG_PATH}; "
+                    f"{SLEEP_PATH} 0.2; kill -0 \"$target\"",
+                )
+            elif args.export_customd_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    CUSTOMD_LOG_SOURCE_PATH,
+                    CUSTOMD_LOG_EXPORT_PATH,
+                )
+            elif args.diagnose_customd_canary_path:
+                root_arguments = (
+                    SHELL_PATH,
+                    "-c",
+                    f"root=$(/var/jb/usr/bin/realpath /var/jb); "
+                    f"file=$(/var/jb/usr/bin/realpath "
+                    f"{FRESH_CANARY_DYLIB_PATH}); "
+                    f"printf 'root=%s\\nfile=%s\\n' \"$root\" \"$file\" "
+                    f">{CUSTOMD_RESULT_PATH}; "
+                    "current=$file; while [ \"$current\" != \"$root\" ]; do "
+                    "/var/jb/usr/bin/stat -c '%u %a %h %s %n' "
+                    f"\"$current\" >>{CUSTOMD_RESULT_PATH}; "
+                    "current=${current%/*}; done; "
+                    "/var/jb/usr/bin/stat -c '%u %a %h %s %n' "
+                    f"\"$root\" >>{CUSTOMD_RESULT_PATH}; "
+                    f"/var/jb/usr/bin/chmod 0644 {CUSTOMD_RESULT_PATH}",
+                )
+            elif args.request_runtime_broker_hook:
+                root_arguments = RUNTIME_BROKER_HOOK_REQUEST_ARGUMENTS
             elif args.export_runtime_carrier_log:
                 root_arguments = (
                     INSTALL_PATH,
@@ -677,6 +1367,38 @@ async def run(args: argparse.Namespace) -> int:
                     "0644",
                     CARRIER_LOG_SOURCE_PATH,
                     CARRIER_LOG_EXPORT_PATH,
+                )
+            elif args.export_runtime_carrier_v22_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    CARRIER_V22_LOG_SOURCE_PATH,
+                    CARRIER_V22_LOG_EXPORT_PATH,
+                )
+            elif args.export_runtime_carrier_launch_trace:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    CARRIER_LAUNCH_TRACE_SOURCE_PATH,
+                    CARRIER_LAUNCH_TRACE_EXPORT_PATH,
+                )
+            elif args.export_runtime_broker_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    RUNTIME_BROKER_LOG_SOURCE_PATH,
+                    RUNTIME_BROKER_LOG_EXPORT_PATH,
+                )
+            elif args.export_runtime_broker_request_log:
+                root_arguments = (
+                    INSTALL_PATH,
+                    "-m",
+                    "0644",
+                    RUNTIME_BROKER_REQUEST_LOG_SOURCE_PATH,
+                    RUNTIME_BROKER_REQUEST_LOG_EXPORT_PATH,
                 )
             elif args.export_runtime_carrier_launcher:
                 root_arguments = (
@@ -705,9 +1427,12 @@ async def run(args: argparse.Namespace) -> int:
                 )
             elif args.launch_runtime_carrier:
                 root_arguments = (
-                    WORKER_PATH,
-                    "--macho",
-                    CARRIER_SUPERVISOR_PATH,
+                    SHELL_PATH,
+                    "-c",
+                    "umask 077; "
+                    f"{NOHUP_PATH} {WORKER_PATH} --macho "
+                    f"{CARRIER_SUPERVISOR_PATH} </dev/null "
+                    f">{CARRIER_LAUNCH_TRACE_SOURCE_PATH} 2>&1 &",
                 )
             else:
                 raise ProtocolError("unhandled broker action")
@@ -716,7 +1441,28 @@ async def run(args: argparse.Namespace) -> int:
             # waitpid can be entered for a bounded window and then interrupted.
             # Keep the exact direct broker call for commands that are expected
             # to finish synchronously.
-            direct_mode = not args.launch_runtime_carrier
+            direct_mode = not (
+                args.stage_springboard_live_precursor
+                or args.stage_candidate_injection_bridge
+                or args.request_runtime_broker_hook
+                or args.export_runtime_broker_log
+                or args.export_runtime_broker_request_log
+                or args.stage_worker_host_task_port_probe
+                or args.run_worker_host_task_port_probe
+                or args.export_worker_host_task_port_probe_log
+                or args.stage_worker_host_runtime_broker
+                or args.export_worker_host_runtime_broker_launch_log
+                or args.install_customd
+                or args.customd_status
+                or args.customd_activate_springboard
+                or args.customd_ensure_candidate
+                or args.stage_customd_springboard_probe
+                or args.customd_run_trace_me_reexec_probe
+                or args.customd_run_setexec_reexec_probe
+                or args.customd_reexec_inject_springboard_probe
+                or args.export_customd_log
+                or args.diagnose_customd_canary_path
+            )
             spawn_arguments = (
                 root_arguments
                 if direct_mode
@@ -846,6 +1592,175 @@ async def run(args: argparse.Namespace) -> int:
                         "runtime-carrier-log-export=success request=direct "
                         f"destination={CARRIER_LOG_EXPORT_PATH}"
                     )
+                elif args.export_runtime_carrier_v22_log:
+                    print(
+                        "runtime-carrier-v22-log-export=success "
+                        "request=direct "
+                        f"destination={CARRIER_V22_LOG_EXPORT_PATH}"
+                    )
+                elif args.export_runtime_carrier_launch_trace:
+                    print(
+                        "runtime-carrier-launch-trace-export=success "
+                        "request=direct "
+                        f"destination={CARRIER_LAUNCH_TRACE_EXPORT_PATH}"
+                    )
+                elif args.request_runtime_broker_hook:
+                    print(
+                        "runtime-broker-hook-request=success "
+                        "dlclose=omitted removal=reboot"
+                    )
+                elif args.export_runtime_broker_log:
+                    print(
+                        "runtime-broker-log-export=success "
+                        f"destination={RUNTIME_BROKER_LOG_EXPORT_PATH}"
+                    )
+                elif args.export_runtime_broker_request_log:
+                    print(
+                        "runtime-broker-request-log-export=success "
+                        f"destination="
+                        f"{RUNTIME_BROKER_REQUEST_LOG_EXPORT_PATH}"
+                    )
+                elif args.stage_worker_host_task_port_probe:
+                    print(
+                        "worker-host-task-port-probe-stage=success "
+                        f"destination={WORKER_HOST_PROBE_PATH}"
+                    )
+                elif args.run_worker_host_task_port_probe:
+                    print("worker-host-task-port-probe-run=success")
+                elif args.export_worker_host_task_port_probe_log:
+                    print(
+                        "worker-host-task-port-probe-log-export=success "
+                        f"destination={WORKER_HOST_PROBE_LOG_EXPORT_PATH}"
+                    )
+                elif args.stage_worker_host_runtime_broker:
+                    print(
+                        "worker-host-runtime-broker-stage=success "
+                        f"destination={WORKER_HOST_BROKER_PATH}"
+                    )
+                elif args.export_worker_host_runtime_broker_launch_log:
+                    print(
+                        "worker-host-runtime-broker-launch-log-export=success "
+                        f"destination={WORKER_HOST_BROKER_LAUNCH_LOG_EXPORT_PATH}"
+                    )
+                elif args.stage_exec_candidate_trace_runner:
+                    print(
+                        "exec-candidate-trace-runner-stage=success "
+                        f"destination={EXEC_CANDIDATE_TRACE_RUNNER_PATH}"
+                    )
+                elif args.run_exec_candidate_trace_runner:
+                    print("exec-candidate-trace-runner-run=success")
+                elif args.export_exec_candidate_trace_runner_log:
+                    print(
+                        "exec-candidate-trace-runner-log-export=success "
+                        f"destination="
+                        f"{EXEC_CANDIDATE_TRACE_RUNNER_LOG_EXPORT_PATH}"
+                    )
+                elif args.launch_worker_host_runtime_broker:
+                    print(
+                        "worker-host-runtime-broker-launch=success "
+                        "request=direct detached=1"
+                    )
+                elif args.launch_runtime_carrier:
+                    print(
+                        "runtime-carrier-launch=success request=direct "
+                        "detached=1"
+                    )
+                elif args.start_frida_cdhash_host:
+                    print("frida-cdhash-host-start=success")
+                elif args.export_frida_cdhash_host_log:
+                    print(
+                        "frida-cdhash-host-log-export=success "
+                        f"destination={FRIDA_CDHASH_HOST_LOG_EXPORT_PATH}"
+                    )
+                elif args.install_customd:
+                    print(
+                        "customd-install=success host=worker-no-tss "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.customd_status:
+                    print(f"customd-status=success result={CUSTOMD_RESULT_PATH}")
+                elif args.customd_activate_springboard:
+                    print(
+                        "customd-springboard-activation=success "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.customd_ensure_candidate:
+                    print(
+                        "customd-candidate-ensure=success "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.customd_jit is not None:
+                    print(
+                        f"customd-jit=success target-pid={args.customd_jit} "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.customd_inject_canary_in_springboard is not None:
+                    print(
+                        "customd-inject-canary=success "
+                        "target-pid="
+                        f"{args.customd_inject_canary_in_springboard} "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.customd_inject_hook_in_springboard is not None:
+                    print(
+                        "customd-inject-hook=success "
+                        "target-pid="
+                        f"{args.customd_inject_hook_in_springboard} "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.stage_customd_springboard_probe:
+                    print(
+                        "customd-springboard-probe-stage=success "
+                        f"destination={CUSTOMD_SPRINGBOARD_PROBE_PATH}"
+                    )
+                elif args.customd_inject_springboard_probe:
+                    print(
+                        "customd-springboard-probe-inject=success "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.stage_customd_trace_me_reexec_probe:
+                    print(
+                        "customd-trace-me-reexec-probe-stage=success "
+                        f"destination={CUSTOMD_TRACE_ME_REEXEC_PROBE_PATH}"
+                    )
+                elif args.customd_run_trace_me_reexec_probe:
+                    print(
+                        "customd-trace-me-reexec-probe-run=success "
+                        f"result={CUSTOMD_RESULT_PATH} "
+                        f"probe-log={CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}"
+                    )
+                elif args.customd_run_setexec_reexec_probe:
+                    print(
+                        "customd-setexec-reexec-probe-run=success "
+                        f"result={CUSTOMD_RESULT_PATH} "
+                        f"probe-log={CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}"
+                    )
+                elif args.customd_reexec_inject_springboard_probe:
+                    print(
+                        "customd-springboard-setexec-inject=success "
+                        f"result={CUSTOMD_RESULT_PATH} "
+                        f"marker={CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH}"
+                    )
+                elif args.start_customd_jit_target:
+                    print(
+                        "customd-jit-target-start=success "
+                        f"pid-file={CUSTOMD_JIT_TARGET_PID_PATH}"
+                    )
+                elif args.export_customd_log:
+                    print(
+                        "customd-log-export=success "
+                        f"destination={CUSTOMD_LOG_EXPORT_PATH}"
+                    )
+                elif args.diagnose_customd_canary_path:
+                    print(
+                        "customd-canary-path-diagnostic=success "
+                        f"result={CUSTOMD_RESULT_PATH}"
+                    )
+                elif args.stage_candidate_injection_bridge:
+                    print(
+                        "candidate-injection-bridge-stage=success "
+                        f"destination={CANDIDATE_BRIDGE_DESTINATION_PATH}"
+                    )
                 elif args.export_runtime_carrier_launcher:
                     print(
                         "runtime-carrier-launcher-export=success request=direct "
@@ -917,7 +1832,8 @@ async def run(args: argparse.Namespace) -> int:
                     f"target=0x{observed_spawn_target:x}"
                 )
 
-            if args.launch_runtime_carrier:
+            if (args.launch_runtime_carrier or
+                    args.launch_worker_host_runtime_broker):
                 # The virtual job's worker must get CPU time after the
                 # interposed spawn returns.  Its root peer intentionally
                 # remains blocked supervising the resident carrier, so a
@@ -950,7 +1866,7 @@ async def run(args: argparse.Namespace) -> int:
                         )
                 await remote.connection.sendall(b"$vCont;c#a8")
                 stopped = False
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(args.dispatch_window)
                 dispatch_stop = await remote.interrupt()
                 if dispatch_stop[:1] not in {"T", "S"}:
                     raise ProtocolError(
@@ -968,9 +1884,14 @@ async def run(args: argparse.Namespace) -> int:
                 state_saved = False
                 await expect_ok(remote, f"_m{scratch:x}")
                 scratch = None
+                launch_name = (
+                    "runtime-carrier"
+                    if args.launch_runtime_carrier
+                    else "worker-host-runtime-broker"
+                )
                 print(
-                    f"runtime-carrier-request=accepted fake-pid={fake_pid} "
-                    "waited=0 dispatch-window=3.0"
+                    f"{launch_name}-request=accepted fake-pid={fake_pid} "
+                    f"waited=0 dispatch-window={args.dispatch_window:.1f}"
                 )
                 return 0
 
@@ -1019,10 +1940,141 @@ async def run(args: argparse.Namespace) -> int:
                     f"runtime-carrier-log-export=success fake-pid={fake_pid} "
                     f"destination={CARRIER_LOG_EXPORT_PATH}"
                 )
+            elif args.export_runtime_carrier_v22_log:
+                print(
+                    "runtime-carrier-v22-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CARRIER_V22_LOG_EXPORT_PATH}"
+                )
+            elif args.export_runtime_carrier_launch_trace:
+                print(
+                    "runtime-carrier-launch-trace-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CARRIER_LAUNCH_TRACE_EXPORT_PATH}"
+                )
+            elif args.request_runtime_broker_hook:
+                print(
+                    "runtime-broker-hook-request=success "
+                    f"fake-pid={fake_pid} "
+                    "dlclose=omitted removal=reboot"
+                )
+            elif args.export_runtime_broker_log:
+                print(
+                    "runtime-broker-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={RUNTIME_BROKER_LOG_EXPORT_PATH}"
+                )
+            elif args.export_runtime_broker_request_log:
+                print(
+                    "runtime-broker-request-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={RUNTIME_BROKER_REQUEST_LOG_EXPORT_PATH}"
+                )
+            elif args.stage_worker_host_task_port_probe:
+                print(
+                    "worker-host-task-port-probe-stage=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={WORKER_HOST_PROBE_PATH}"
+                )
+            elif args.run_worker_host_task_port_probe:
+                print(
+                    "worker-host-task-port-probe-run=success "
+                    f"fake-pid={fake_pid}"
+                )
+            elif args.export_worker_host_task_port_probe_log:
+                print(
+                    "worker-host-task-port-probe-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={WORKER_HOST_PROBE_LOG_EXPORT_PATH}"
+                )
+            elif args.stage_worker_host_runtime_broker:
+                print(
+                    "worker-host-runtime-broker-stage=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={WORKER_HOST_BROKER_PATH}"
+                )
+            elif args.export_worker_host_runtime_broker_launch_log:
+                print(
+                    "worker-host-runtime-broker-launch-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={WORKER_HOST_BROKER_LAUNCH_LOG_EXPORT_PATH}"
+                )
+            elif args.start_frida_cdhash_host:
+                print(
+                    "frida-cdhash-host-start=success "
+                    f"fake-pid={fake_pid}"
+                )
+            elif args.export_frida_cdhash_host_log:
+                print(
+                    "frida-cdhash-host-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={FRIDA_CDHASH_HOST_LOG_EXPORT_PATH}"
+                )
             elif args.export_bootstrap_log:
                 print(
                     f"bootstrap-log-export=success fake-pid={fake_pid} "
                     f"destination={BOOTSTRAP_LOG_EXPORT_PATH}"
+                )
+            elif args.install_customd:
+                print(
+                    "customd-install=success host=worker-no-tss "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH}"
+                )
+            elif args.customd_status:
+                print(
+                    f"customd-status=success fake-pid={fake_pid} "
+                    f"result={CUSTOMD_RESULT_PATH}"
+                )
+            elif args.customd_activate_springboard:
+                print(
+                    "customd-springboard-activation=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH}"
+                )
+            elif args.customd_ensure_candidate:
+                print(
+                    "customd-candidate-ensure=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH}"
+                )
+            elif args.stage_customd_springboard_probe:
+                print(
+                    "customd-springboard-probe-stage=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CUSTOMD_SPRINGBOARD_PROBE_PATH}"
+                )
+            elif args.stage_customd_trace_me_reexec_probe:
+                print(
+                    "customd-trace-me-reexec-probe-stage=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CUSTOMD_TRACE_ME_REEXEC_PROBE_PATH}"
+                )
+            elif args.customd_run_trace_me_reexec_probe:
+                print(
+                    "customd-trace-me-reexec-probe-run=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH} "
+                    f"probe-log={CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}"
+                )
+            elif args.customd_run_setexec_reexec_probe:
+                print(
+                    "customd-setexec-reexec-probe-run=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH} "
+                    f"probe-log={CUSTOMD_TRACE_ME_REEXEC_PROBE_LOG_PATH}"
+                )
+            elif args.customd_reexec_inject_springboard_probe:
+                print(
+                    "customd-springboard-setexec-inject=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH} "
+                    f"marker={CUSTOMD_SPRINGBOARD_PROBE_MARKER_PATH}"
+                )
+            elif args.export_customd_log:
+                print(
+                    "customd-log-export=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CUSTOMD_LOG_EXPORT_PATH}"
+                )
+            elif args.diagnose_customd_canary_path:
+                print(
+                    "customd-canary-path-diagnostic=success "
+                    f"fake-pid={fake_pid} result={CUSTOMD_RESULT_PATH}"
                 )
             elif args.check_fresh_canary_in_springboard is not None:
                 print(
@@ -1035,6 +2087,12 @@ async def run(args: argparse.Namespace) -> int:
                     "runtime-carrier-supervisor-stage=success "
                     f"fake-pid={fake_pid} "
                     f"destination={CARRIER_SUPERVISOR_PATH}"
+                )
+            elif args.stage_candidate_injection_bridge:
+                print(
+                    "candidate-injection-bridge-stage=success "
+                    f"fake-pid={fake_pid} "
+                    f"destination={CANDIDATE_BRIDGE_DESTINATION_PATH}"
                 )
             else:
                 print(

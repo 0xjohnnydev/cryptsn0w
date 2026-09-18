@@ -43,6 +43,12 @@
 #define CODEX_REMOTE_THREAD_PORT_INDEX_BASE 0x8000U
 #define CODEX_REMOTE_PORT_ATTEMPTS 4096U
 #define CODEX_REMOTE_THREAD_PORT_ATTEMPTS 64U
+#ifndef CODEX_STARTUP_PROOF_ENABLED
+#define CODEX_STARTUP_PROOF_ENABLED 1
+#endif
+#ifndef CODEX_TRUSTED_DONOR_F351
+#define CODEX_TRUSTED_DONOR_F351 0
+#endif
 #define CODEX_HARDENED_BEHAVIOR                                      \
     ((exception_behavior_t)(EXCEPTION_STATE_IDENTITY_PROTECTED |     \
                             MACH_EXCEPTION_CODES))
@@ -57,8 +63,10 @@ static const char *const kMarkerPath =
     "/var/tmp/codex-runtime-carrier.loaded";
 static const char *const kLogPath =
     "/var/tmp/codex-runtime-broker.log";
+#if CODEX_STARTUP_PROOF_ENABLED
 static const char *const kStartupProofPath =
     "/var/jb/usr/lib/codex-springboard-dynamic-proof.dylib";
+#endif
 
 static const uint8_t kMmapPattern[8] = {
     0xb0, 0x18, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
@@ -71,10 +79,23 @@ static const uint8_t kMmapOriginal[20] = {
 static const uint8_t kFcntlPattern[8] = {
     0x90, 0x0b, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
 };
+#if CODEX_TRUSTED_DONOR_F351
+static const uint8_t kResidentRuntimeUUID[16] = {
+    0xf3, 0x51, 0x0c, 0xc6, 0x52, 0x4e, 0x3c, 0x8f,
+    0x85, 0x41, 0x7f, 0x8d, 0xee, 0xc7, 0x8f, 0xe6,
+};
+static const mach_vm_size_t kTrustedBlobSize = 0x230U;
+static const mach_vm_address_t kTrustedMmapHookOffset = 0xf8U;
+static const mach_vm_address_t kTrustedFcntlHookOffset = 0x1f0U;
+#else
 static const uint8_t kResidentRuntimeUUID[16] = {
     0x55, 0xbc, 0xb2, 0x95, 0x6f, 0x34, 0x37, 0xf5,
     0xb1, 0x71, 0x9e, 0x61, 0x3a, 0x0d, 0x2d, 0x5f,
 };
+static const mach_vm_size_t kTrustedBlobSize = 0x1c8U;
+static const mach_vm_address_t kTrustedMmapHookOffset = 0x90U;
+static const mach_vm_address_t kTrustedFcntlHookOffset = 0x188U;
+#endif
 static const uint8_t kTrustedBlobPattern[24] = {
     0xdf, 0x24, 0x03, 0xd5, 0x90, 0x02, 0x80, 0xd2,
     0x01, 0x10, 0x00, 0xd4, 0x21, 0x02, 0x80, 0xd2,
@@ -88,7 +109,6 @@ static const uint8_t kTrustedFcntlHookPattern[16] = {
     0xdf, 0x24, 0x03, 0xd5, 0x3f, 0x84, 0x01, 0x71,
     0x00, 0x01, 0x00, 0x54, 0x3f, 0x88, 0x01, 0x71,
 };
-static const mach_vm_size_t kTrustedBlobSize = 0x1c8U;
 static const char *const kCarrierExecutableSuffix =
     "/procursus/usr/libexec/codex-ellekit-loader";
 static const char *const kResidentRuntimeSuffix =
@@ -537,8 +557,8 @@ static bool find_trusted_code_donor(struct hwbp_transaction *transaction) {
             mach_vm_size_t page_size = (mach_vm_size_t)getpagesize();
             bool exact_layout = page_size != 0 &&
                 (page_size & (page_size - 1U)) == 0 && blob != 0 &&
-                mmap_hook == blob + 0x90U &&
-                fcntl_hook == blob + 0x188U &&
+                mmap_hook == blob + kTrustedMmapHookOffset &&
+                fcntl_hook == blob + kTrustedFcntlHookOffset &&
                 (blob & (page_size - 1U)) + kTrustedBlobSize <= page_size;
             broker_log("phase=hwbp-donor-candidate pid=%d taskKr=%d "
                        "task=0x%x image=0x%llx blob=0x%llx "
@@ -1209,10 +1229,10 @@ static bool resolve_and_map_hwbp_hooks(
         : 0;
     transaction->stop_gate = remote_blob;
     transaction->mmap_hook = remote_blob != 0
-        ? remote_blob + 0x90U
+        ? remote_blob + kTrustedMmapHookOffset
         : 0;
     transaction->fcntl_hook = remote_blob != 0
-        ? remote_blob + 0x188U
+        ? remote_blob + kTrustedFcntlHookOffset
         : 0;
 
     uint8_t *source = malloc((size_t)kTrustedBlobSize);
@@ -2918,9 +2938,13 @@ static void *broker_main(void *unused) {
         write_marker(99);
         return NULL;
     }
+#if CODEX_STARTUP_PROOF_ENABLED
     int startup_result = access(kStartupProofPath, R_OK) == 0
         ? inject_springboard(kStartupProofPath)
         : 98;
+#else
+    int startup_result = 0;
+#endif
     write_marker(startup_result);
     broker_log("phase=ready pid=%d startup=%d\n", getpid(), startup_result);
     for (;;) {

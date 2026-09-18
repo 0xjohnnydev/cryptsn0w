@@ -142,6 +142,20 @@ static NSString *const kRootBrokerPlist =
      "sileo-root-broker.plist";
 static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
+static NSString *const kCustomdLabel = @"com.openai.customd";
+static NSString *const kCustomdExecutable = @"/var/jb/usr/libexec/customd";
+static NSString *const kCustomctlExecutable =
+    @"/var/jb/usr/libexec/customctl";
+static NSString *const kCustomdRegistrarExecutable =
+    @"/var/jb/usr/libexec/customd-candidate-registrar";
+static NSString *const kCustomdTraceReexecExecutable =
+    @"/var/jb/usr/libexec/customd-trace-me-reexec-probe";
+static NSString *const kCustomdSetexecExecutable =
+    @"/var/jb/usr/libexec/customd-springboard-setexec";
+static NSString *const kCustomdPlist =
+    @"/var/jb/Library/LaunchDaemons/com.openai.customd.plist";
+static NSString *const kCustomdSocket = @"/var/jb/var/run/customd.sock";
+static NSString *const kCustomdLog = @"/var/jb/var/log/customd.log";
 static NSString *const kExecInterposerLibrary =
     @"/var/jb/usr/lib/codex-exec-interposer.dylib";
 static NSString *const kDyldJBAdmissionHookLibrary =
@@ -3677,6 +3691,346 @@ static bool install_sileo_root_broker_job(NSString *sourceExecutable,
     return serviceReady;
 }
 
+static bool ensure_customd_directory(NSString *path,
+                                     NSString **errorText) {
+    struct stat before;
+    if (lstat([path fileSystemRepresentation], &before) == 0) {
+        if (!S_ISDIR(before.st_mode) || S_ISLNK(before.st_mode)) {
+            if (errorText != NULL) {
+                *errorText = [NSString
+                    stringWithFormat:@"customd directory is unsafe: %@",
+                                     path];
+            }
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"customd directory status failed: %s",
+                                 strerror(errno)];
+        }
+        return false;
+    }
+    NSError *error = nil;
+    NSDictionary *attributes = @{
+        NSFilePosixPermissions : @0755,
+        NSFileOwnerAccountID : @0,
+        NSFileGroupOwnerAccountID : @0,
+    };
+    NSFileManager *manager = [NSFileManager defaultManager];
+    if (![manager createDirectoryAtPath:path
+            withIntermediateDirectories:YES
+                             attributes:attributes
+                                  error:&error] ||
+        ![manager setAttributes:attributes ofItemAtPath:path error:&error]) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"customd directory failed: %@", error];
+        }
+        return false;
+    }
+    struct stat status;
+    if (lstat([path fileSystemRepresentation], &status) != 0 ||
+        !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_uid != 0 || status.st_gid != 0 ||
+        (status.st_mode & 07777) != 0755) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"customd directory verification failed: %@",
+                                 path];
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool customd_managed_file_exact(NSString *path, mode_t mode) {
+    struct stat status;
+    return lstat([path fileSystemRepresentation], &status) == 0 &&
+           S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
+           status.st_nlink == 1 && status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & 07777) == mode;
+}
+
+static bool customd_socket_exact(void) {
+    struct stat status;
+    return lstat([kCustomdSocket fileSystemRepresentation], &status) == 0 &&
+           S_ISSOCK(status.st_mode) && status.st_uid == 0 &&
+           status.st_gid == 0 && (status.st_mode & 07777) == 0600;
+}
+
+static bool customd_socket_is_safe_stale_inode(void) {
+    if (!customd_socket_exact()) {
+        return false;
+    }
+    int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (descriptor < 0) {
+        return false;
+    }
+    int descriptorFlags = fcntl(descriptor, F_GETFL);
+    if (descriptorFlags < 0 ||
+        fcntl(descriptor, F_SETFL, descriptorFlags | O_NONBLOCK) != 0) {
+        close(descriptor);
+        return false;
+    }
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    const char *path = [kCustomdSocket fileSystemRepresentation];
+    if (strlen(path) >= sizeof(address.sun_path)) {
+        close(descriptor);
+        return false;
+    }
+    strlcpy(address.sun_path, path, sizeof(address.sun_path));
+    errno = 0;
+    int connection =
+        connect(descriptor, (const struct sockaddr *)&address,
+                sizeof(address));
+    int connectionError = connection == 0 ? 0 : errno;
+    close(descriptor);
+    return connection != 0 && connectionError == ECONNREFUSED;
+}
+
+static bool customd_job_plist_exact(void) {
+    NSDictionary *job =
+        [NSDictionary dictionaryWithContentsOfFile:kCustomdPlist];
+    NSArray<NSString *> *expectedArguments = @[
+        kExecWorkerExecutable,
+        @"--macho",
+        kCustomdExecutable,
+    ];
+    return job != nil && [job[@"Label"] isEqualToString:kCustomdLabel] &&
+           [job[@"ProgramArguments"] isEqualToArray:expectedArguments] &&
+           [job[@"RunAtLoad"] boolValue] &&
+           [job[@"KeepAlive"] boolValue] &&
+           [job[@"UserName"] isEqualToString:@"root"] &&
+           [job[@"GroupName"] isEqualToString:@"wheel"] &&
+           [job[@"Umask"] unsignedIntegerValue] == 63U &&
+           [job[@"StandardOutPath"] isEqualToString:kCustomdLog] &&
+           [job[@"StandardErrorPath"] isEqualToString:kCustomdLog];
+}
+
+static bool install_customd_system_job(
+    NSString *sourceWorker, NSString *sourceCustomd,
+    NSString *sourceCustomctl, NSString *sourceRegistrar,
+    NSString *sourceTraceReexec, NSString *sourceSetexec,
+    NSString *sourcePlist, bool restartRequired, NSString **errorText) {
+    bool payloadExact =
+        files_are_equal(sourceWorker, kExecWorkerExecutable) &&
+        files_are_equal(sourceCustomd, kCustomdExecutable) &&
+        files_are_equal(sourceCustomctl, kCustomctlExecutable) &&
+        files_are_equal(sourceRegistrar, kCustomdRegistrarExecutable) &&
+        files_are_equal(sourceTraceReexec,
+                        kCustomdTraceReexecExecutable) &&
+        files_are_equal(sourceSetexec, kCustomdSetexecExecutable) &&
+        files_are_equal(sourcePlist, kCustomdPlist);
+    if (!payloadExact ||
+        !customd_managed_file_exact(kExecWorkerExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomdExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomctlExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomdRegistrarExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomdTraceReexecExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomdSetexecExecutable, 0755) ||
+        !customd_managed_file_exact(kCustomdPlist, 0644) ||
+        !customd_job_plist_exact()) {
+        if (errorText != NULL) {
+            *errorText = @"customd installed artifacts failed verification";
+        }
+        return false;
+    }
+    if (!ensure_customd_directory(@"/var/jb/var/run", errorText) ||
+        !ensure_customd_directory(@"/var/jb/var/log", errorText)) {
+        return false;
+    }
+
+    struct stat existingLog;
+    int existingLogResult =
+        lstat([kCustomdLog fileSystemRepresentation], &existingLog);
+    if ((existingLogResult == 0 &&
+         (!S_ISREG(existingLog.st_mode) || existingLog.st_nlink != 1)) ||
+        (existingLogResult != 0 && errno != ENOENT)) {
+        if (errorText != NULL) {
+            *errorText = @"customd existing log path is unsafe";
+        }
+        return false;
+    }
+    int logFile = open([kCustomdLog fileSystemRepresentation],
+                       O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC |
+                           O_NOFOLLOW,
+                       0600);
+    struct stat logStatus;
+    bool logReady =
+        logFile >= 0 && fstat(logFile, &logStatus) == 0 &&
+        S_ISREG(logStatus.st_mode) && logStatus.st_nlink == 1 &&
+        fchown(logFile, 0, 0) == 0 &&
+        fchmod(logFile, 0600) == 0 && fsync(logFile) == 0;
+    int logError = logReady ? 0 : errno;
+    if (logFile >= 0 && close(logFile) != 0 && logReady) {
+        logReady = false;
+        logError = errno;
+    }
+    if (!logReady || !customd_managed_file_exact(kCustomdLog, 0600)) {
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"customd log preparation failed: %s",
+                                 strerror(logError != 0 ? logError : errno)];
+        }
+        return false;
+    }
+
+    NSString *target = [@"system/" stringByAppendingString:kCustomdLabel];
+    char *statusArguments[] = {
+        (char *)[kExecWorkerExecutable fileSystemRepresentation],
+        "--macho",
+        (char *)[kCustomctlExecutable fileSystemRepresentation],
+        "status",
+        NULL,
+    };
+    char *preflightPrintArguments[] = {
+        "/var/jb/usr/bin/launchctl", "print",
+        (char *)[target fileSystemRepresentation], NULL};
+    int preflightPrintStatus = run_and_wait_bounded(
+        preflightPrintArguments[0], preflightPrintArguments, 5000);
+    int reuseStatus =
+        !restartRequired && preflightPrintStatus == 0 &&
+                customd_socket_exact()
+            ? run_and_wait_bounded(statusArguments[0], statusArguments, 10000)
+            : 255;
+    bool reused =
+        reuseStatus == 0 && customd_socket_exact() &&
+        customd_job_plist_exact();
+    log_message("customdReuseCheck restartRequired=%s "
+                "launchctlPrintExit=%d statusExit=%d reused=%s",
+                restartRequired ? "true" : "false", preflightPrintStatus,
+                reuseStatus, reused ? "true" : "false");
+    if (reused) {
+        return true;
+    }
+    char *bootoutArguments[] = {
+        "/var/jb/usr/bin/launchctl", "bootout",
+        (char *)[target fileSystemRepresentation], NULL};
+    int bootoutStatus = run_and_wait_bounded(
+        bootoutArguments[0], bootoutArguments, 10000);
+    bool bootoutExact = preflightPrintStatus != 0 || bootoutStatus == 0;
+    bool staleSocketRemoved = false;
+    if (preflightPrintStatus != 0 && preflightPrintStatus != 124 &&
+        preflightPrintStatus != 255 && bootoutStatus != 0 &&
+        bootoutStatus != 124 && bootoutStatus != 255 &&
+        customd_socket_is_safe_stale_inode()) {
+        struct stat staleSocket;
+        if (lstat([kCustomdSocket fileSystemRepresentation],
+                  &staleSocket) == 0 && staleSocket.st_nlink == 1 &&
+            unlink([kCustomdSocket fileSystemRepresentation]) == 0) {
+            staleSocketRemoved = true;
+        }
+    }
+    bool socketAbsent = false;
+    for (NSUInteger attempt = 0; attempt < 500; ++attempt) {
+        struct stat socketStatus;
+        if (lstat([kCustomdSocket fileSystemRepresentation],
+                  &socketStatus) != 0) {
+            if (errno == ENOENT) {
+                socketAbsent = true;
+            }
+            break;
+        }
+        if (!S_ISSOCK(socketStatus.st_mode) || socketStatus.st_uid != 0 ||
+            socketStatus.st_gid != 0) {
+            break;
+        }
+        usleep(10 * 1000);
+    }
+    log_message("customdBootout preflightPrintExit=%d bootoutExit=%d "
+                "staleSocketRemoved=%s socketAbsent=%s exact=%s target=%s "
+                "idempotent=true",
+                preflightPrintStatus, bootoutStatus,
+                staleSocketRemoved ? "true" : "false",
+                socketAbsent ? "true" : "false",
+                bootoutExact ? "true" : "false", [target UTF8String]);
+    if (!bootoutExact || !socketAbsent) {
+        if (errorText != NULL) {
+            *errorText = @"customd prior service did not stop exactly";
+        }
+        return false;
+    }
+
+    char *bootstrapArguments[] = {
+        "/var/jb/usr/bin/launchctl", "bootstrap", "system",
+        (char *)[kCustomdPlist fileSystemRepresentation], NULL};
+    int bootstrapStatus = run_and_wait_bounded(
+        bootstrapArguments[0], bootstrapArguments, 10000);
+    log_message("customdBootstrapExit=%d plist=%s host=%s",
+                bootstrapStatus, [kCustomdPlist UTF8String],
+                [kExecWorkerExecutable UTF8String]);
+    if (bootstrapStatus != 0) {
+        int cleanupStatus = run_and_wait_bounded(
+            bootoutArguments[0], bootoutArguments, 10000);
+        log_message("customdBootstrapFailureCleanupExit=%d target=%s",
+                    cleanupStatus, [target UTF8String]);
+        if (errorText != NULL) {
+            *errorText = [NSString
+                stringWithFormat:@"customd launchctl bootstrap exited %d",
+                                 bootstrapStatus];
+        }
+        return false;
+    }
+
+    bool socketReady = false;
+    for (NSUInteger attempt = 0; attempt < 1000; ++attempt) {
+        if (customd_socket_exact()) {
+            socketReady = true;
+            break;
+        }
+        usleep(10 * 1000);
+    }
+    char *printArguments[] = {
+        "/var/jb/usr/bin/launchctl", "print",
+        (char *)[target fileSystemRepresentation], NULL};
+    int printStatus = socketReady
+                          ? run_and_wait_bounded(printArguments[0],
+                                                 printArguments, 5000)
+                          : 255;
+    int statusExit =
+        socketReady && printStatus == 0
+            ? run_and_wait_bounded(statusArguments[0], statusArguments, 10000)
+            : 255;
+    bool finalExact =
+        socketReady && printStatus == 0 && statusExit == 0 &&
+        customd_socket_exact() && customd_job_plist_exact() &&
+        files_are_equal(sourceWorker, kExecWorkerExecutable) &&
+        files_are_equal(sourceCustomd, kCustomdExecutable) &&
+        files_are_equal(sourceCustomctl, kCustomctlExecutable) &&
+        files_are_equal(sourceRegistrar, kCustomdRegistrarExecutable) &&
+        files_are_equal(sourceTraceReexec,
+                        kCustomdTraceReexecExecutable) &&
+        files_are_equal(sourceSetexec, kCustomdSetexecExecutable) &&
+        files_are_equal(sourcePlist, kCustomdPlist) &&
+        customd_managed_file_exact(kExecWorkerExecutable, 0755) &&
+        customd_managed_file_exact(kCustomdExecutable, 0755) &&
+        customd_managed_file_exact(kCustomctlExecutable, 0755) &&
+        customd_managed_file_exact(kCustomdRegistrarExecutable, 0755) &&
+        customd_managed_file_exact(kCustomdTraceReexecExecutable, 0755) &&
+        customd_managed_file_exact(kCustomdSetexecExecutable, 0755) &&
+        customd_managed_file_exact(kCustomdPlist, 0644);
+    log_message(
+        "customdServiceVerification target=%s socketReady=%s "
+        "launchctlPrintExit=%d statusExit=%d payloadExact=%s finalExact=%s "
+        "systemDomain=true persistentParent=%s",
+        [target UTF8String], socketReady ? "true" : "false", printStatus,
+        statusExit, payloadExact ? "true" : "false",
+        finalExact ? "true" : "false",
+        [kExecWorkerExecutable UTF8String]);
+    if (!finalExact) {
+        int cleanupStatus = run_and_wait_bounded(
+            bootoutArguments[0], bootoutArguments, 10000);
+        log_message("customdHealthFailureCleanupExit=%d target=%s",
+                    cleanupStatus, [target UTF8String]);
+    }
+    if (!finalExact && errorText != NULL) {
+        *errorText = @"customd system service did not become healthy";
+    }
+    return finalExact;
+}
+
 static int fail(NSString *reason, NSString *partialRoot) {
     log_message("result=failed reason=%s", [reason UTF8String]);
     if (partialRoot != nil && path_is_absent(kVarJb)) {
@@ -3861,6 +4215,24 @@ int main(int argc, char *argv[]) {
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
+        NSString *sourceCustomd =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customd"];
+        NSString *sourceCustomctl =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customctl"];
+        NSString *sourceCustomdRegistrar =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customd-candidate-registrar"];
+        NSString *sourceCustomdTraceReexec =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customd-trace-me-reexec-probe"];
+        NSString *sourceCustomdSetexec =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customd-springboard-setexec"];
+        NSString *sourceCustomdPlist =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"com.openai.customd.plist"];
         NSString *sourceExecInterposer =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/codex-exec-interposer.dylib"];
@@ -3976,6 +4348,24 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceRuntimeTrustClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomd fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomctl fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomdRegistrar fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomdTraceReexec fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomdSetexec fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCustomdPlist fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSpringBoardCandidate fileSystemRepresentation],
@@ -4353,6 +4743,12 @@ int main(int argc, char *argv[]) {
 
         bool elleKitInjectorUpdated = false;
         bool execWorkerUpdated = false;
+        bool customdUpdated = false;
+        bool customctlUpdated = false;
+        bool customdRegistrarUpdated = false;
+        bool customdTraceReexecUpdated = false;
+        bool customdSetexecUpdated = false;
+        bool customdPlistUpdated = false;
         bool execInterposerUpdated = false;
         bool dyldJBAdmissionHookUpdated = false;
         bool runtimeTrustUpdated = false;
@@ -4370,6 +4766,34 @@ int main(int argc, char *argv[]) {
                 sourceExecWorker, @"/var/jb/usr/libexec",
                 @"codex-exec-worker", 16 * 1024 * 1024, 0755,
                 "runtimeExecWorker", &execWorkerUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomd, @"/var/jb/usr/libexec", @"customd",
+                16 * 1024 * 1024, 0755, "customdExecutable",
+                &customdUpdated, &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomctl, @"/var/jb/usr/libexec", @"customctl",
+                4 * 1024 * 1024, 0755, "customdControlExecutable",
+                &customctlUpdated, &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomdRegistrar, @"/var/jb/usr/libexec",
+                @"customd-candidate-registrar", 16 * 1024 * 1024, 0755,
+                "customdCandidateRegistrar", &customdRegistrarUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomdTraceReexec, @"/var/jb/usr/libexec",
+                @"customd-trace-me-reexec-probe", 16 * 1024 * 1024, 0755,
+                "customdTraceReexecProbe", &customdTraceReexecUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomdSetexec, @"/var/jb/usr/libexec",
+                @"customd-springboard-setexec", 16 * 1024 * 1024, 0755,
+                "customdSpringBoardSetexec", &customdSetexecUpdated,
+                &runtimeAdmissionError) ||
+            !install_managed_apt_file(
+                sourceCustomdPlist, @"/var/jb/Library/LaunchDaemons",
+                @"com.openai.customd.plist", 64 * 1024, 0644,
+                "customdLaunchDaemon", &customdPlistUpdated,
                 &runtimeAdmissionError) ||
             !install_managed_apt_file(
                 sourceExecInterposer, @"/var/jb/usr/lib",
@@ -4417,6 +4841,17 @@ int main(int argc, char *argv[]) {
                     runtimeBaselineUpdated ? "true" : "false",
                     "/var/jb/usr/share/codex-runtime-admission/"
                     "base-cdhashes.txt");
+        log_message("customdArtifacts executableUpdated=%s "
+                    "controlUpdated=%s registrarUpdated=%s "
+                    "traceReexecUpdated=%s setexecUpdated=%s "
+                    "plistUpdated=%s host=%s",
+                    customdUpdated ? "true" : "false",
+                    customctlUpdated ? "true" : "false",
+                    customdRegistrarUpdated ? "true" : "false",
+                    customdTraceReexecUpdated ? "true" : "false",
+                    customdSetexecUpdated ? "true" : "false",
+                    customdPlistUpdated ? "true" : "false",
+                    [kExecWorkerExecutable UTF8String]);
         log_message("springBoardCandidate updated=%s path=%s",
                     springBoardCandidateUpdated ? "true" : "false",
                     [kSpringBoardCandidateExecutable UTF8String]);
@@ -4809,6 +5244,17 @@ int main(int argc, char *argv[]) {
         manifest[@"RuntimeTrustClientExecutable"] =
             kRuntimeTrustClientExecutable;
         manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
+        manifest[@"CustomdExecutable"] = kCustomdExecutable;
+        manifest[@"CustomdControlExecutable"] = kCustomctlExecutable;
+        manifest[@"CustomdCandidateRegistrarExecutable"] =
+            kCustomdRegistrarExecutable;
+        manifest[@"CustomdTraceReexecExecutable"] =
+            kCustomdTraceReexecExecutable;
+        manifest[@"CustomdSpringBoardSetexecExecutable"] =
+            kCustomdSetexecExecutable;
+        manifest[@"CustomdLaunchDaemonPlist"] = kCustomdPlist;
+        manifest[@"CustomdLaunchMode"] =
+            @"system-launchdaemon-persistent-exec-worker";
         manifest[@"RuntimeExecInterposerLibrary"] = kExecInterposerLibrary;
         manifest[@"SileoRootBrokerPlist"] = kRootBrokerPlist;
         manifest[@"SileoExecutableMode"] =
@@ -4844,6 +5290,29 @@ int main(int argc, char *argv[]) {
             return fail(rootBrokerJobError, nil);
         }
 
+        NSString *customdJobError = nil;
+        bool customdRestartRequired =
+            earlyExecWorkerUpdated || execWorkerUpdated || customdUpdated ||
+            customctlUpdated || customdRegistrarUpdated ||
+            customdTraceReexecUpdated || customdSetexecUpdated ||
+            customdPlistUpdated;
+        if (!install_customd_system_job(
+                sourceExecWorker, sourceCustomd, sourceCustomctl,
+                sourceCustomdRegistrar, sourceCustomdTraceReexec,
+                sourceCustomdSetexec, sourceCustomdPlist,
+                customdRestartRequired,
+                &customdJobError)) {
+            close(broker);
+            (void)unlink([brokerPath fileSystemRepresentation]);
+            return fail(customdJobError, nil);
+        }
+        log_message("customdReady=true label=%s executable=%s host=%s "
+                    "restartRequired=%s",
+                    [kCustomdLabel UTF8String],
+                    [kCustomdExecutable UTF8String],
+                    [kExecWorkerExecutable UTF8String],
+                    customdRestartRequired ? "true" : "false");
+
         dispatch_queue_t rootBrokerQueue = dispatch_queue_create(
             "com.openai.codex.dopamine.sileo-root-broker",
             DISPATCH_QUEUE_SERIAL);
@@ -4866,17 +5335,20 @@ int main(int argc, char *argv[]) {
         NSString *done = [NSString
             stringWithFormat:
                 @"result=success\nuid=%u\njailbreakRoot=%@\n"
-                 "sileo=%@\nlaunchServicesPath=%@\nuiopenExit=%d\n",
+                 "sileo=%@\nlaunchServicesPath=%@\n"
+                 "customd=system/%@\nuiopenExit=%d\n",
                 geteuid(), destinationProcursus, rootlessMain,
-                registeredPath, uiopen_status];
+                registeredPath, kCustomdLabel, uiopen_status];
         if (!write_marker(kDonePath, done)) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
             return fail(@"could not write completion marker", nil);
         }
         log_message(
-            "result=success jailbreakRoot=%s sileo=%s uiopenExit=%d",
+            "result=success jailbreakRoot=%s sileo=%s customd=%s "
+            "customdHost=%s uiopenExit=%d",
             [destinationProcursus UTF8String], [rootlessMain UTF8String],
+            [kCustomdLabel UTF8String], [kExecWorkerExecutable UTF8String],
             uiopen_status);
         serve_sileo_file_broker(registeredPath, destinationProcursus,
                                 dataContainer);

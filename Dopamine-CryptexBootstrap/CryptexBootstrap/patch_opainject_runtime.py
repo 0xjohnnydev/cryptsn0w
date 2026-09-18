@@ -592,6 +592,359 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
     text = text[:start] + sandbox_replacement + text[end:]
     text = replace_once(
         text,
+        "\nvoid injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)",
+        r'''
+static bool codexHeldThreadSuspendCount(thread_act_t thread,
+	integer_t *countOut)
+{
+	thread_basic_info_data_t information = { 0 };
+	mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+	kern_return_t result = thread_info(
+		thread, THREAD_BASIC_INFO, (thread_info_t)&information, &count);
+	if (result != KERN_SUCCESS || count != THREAD_BASIC_INFO_COUNT ||
+		information.suspend_count < 0) {
+		return false;
+	}
+	if (countOut != NULL) *countOut = information.suspend_count;
+	return true;
+}
+
+// Resolve libpthread's exact main pthread object and bind it to the one Mach
+// thread whose THREAD_IDENTIFIER_INFO thread ID matches the pthread's cached
+// 64-bit thread ID.  The offset is from this exact libsystem_pthread build:
+// _pthread_threadid_np reads pthread_t + 0xD8.  Mach port names cannot be used
+// here because task_threads returns names in the controller's IPC namespace.
+// The external
+// controller must already own exactly one hold on every target thread.  This
+// avoids repurposing an arbitrary dyld or worker thread which may have been
+// stopped while owning the very runtime state needed by dlopen.
+bool codexCopyExactMainHeldThread(task_t task, thread_act_t *threadOut)
+{
+	if (!MACH_PORT_VALID(task) || threadOut == NULL ||
+		!codexPrimitives.ready ||
+		codexPrimitives.pthreadMainThreadNP == 0) {
+		return false;
+	}
+	*threadOut = MACH_PORT_NULL;
+
+	uint32_t instructions[2] = { 0 };
+	kern_return_t result = task_read(
+		task, codexPrimitives.pthreadMainThreadNP,
+		instructions, sizeof(instructions));
+	uint64_t mainThreadSlot = 0;
+	if (result != KERN_SUCCESS ||
+		!decode_adrp_ldr(instructions[0], instructions[1],
+			codexPrimitives.pthreadMainThreadNP, &mainThreadSlot) ||
+		mainThreadSlot == 0) {
+		printf("[codexMainHeldThread] main slot decode failed mach=%d "
+		       "slot=0x%llX\n", result,
+		       (unsigned long long)mainThreadSlot);
+		return false;
+	}
+
+	uint64_t mainPthread = 0;
+	result = task_read(task, mainThreadSlot, &mainPthread,
+	                   sizeof(mainPthread));
+	mainPthread = codexCanonicalAddress(mainPthread);
+	if (result != KERN_SUCCESS || mainPthread == 0) {
+		printf("[codexMainHeldThread] main pthread read failed mach=%d "
+		       "pthread=0x%llX\n", result,
+		       (unsigned long long)mainPthread);
+		return false;
+	}
+	uint64_t mainThreadID = 0;
+	result = task_read(task, mainPthread + 0xD8ULL, &mainThreadID,
+	                   sizeof(mainThreadID));
+	if (result != KERN_SUCCESS || mainThreadID == 0) {
+		printf("[codexMainHeldThread] main thread-id read failed mach=%d "
+		       "pthread=0x%llX threadID=0x%llX\n", result,
+		       (unsigned long long)mainPthread,
+		       (unsigned long long)mainThreadID);
+		return false;
+	}
+
+	thread_act_array_t threads = NULL;
+	mach_msg_type_number_t count = 0;
+	result = task_threads(task, &threads, &count);
+	if (result != KERN_SUCCESS || threads == NULL || count == 0 ||
+		count > 1024U) {
+		if (threads != NULL) {
+			vm_deallocate(mach_task_self(), (vm_address_t)threads,
+			              (vm_size_t)(sizeof(*threads) * count));
+		}
+		printf("[codexMainHeldThread] thread inventory failed mach=%d "
+		       "count=%u\n", result, count);
+		return false;
+	}
+
+	bool allHeld = true;
+	uint32_t matches = 0;
+	thread_act_t selected = MACH_PORT_NULL;
+	for (mach_msg_type_number_t index = 0; index < count; ++index) {
+		thread_basic_info_data_t basic = { 0 };
+		mach_msg_type_number_t basicCount = THREAD_BASIC_INFO_COUNT;
+		kern_return_t basicResult = thread_info(
+			threads[index], THREAD_BASIC_INFO,
+			(thread_info_t)&basic, &basicCount);
+		thread_identifier_info_data_t identifier = { 0 };
+		mach_msg_type_number_t identifierCount =
+			THREAD_IDENTIFIER_INFO_COUNT;
+		kern_return_t identifierResult = thread_info(
+			threads[index], THREAD_IDENTIFIER_INFO,
+			(thread_info_t)&identifier, &identifierCount);
+		bool held = basicResult == KERN_SUCCESS &&
+			basicCount == THREAD_BASIC_INFO_COUNT &&
+			basic.suspend_count >= 1;
+		allHeld = allHeld && held;
+		bool mainMatch = identifierResult == KERN_SUCCESS &&
+			identifierCount == THREAD_IDENTIFIER_INFO_COUNT &&
+			identifier.thread_id == mainThreadID;
+		if (mainMatch) {
+			++matches;
+			if (held && basic.suspend_count == 1 &&
+				!MACH_PORT_VALID(selected)) {
+				selected = threads[index];
+				continue;
+			}
+		}
+		(void)mach_port_deallocate(mach_task_self(), threads[index]);
+	}
+	(void)vm_deallocate(mach_task_self(), (vm_address_t)threads,
+	                    (vm_size_t)(sizeof(*threads) * count));
+
+	bool exact = allHeld && matches == 1 && MACH_PORT_VALID(selected);
+	printf("[codexMainHeldThread] threads=%u allHeld=%d "
+	       "mainPthread=0x%llX mainThreadID=0x%llX matches=%u "
+	       "selected=0x%x exact=%d\n", count, allHeld,
+	       (unsigned long long)mainPthread,
+	       (unsigned long long)mainThreadID, matches, selected, exact);
+	if (!exact) {
+		if (MACH_PORT_VALID(selected)) {
+			(void)mach_port_deallocate(mach_task_self(), selected);
+		}
+		return false;
+	}
+	*threadOut = selected;
+	return true;
+}
+
+// Run one bounded call on a thread which the external candidate controller
+// already owns at suspend count one.  The call temporarily consumes exactly
+// that hold, restores the complete original state, and returns the thread at
+// the same suspend count.  It never creates a kernel thread in the target.
+kern_return_t codexArbCallHeldThread(
+	task_t task, thread_act_t targetThread, uint64_t *retOut,
+	vm_address_t funcPtr, int numArgs, ...)
+{
+	if (!MACH_PORT_VALID(targetThread) || funcPtr == 0 ||
+		numArgs < 0 || numArgs > 8 || !codexPrimitives.ready ||
+		codexPrimitives.ropLoop == 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	integer_t initialSuspendCount = -1;
+	if (!codexHeldThreadSuspendCount(targetThread, &initialSuspendCount) ||
+		initialSuspendCount != 1) {
+		printf("[codexArbCallHeldThread] rejected suspend count=%d\n",
+		       initialSuspendCount);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	struct arm64_thread_full_state *original =
+		thread_save_state_arm64(targetThread);
+	if (original == NULL || !original->thread_valid) {
+		free(original);
+		return KERN_FAILURE;
+	}
+
+	vm_address_t remoteStack = 0;
+	kern_return_t result = vm_allocate(
+		task, &remoteStack, STACK_SIZE, VM_FLAGS_ANYWHERE);
+	if (result != KERN_SUCCESS) {
+		free(original);
+		return result;
+	}
+	result = vm_protect(task, remoteStack, STACK_SIZE, TRUE,
+		VM_PROT_READ | VM_PROT_WRITE);
+	if (result != KERN_SUCCESS) {
+		vm_deallocate(task, remoteStack, STACK_SIZE);
+		free(original);
+		return result;
+	}
+
+	arm_thread_state64_t callState = original->thread;
+	uint64_t stackPointer = remoteStack + (STACK_SIZE / 2);
+	__darwin_arm_thread_state64_set_sp(
+		callState, (void *)stackPointer);
+	__darwin_arm_thread_state64_set_pc_fptr(
+		callState, make_sym_callable((void *)funcPtr));
+	__darwin_arm_thread_state64_set_lr_fptr(
+		callState,
+		make_sym_callable((void *)codexPrimitives.ropLoop));
+	va_list arguments;
+	va_start(arguments, numArgs);
+	for (int index = 0; index < numArgs; ++index) {
+		callState.__x[index] = va_arg(arguments, uint64_t);
+	}
+	va_end(arguments);
+
+	(void)thread_abort(targetThread);
+	result = thread_set_state(
+		targetThread, ARM_THREAD_STATE64, (thread_state_t)&callState,
+		ARM_THREAD_STATE64_COUNT);
+	integer_t beforeRunCount = -1;
+	bool beforeRunExact = result == KERN_SUCCESS &&
+		codexHeldThreadSuspendCount(targetThread, &beforeRunCount) &&
+		beforeRunCount == initialSuspendCount;
+	if (!beforeRunExact) {
+		bool restored = thread_restore_state_arm64(targetThread, original);
+		vm_deallocate(task, remoteStack, STACK_SIZE);
+		printf("[codexArbCallHeldThread] setup failed mach=%d "
+		       "before=%d restored=%d\n", result, beforeRunCount, restored);
+		return result == KERN_SUCCESS ? KERN_FAILURE : result;
+	}
+
+	kern_return_t resumeResult = thread_resume(targetThread);
+	struct arm_unified_thread_state returnState = { 0 };
+	kern_return_t waitResult = resumeResult == KERN_SUCCESS
+		? wait_for_thread(targetThread, codexPrimitives.ropLoop,
+		                  &returnState)
+		: resumeResult;
+	// Once resumed, this exact thread must be re-held exactly once on every
+	// path before its original state can be restored.
+	kern_return_t suspendResult = resumeResult == KERN_SUCCESS
+		? thread_suspend(targetThread)
+		: KERN_FAILURE;
+	if (suspendResult == KERN_SUCCESS) (void)thread_abort(targetThread);
+	integer_t finalSuspendCount = -1;
+	bool finalCountExact = suspendResult == KERN_SUCCESS &&
+		codexHeldThreadSuspendCount(targetThread, &finalSuspendCount) &&
+		finalSuspendCount == initialSuspendCount;
+	bool restored = suspendResult == KERN_SUCCESS &&
+		thread_restore_state_arm64(targetThread, original);
+	if (suspendResult != KERN_SUCCESS) free(original);
+	vm_deallocate(task, remoteStack, STACK_SIZE);
+
+	bool complete = resumeResult == KERN_SUCCESS &&
+		waitResult == KERN_SUCCESS && finalCountExact && restored;
+	if (complete && retOut != NULL) *retOut = returnState.ts_64.__x[0];
+	printf("[codexArbCallHeldThread] func=0x%llX resume=%d wait=%d "
+	       "suspend=%d count=%d restored=%d complete=%d\n",
+	       (unsigned long long)funcPtr, resumeResult, waitResult,
+	       suspendResult, finalSuspendCount, restored, complete);
+	if (!complete) {
+		if (resumeResult != KERN_SUCCESS) return resumeResult;
+		if (waitResult != KERN_SUCCESS) return waitResult;
+		return KERN_FAILURE;
+	}
+	return KERN_SUCCESS;
+}
+
+static bool consumeSandboxExtensionForPathHeld(
+	task_t task, thread_act_t thread, const char *extensionClass,
+	const char *path, uint32_t flags)
+{
+	char *extension = sandbox_extension_issue_file(
+		extensionClass, path, flags);
+	if (extension == NULL) return false;
+	size_t remoteSize = 0;
+	vm_address_t remoteExtension = writeStringToTask(
+		task, extension, &remoteSize);
+	free(extension);
+	if (remoteExtension == 0) return false;
+	int64_t handle = -1;
+	kern_return_t result = codexArbCallHeldThread(
+		task, thread, (uint64_t *)&handle,
+		codexPrimitives.sandboxExtensionConsume, 1, remoteExtension);
+	vm_deallocate(task, remoteExtension, remoteSize);
+	printf("[sandboxFixupHeld] consume class=%s path=%s flags=0x%x "
+	       "mach=%d handle=%lld\n", extensionClass, path, flags, result,
+	       (long long)handle);
+	return result == KERN_SUCCESS && handle > 0;
+}
+
+static bool sandboxFixupHeld(task_t task, thread_act_t thread, pid_t pid,
+	const char *dylibPath)
+{
+	bool readNeeded = sandbox_check(
+		pid, "file-read-data", SANDBOX_FILTER_PATH |
+		SANDBOX_CHECK_NO_REPORT, dylibPath);
+	bool executableNeeded = sandbox_check(
+		pid, "file-map-executable", SANDBOX_FILTER_PATH |
+		SANDBOX_CHECK_NO_REPORT, dylibPath);
+	bool jailbreakPath = strncmp(dylibPath, "/var/jb/", 8) == 0;
+	bool success = true;
+	if (readNeeded) {
+		success &= consumeSandboxExtensionForPathHeld(
+			task, thread, APP_SANDBOX_READ, dylibPath, 0);
+	}
+	if (executableNeeded) {
+		success &= consumeSandboxExtensionForPathHeld(
+			task, thread, "com.apple.sandbox.executable", dylibPath, 0);
+	}
+	if (jailbreakPath) {
+		success &= consumeSandboxExtensionForPathHeld(
+			task, thread, APP_SANDBOX_READ, "/var/jb",
+			SANDBOX_EXTENSION_PREFIXMATCH);
+		success &= consumeSandboxExtensionForPathHeld(
+			task, thread, "com.apple.sandbox.executable", "/var/jb",
+			SANDBOX_EXTENSION_PREFIXMATCH);
+	}
+	return success;
+}
+
+bool codexInjectDylibViaHeldThread(
+	task_t task, thread_act_t thread, pid_t pid, const char *dylibPath,
+	vm_address_t allImageInfoAddr)
+{
+	prepareForMagic(task, allImageInfoAddr);
+	bool primitivesExact = codexValidateInjectionPrimitives(
+		task, allImageInfoAddr);
+	printf("[codexInjectHeld] stage=sandbox-begin primitives=%d "
+	       "pid=%d path=%s\n", primitivesExact, pid, dylibPath);
+	bool sandboxExact = primitivesExact &&
+		sandboxFixupHeld(task, thread, pid, dylibPath);
+	printf("[codexInjectHeld] stage=sandbox-end exact=%d\n",
+	       sandboxExact);
+	if (!sandboxExact) {
+		printf("[codexInjectHeld] primitive or sandbox preflight failed\n");
+		return false;
+	}
+	size_t remotePathSize = 0;
+	vm_address_t remotePath = writeStringToTask(
+		task, dylibPath, &remotePathSize);
+	printf("[codexInjectHeld] stage=path-write address=0x%llX size=%zu\n",
+	       (unsigned long long)remotePath, remotePathSize);
+	if (remotePath == 0) return false;
+	uint64_t handle = 0;
+	printf("[codexInjectHeld] stage=dlopen-begin thread=0x%x "
+	       "function=0x%llX\n", thread,
+	       (unsigned long long)codexPrimitives.dlopenAddress);
+	kern_return_t result = codexArbCallHeldThread(
+		task, thread, &handle, codexPrimitives.dlopenAddress, 2,
+		remotePath, RTLD_NOW | RTLD_NODELETE);
+	vm_deallocate(task, remotePath, remotePathSize);
+	printf("[codexInjectHeld] path=%s mach=%d handle=0x%llX\n",
+	       dylibPath, result, (unsigned long long)handle);
+	if (result == KERN_SUCCESS && handle != 0) return true;
+	uint64_t errorAddress = 0;
+	if (result == KERN_SUCCESS &&
+		codexArbCallHeldThread(
+			task, thread, &errorAddress, codexPrimitives.dlerrorAddress,
+			0) == KERN_SUCCESS && errorAddress != 0) {
+		char *errorString = task_copy_string(task, errorAddress);
+		printf("[codexInjectHeld] dlopen error: %s\n",
+		       errorString != NULL ? errorString : "<unreadable>");
+		free(errorString);
+	}
+	return false;
+}
+
+void injectDylibViaRop(task_t task, pid_t pid, const char* dylibPath, vm_address_t allImageInfoAddr)''',
+        "held-thread candidate injection",
+    )
+    text = replace_once(
+        text,
         '''\tsandboxFixup(task, pthread, pid, dylibPath, allImageInfoAddr);
 
 \tprintf("[injectDylibViaRop] Preparation done, now injecting!\\n");

@@ -55,8 +55,6 @@ static const char *const kPageProbePid = "--page-probe-pid";
 #define CODEX_CDHASH_SIZE 20U
 #define CODEX_SHA256_SIZE 32U
 #define CODEX_PROC_PIDTBSDINFO 3
-#define CODEX_PROC_PIDREGIONPATHINFO 8
-#define CODEX_PROC_PIDREGIONPATHINFO2 22
 #define CODEX_PROC_PIDUNIQIDENTIFIERINFO 17
 #define CODEX_MAXCOMLEN 16
 #define CODEX_EXPECTED_CANDIDATE_SIZE 122400ULL
@@ -121,83 +119,10 @@ struct codex_proc_uniqidentifierinfo {
     uint64_t reserved3;
 };
 
-struct codex_proc_regioninfo {
-    uint32_t pri_protection;
-    uint32_t pri_max_protection;
-    uint32_t pri_inheritance;
-    uint32_t pri_flags;
-    uint64_t pri_offset;
-    uint32_t pri_behavior;
-    uint32_t pri_user_wired_count;
-    uint32_t pri_user_tag;
-    uint32_t pri_pages_resident;
-    uint32_t pri_pages_shared_now_private;
-    uint32_t pri_pages_swapped_out;
-    uint32_t pri_pages_dirtied;
-    uint32_t pri_ref_count;
-    uint32_t pri_shadow_depth;
-    uint32_t pri_share_mode;
-    uint32_t pri_private_pages_resident;
-    uint32_t pri_shared_pages_resident;
-    uint32_t pri_obj_id;
-    uint32_t pri_depth;
-    uint64_t pri_address;
-    uint64_t pri_size;
-};
-
-struct codex_vinfo_stat {
-    uint32_t vst_dev;
-    uint16_t vst_mode;
-    uint16_t vst_nlink;
-    uint64_t vst_ino;
-    uid_t vst_uid;
-    gid_t vst_gid;
-    int64_t vst_atime;
-    int64_t vst_atimensec;
-    int64_t vst_mtime;
-    int64_t vst_mtimensec;
-    int64_t vst_ctime;
-    int64_t vst_ctimensec;
-    int64_t vst_birthtime;
-    int64_t vst_birthtimensec;
-    off_t vst_size;
-    int64_t vst_blocks;
-    int32_t vst_blksize;
-    uint32_t vst_flags;
-    uint32_t vst_gen;
-    uint32_t vst_rdev;
-    int64_t vst_qspare[2];
-};
-
-struct codex_vnode_info {
-    struct codex_vinfo_stat vi_stat;
-    int vi_type;
-    int vi_pad;
-    fsid_t vi_fsid;
-};
-
-struct codex_vnode_info_path {
-    struct codex_vnode_info vip_vi;
-    char vip_path[PATH_MAX];
-};
-
-struct codex_proc_regionwithpathinfo {
-    struct codex_proc_regioninfo prp_prinfo;
-    struct codex_vnode_info_path prp_vip;
-};
-
 _Static_assert(sizeof(struct codex_proc_bsdinfo) == 136,
                "proc_bsdinfo ABI mismatch");
 _Static_assert(sizeof(struct codex_proc_uniqidentifierinfo) == 56,
                "proc_uniqidentifierinfo ABI mismatch");
-_Static_assert(sizeof(struct codex_proc_regioninfo) == 96,
-               "proc_regioninfo ABI mismatch");
-_Static_assert(sizeof(struct codex_vinfo_stat) == 136,
-               "vinfo_stat ABI mismatch");
-_Static_assert(sizeof(struct codex_vnode_info) == 152,
-               "vnode_info ABI mismatch");
-_Static_assert(sizeof(struct codex_proc_regionwithpathinfo) == 1272,
-               "proc_regionwithpathinfo ABI mismatch");
 
 struct gated_candidate_identity {
     bool valid;
@@ -258,6 +183,14 @@ extern kern_return_t createRemotePthread(task_t task,
 extern kern_return_t arbCall(task_t task, thread_act_t targetThread,
                              uint64_t *returnValue, bool willReturn,
                              vm_address_t function, int argumentCount, ...);
+extern kern_return_t codexArbCallHeldThread(
+    task_t task, thread_act_t targetThread, uint64_t *returnValue,
+    vm_address_t function, int argumentCount, ...);
+extern bool codexCopyExactMainHeldThread(task_t task,
+                                         thread_act_t *threadOut);
+extern bool codexInjectDylibViaHeldThread(
+    task_t task, thread_act_t thread, pid_t pid, const char *dylibPath,
+    vm_address_t allImageInfoAddress);
 
 static void unified_loader_log(const char *format, ...) {
     va_list arguments;
@@ -502,6 +435,22 @@ static bool unique_identity_equal(
 
 static bool candidate_controller_lineage_exact(
     const struct codex_proc_bsdinfo *candidate, pid_t *tracerPidOut) {
+#if defined(CODEX_CANDIDATE_BRIDGE_BUILD)
+    /* The carrier bridge executes directly in the ptrauth-authorized worker
+       which was spawned by the candidate controller.  Bind that exact
+       one-hop lineage; the normal worker-hosted loader uses the two-hop
+       relationship below. */
+    pid_t controllerPid = getppid();
+    struct codex_proc_bsdinfo controller = {0};
+    bool valid = controllerPid > 1 &&
+                 copy_bsd_info(controllerPid, &controller) &&
+                 controller.pbi_uid == 0 &&
+                 candidate->pbi_ppid == (uint32_t)controllerPid;
+    if (valid && tracerPidOut != NULL) {
+        *tracerPidOut = controllerPid;
+    }
+    return valid;
+#else
     pid_t workerPid = getppid();
     struct codex_proc_bsdinfo worker = {0};
     bool valid = workerPid > 1 && copy_bsd_info(workerPid, &worker) &&
@@ -511,6 +460,7 @@ static bool candidate_controller_lineage_exact(
         *tracerPidOut = (pid_t)worker.pbi_ppid;
     }
     return valid;
+#endif
 }
 
 static bool secure_candidate_status(const struct stat *status) {
@@ -1221,102 +1171,55 @@ static bool prewarm_local_injection_primitives(void) {
     return ready;
 }
 
-static bool candidate_main_region_record_exact(
-    pid_t pid, vm_address_t image,
-    const struct codex_proc_regionwithpathinfo *information) {
-    if (!gGatedCandidate.valid || gGatedCandidate.descriptor < 0 ||
-        pid != gGatedCandidate.pid || image == 0 || information == NULL) {
-        return false;
-    }
-    const struct codex_proc_regioninfo *region = &information->prp_prinfo;
-    const struct codex_vinfo_stat *vnode =
-        &information->prp_vip.vip_vi.vi_stat;
-    bool pathTerminated =
-        strnlen(information->prp_vip.vip_path, PATH_MAX) < PATH_MAX;
-    return pathTerminated &&
-           strcmp(information->prp_vip.vip_path, gGatedCandidate.path) == 0 &&
-           region->pri_address == (uint64_t)image && region->pri_offset == 0 &&
-           region->pri_size != 0 &&
-           (region->pri_protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
-               (VM_PROT_READ | VM_PROT_EXECUTE) &&
-           vnode->vst_dev == (uint32_t)gGatedCandidate.status.st_dev &&
-           vnode->vst_ino == (uint64_t)gGatedCandidate.status.st_ino &&
-           vnode->vst_size == gGatedCandidate.status.st_size &&
-           vnode->vst_uid == gGatedCandidate.status.st_uid &&
-           vnode->vst_gid == gGatedCandidate.status.st_gid &&
-           vnode->vst_mode == (uint16_t)gGatedCandidate.status.st_mode &&
-           vnode->vst_nlink ==
-               (uint16_t)gGatedCandidate.status.st_nlink &&
-           vnode->vst_mtime == gGatedCandidate.status.st_mtimespec.tv_sec &&
-           vnode->vst_mtimensec ==
-               gGatedCandidate.status.st_mtimespec.tv_nsec &&
-           vnode->vst_ctime == gGatedCandidate.status.st_ctimespec.tv_sec &&
-           vnode->vst_ctimensec ==
-               gGatedCandidate.status.st_ctimespec.tv_nsec;
-}
-
-static bool active_main_vnode_exact(pid_t pid, vm_address_t image);
-
-static bool remote_main_uuid_exact(task_t task, pid_t pid,
+static bool remote_main_uuid_exact(task_t task,
                                    vm_address_t allImageInfoAddress,
                                    const char *targetPath,
                                    vm_address_t *imageOut) {
     if (imageOut != NULL) {
         *imageOut = 0;
     }
-    vm_address_t image = getRemoteImageAddress(
-        task, allImageInfoAddress, targetPath);
-    if (image == 0) {
-        image = getRemoteImageAddress(task, allImageInfoAddress,
-                                      kSpringBoardCandidatePath);
+    struct dyld_all_image_infos imageInfos = {0};
+    struct dyld_image_info firstImage = {0};
+    kern_return_t infosResult = read_remote(
+        task, allImageInfoAddress, &imageInfos, sizeof(imageInfos));
+    mach_vm_address_t infoArray =
+        infosResult == KERN_SUCCESS
+            ? canonical_remote_pointer((uint64_t)imageInfos.infoArray)
+            : 0;
+    kern_return_t firstResult =
+        infosResult == KERN_SUCCESS && imageInfos.version >= 15U &&
+                imageInfos.libSystemInitialized &&
+                imageInfos.infoArrayCount != 0U &&
+                imageInfos.infoArrayCount <= 4096U && infoArray != 0
+            ? read_remote(task, infoArray, &firstImage, sizeof(firstImage))
+            : KERN_INVALID_ADDRESS;
+    vm_address_t image =
+        firstResult == KERN_SUCCESS
+            ? (vm_address_t)canonical_remote_pointer(
+                  (uint64_t)firstImage.imageLoadAddress)
+            : 0;
+    char firstPath[PATH_MAX] = {0};
+    kern_return_t firstPathResult = KERN_INVALID_ADDRESS;
+    mach_vm_address_t firstPathAddress =
+        firstResult == KERN_SUCCESS
+            ? canonical_remote_pointer((uint64_t)firstImage.imageFilePath)
+            : 0;
+    if (firstPathAddress != 0) {
+        firstPathResult = read_remote(task, firstPathAddress, firstPath,
+                                      sizeof(firstPath) - 1U);
     }
-    bool foundByRegion = false;
-    unsigned int regionCount = 0;
-    int regionAmount = 0;
-    int regionError = 0;
+    fprintf(stderr,
+            "compat-loader: main image first-slot image=0x%llx "
+            "infosKr=%d firstKr=%d pathKr=%d path=%s\n",
+            (unsigned long long)image, infosResult, firstResult,
+            firstPathResult,
+            firstPathResult == KERN_SUCCESS ? firstPath : "<unreadable>");
     if (image == 0) {
-        uint64_t cursor = 0;
-        for (; regionCount < 512U; ++regionCount) {
-            struct codex_proc_regionwithpathinfo information = {0};
-            errno = 0;
-            regionAmount = proc_pidinfo(
-                pid, CODEX_PROC_PIDREGIONPATHINFO2, cursor, &information,
-                (int)sizeof(information));
-            regionError = errno;
-            if (regionAmount != (int)sizeof(information)) {
-                break;
-            }
-            const struct codex_proc_regioninfo *region =
-                &information.prp_prinfo;
-            if (region->pri_address < cursor || region->pri_size == 0 ||
-                region->pri_address > UINT64_MAX - region->pri_size) {
-                regionAmount = -1;
-                regionError = EOVERFLOW;
-                break;
-            }
-            vm_address_t candidateImage =
-                (vm_address_t)region->pri_address;
-            if (candidate_main_region_record_exact(
-                    pid, candidateImage, &information)) {
-                image = candidateImage;
-                foundByRegion = true;
-                break;
-            }
-            uint64_t next = region->pri_address + region->pri_size;
-            if (next <= cursor) {
-                regionAmount = -1;
-                regionError = EOVERFLOW;
-                break;
-            }
-            cursor = next;
+        image = getRemoteImageAddress(task, allImageInfoAddress, targetPath);
+        if (image == 0) {
+            image = getRemoteImageAddress(task, allImageInfoAddress,
+                                          kSpringBoardCandidatePath);
         }
-        fprintf(stderr,
-                "compat-loader: main image dyld-name lookup missed; "
-                "vnodeFallback=%d image=0x%llx regions=%u amount=%d "
-                "errno=%d\n",
-                foundByRegion, (unsigned long long)image,
-                regionCount + (foundByRegion ? 1U : 0U), regionAmount,
-                regionError);
     }
     struct mach_header_64 header = {0};
     if (image == 0 ||
@@ -1373,19 +1276,6 @@ static bool remote_main_uuid_exact(task_t task, pid_t pid,
     return valid;
 }
 
-static bool active_main_vnode_exact(pid_t pid, vm_address_t image) {
-    if (!gGatedCandidate.valid || gGatedCandidate.descriptor < 0 ||
-        pid != gGatedCandidate.pid || image == 0) {
-        return false;
-    }
-    struct codex_proc_regionwithpathinfo information = {0};
-    int amount = proc_pidinfo(pid, CODEX_PROC_PIDREGIONPATHINFO,
-                              (uint64_t)image, &information,
-                              (int)sizeof(information));
-    return amount == (int)sizeof(information) &&
-           candidate_main_region_record_exact(pid, image, &information);
-}
-
 static bool gated_remote_identity_exact(task_t task, pid_t pid,
                                         const char *targetPath,
                                         vm_address_t allImageInfoAddress,
@@ -1395,13 +1285,11 @@ static bool gated_remote_identity_exact(task_t task, pid_t pid,
     return gated_candidate_still_exact(pid, currentPath, rehash) &&
            strcmp(currentPath, targetPath) == 0 &&
            gated_candidate_task_exact(task) &&
-           remote_main_uuid_exact(task, pid, allImageInfoAddress, targetPath,
-                                  &image) &&
-           active_main_vnode_exact(pid, image);
+           remote_main_uuid_exact(task, allImageInfoAddress, targetPath,
+                                  &image);
 }
 
-static bool remote_runtime_ready(task_t task, pid_t targetPid,
-                                 const char *targetPath,
+static bool remote_runtime_ready(task_t task, const char *targetPath,
                                  task_dyld_info_data_t *dyldInfoOut) {
     task_basic_info_data_t basicInfo = {0};
     mach_msg_type_number_t basicCount = TASK_BASIC_INFO_COUNT;
@@ -1477,18 +1365,15 @@ static bool remote_runtime_ready(task_t task, pid_t targetPid,
     }
     vm_address_t mainImage = 0;
     bool mainExact = remote_main_uuid_exact(
-        task, targetPid, dyldInfo.all_image_info_addr, targetPath, &mainImage);
-    bool vnodeExact =
-        mainExact && active_main_vnode_exact(targetPid, mainImage);
+        task, dyldInfo.all_image_info_addr, targetPath, &mainImage);
     bool primitivesExact =
-        vnodeExact && codexValidateInjectionPrimitives(
+        mainExact && codexValidateInjectionPrimitives(
                           task, dyldInfo.all_image_info_addr);
-    if (!mainExact || !vnodeExact || !primitivesExact) {
+    if (!mainExact || !primitivesExact) {
         fprintf(stderr,
                 "compat-loader: runtime-ready stage=identity main=%d "
-                "image=0x%llx vnode=%d primitives=%d\n",
-                mainExact, (unsigned long long)mainImage, vnodeExact,
-                primitivesExact);
+                "image=0x%llx primitives=%d\n",
+                mainExact, (unsigned long long)mainImage, primitivesExact);
         return false;
     }
     *dyldInfoOut = dyldInfo;
@@ -1505,7 +1390,7 @@ static bool wait_for_remote_runtime(task_t task, pid_t targetPid,
             strcmp(currentPath, targetPath) != 0) {
             return false;
         }
-        if (remote_runtime_ready(task, targetPid, targetPath, dyldInfoOut)) {
+        if (remote_runtime_ready(task, targetPath, dyldInfoOut)) {
             printf("compat-loader: pid=%d runtime ready attempt=%u "
                    "dyld=0x%llx\n",
                    targetPid, attempt + 1U,
@@ -1515,6 +1400,11 @@ static bool wait_for_remote_runtime(task_t task, pid_t targetPid,
         usleep(CODEX_RUNTIME_READY_DELAY_USEC);
     }
     return false;
+}
+
+static bool copy_exact_controller_held_thread(task_t task,
+                                              thread_act_t *threadOut) {
+    return codexCopyExactMainHeldThread(task, threadOut);
 }
 
 static bool inject_image_and_wait(task_t task, pid_t targetPid,
@@ -1530,7 +1420,17 @@ static bool inject_image_and_wait(task_t task, pid_t targetPid,
     }
     printf("compat-loader: injecting %s into pid %d path=%s\n",
            resolvedPath, targetPid, targetPath);
-    injectDylibViaRop(task, targetPid, resolvedPath, allImageInfoAddress);
+    thread_act_t heldThread = MACH_PORT_NULL;
+    bool injected = copy_exact_controller_held_thread(task, &heldThread) &&
+                    codexInjectDylibViaHeldThread(
+                        task, heldThread, targetPid, resolvedPath,
+                        allImageInfoAddress);
+    if (MACH_PORT_VALID(heldThread)) {
+        (void)mach_port_deallocate(mach_task_self(), heldThread);
+    }
+    if (!injected) {
+        return false;
+    }
     for (unsigned int attempt = 0; attempt < CODEX_IMAGE_READY_ATTEMPTS;
          ++attempt) {
         if (!gated_remote_identity_exact(task, targetPid, targetPath,
@@ -1560,14 +1460,21 @@ static int verify_remote_dyld_hook(task_t task, pid_t pid,
     uint64_t statusWord = UINT64_MAX;
     kern_return_t threadResult = KERN_INVALID_ARGUMENT;
     kern_return_t callResult = KERN_INVALID_ARGUMENT;
+    bool borrowedThread = false;
     bool identityBeforeThread =
         !requireGatedIdentity ||
         gated_remote_identity_exact(task, pid, targetPath,
                                     allImageInfoAddress, true);
     if (statusFunction != 0 && identityBeforeThread) {
-        prepareForMagic(task, allImageInfoAddress);
-        threadResult = createRemotePthread(task, allImageInfoAddress,
-                                           &remoteThread);
+        if (requireGatedIdentity) {
+            borrowedThread = copy_exact_controller_held_thread(
+                task, &remoteThread);
+            threadResult = borrowedThread ? KERN_SUCCESS : KERN_FAILURE;
+        } else {
+            prepareForMagic(task, allImageInfoAddress);
+            threadResult = createRemotePthread(task, allImageInfoAddress,
+                                               &remoteThread);
+        }
     }
     bool identityBeforeCall =
         !requireGatedIdentity ||
@@ -1575,8 +1482,12 @@ static int verify_remote_dyld_hook(task_t task, pid_t pid,
                                     allImageInfoAddress, false);
     if (threadResult == KERN_SUCCESS && MACH_PORT_VALID(remoteThread) &&
         identityBeforeCall) {
-        callResult = arbCall(task, remoteThread, &statusWord, true,
-                             statusFunction, 0);
+        callResult = borrowedThread
+                         ? codexArbCallHeldThread(
+                               task, remoteThread, &statusWord,
+                               statusFunction, 0)
+                         : arbCall(task, remoteThread, &statusWord, true,
+                                   statusFunction, 0);
     }
     uint32_t state = (uint32_t)(statusWord >> 32U);
     uint32_t error = (uint32_t)statusWord;
@@ -1604,7 +1515,9 @@ static int verify_remote_dyld_hook(task_t task, pid_t pid,
         identityBeforeCall ? "true" : "false",
         state, error, installed ? "true" : "false");
     if (MACH_PORT_VALID(remoteThread)) {
-        (void)thread_terminate(remoteThread);
+        if (!borrowedThread) {
+            (void)thread_terminate(remoteThread);
+        }
         (void)mach_port_deallocate(mach_task_self(), remoteThread);
     }
     return installed ? 0 : 76;

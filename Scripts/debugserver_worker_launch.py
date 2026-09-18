@@ -37,6 +37,12 @@ SPRINGBOARD_LIVE_PRECURSOR_UPLOAD_PATH = (
 SPRINGBOARD_LIVE_PRECURSOR_PATH = (
     "/var/jb/usr/libexec/codex-springboard-live-precursor"
 )
+CANDIDATE_INJECTION_BRIDGE_UPLOAD_PATH = (
+    "/var/mobile/Media/codex-candidate-injection-bridge.dylib"
+)
+CANDIDATE_INJECTION_BRIDGE_PATH = (
+    "/var/jb/usr/lib/codex-candidate-injection-bridge.dylib"
+)
 
 
 class ProtocolError(RuntimeError):
@@ -93,6 +99,11 @@ def parse_args() -> argparse.Namespace:
         "--stage-springboard-live-precursor",
         action="store_true",
         help="install the fixed Media upload at the managed precursor path",
+    )
+    modes.add_argument(
+        "--stage-candidate-injection-bridge",
+        action="store_true",
+        help="install the fixed Media bridge at its managed rootless path",
     )
     modes.add_argument(
         "--soften-cryptexd",
@@ -271,6 +282,15 @@ async def run(args: argparse.Namespace) -> int:
             "0755",
             SPRINGBOARD_LIVE_PRECURSOR_UPLOAD_PATH,
             SPRINGBOARD_LIVE_PRECURSOR_PATH,
+        ]
+        expected_name = "install"
+    elif args.stage_candidate_injection_bridge:
+        launch_arguments = [
+            INSTALL_PATH,
+            "-m",
+            "0644",
+            CANDIDATE_INJECTION_BRIDGE_UPLOAD_PATH,
+            CANDIDATE_INJECTION_BRIDGE_PATH,
         ]
         expected_name = "install"
     else:
