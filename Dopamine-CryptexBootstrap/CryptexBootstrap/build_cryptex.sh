@@ -65,11 +65,24 @@ TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
+DYLD_JB_ADMISSION_HOOK_SOURCE="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.c"
+DYLD_JB_ADMISSION_HOOK_HEADER="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.h"
+DYLD_JB_ADMISSION_HOOK="$IMAGE_ROOT/usr/local/lib/codex-dyld-jb-admission-hook.dylib"
+DYLD_24A437_REFERENCE=${CODEX_DYLD_24A437_REFERENCE:-"$SCRIPT_DIR/../../build/dyld-24A437"}
+DYLD_24A437_SHA256=ab9887ed96c9c08ad68d4c6a5c27e8289fb0c9e55ec3e134547292a1ec579608
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 RUNTIME_TRUST_SOURCE=${CODEX_RUNTIME_TRUST_HELPER:-"$SCRIPT_DIR/../../build/appregistrard-srd-trust-derived/Build/Products/Release-iphoneos/appregistrard"}
 RUNTIME_TRUST_HELPER="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust"
 RUNTIME_TRUST_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust-client"
+SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/../../Scripts/build_springboard_candidate.py"
+SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/springboard-24A437/24A437__iPhone13,1/System/Library/CoreServices/SpringBoard.app/SpringBoard"}
+SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/springboard-candidate-24A437/Info.plist"}
+SPRINGBOARD_CANDIDATE_DIRECTORY="$IMAGE_ROOT/usr/local/libexec/codex-springboard-candidate"
+SPRINGBOARD_CANDIDATE="$SPRINGBOARD_CANDIDATE_DIRECTORY/SpringBoard"
+SPRINGBOARD_CANDIDATE_INFO="$SPRINGBOARD_CANDIDATE_DIRECTORY/Info.plist"
+SPRINGBOARD_CANDIDATE_ENTITLEMENTS="$SPRINGBOARD_CANDIDATE_DIRECTORY/entitlements.plist"
+SPRINGBOARD_CANDIDATE_MANIFEST="$SPRINGBOARD_CANDIDATE_DIRECTORY/build-manifest.json"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
@@ -85,6 +98,7 @@ PROCURSUS_RUNTIME_ENTITLEMENTS="$SIGNING_DIR/procursus-runtime-entitlements.plis
 PROCURSUS_RUNTIME_BASELINE_INPUT="$WORK_DIR/procursus-runtime-baseline.tsv"
 PROCURSUS_RUNTIME_HISTORY_INPUT="$CACHE_DIR/procursus-runtime-history.tsv"
 RUNTIME_INTERPOSER_INSTALL_NAME=/var/jb/usr/lib/codex-exec-interposer.dylib
+DYLD_JB_ADMISSION_HOOK_INSTALL_NAME=/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib
 
 die() {
     print -u2 -- "error: $*"
@@ -216,7 +230,7 @@ enable_procursus_runtime_admission() {
         die "library-validation entitlement is missing: $candidate"
 }
 
-for tool in awk codesign curl dpkg-deb file find gpg ldid lipo nm plutil python3 rg security shasum tar xcrun zstd; do
+for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg security shasum tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 for plist in "$ELLEKIT_COMPAT_ENTITLEMENTS" "$EXEC_WORKER_ENTITLEMENTS"; do
@@ -239,6 +253,12 @@ require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
     die "missing Dopamine repository compatibility configuration"
 [[ -f "$APT_LIST_NORMALIZER" ]] || \
     die "missing APT package-list normalizer"
+[[ -f "$SPRINGBOARD_CANDIDATE_BUILDER" ]] || \
+    die "missing SpringBoard candidate builder"
+[[ -f "$SPRINGBOARD_CANDIDATE_SOURCE" ]] || \
+    die "missing pinned 24A437 SpringBoard source"
+[[ -f "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" ]] || \
+    die "missing pinned 24A437 SpringBoard Info.plist source"
 sh -n "$APT_LIST_NORMALIZER"
 [[ -f "$ELLEKIT_KEY" ]] || die "missing ElleKit repository keyring"
 [[ -f "$BIGBOSS_KEY" ]] || die "missing BigBoss repository keyring"
@@ -250,6 +270,14 @@ verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
     die "missing runtime trust broker client source"
 [[ -f "$SCRIPT_DIR/codex_exec_interposer.c" ]] || \
     die "missing runtime execution interposer source"
+[[ -f "$DYLD_JB_ADMISSION_HOOK_SOURCE" ]] || \
+    die "missing dyld /var/jb admission hook source"
+[[ -f "$DYLD_JB_ADMISSION_HOOK_HEADER" ]] || \
+    die "missing dyld /var/jb admission hook header"
+[[ -f "$DYLD_24A437_REFERENCE" ]] || \
+    die "missing exact 24A437 dyld reference"
+[[ "$(sha256_of "$DYLD_24A437_REFERENCE")" == "$DYLD_24A437_SHA256" ]] || \
+    die "exact 24A437 dyld reference hash mismatch"
 [[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
     die "missing runtime interposer load-command patch"
 [[ -f "$SCRIPT_DIR/prepare_runtime_baseline_history.py" ]] || \
@@ -324,6 +352,28 @@ mkdir -p \
     "$ORIGINAL_TRUSTED_PACKAGE_ROOT" \
     "$TRUSTED_PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
+
+# Build a fixed SpringBoard replacement from the exact extracted 24A437
+# arm64e executable.  The helper pins the source hash/UUID/identifier,
+# preserves every original entitlement, adds only the explicit debugging and
+# runtime-code policy, regenerates XML+DER entitlement slots, and proves that
+# the ad-hoc result is byte-for-byte deterministic.  It performs no device,
+# TSS, personalization, or installation operation.
+python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
+    "$SPRINGBOARD_CANDIDATE_SOURCE" \
+    "$SPRINGBOARD_CANDIDATE_DIRECTORY" \
+    --info-plist "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" >/dev/null
+[[ -x "$SPRINGBOARD_CANDIDATE" ]] || \
+    die "SpringBoard candidate was not produced"
+[[ -f "$SPRINGBOARD_CANDIDATE_INFO" ]] || \
+    die "SpringBoard candidate Info.plist was not produced"
+[[ -f "$SPRINGBOARD_CANDIDATE_ENTITLEMENTS" ]] || \
+    die "SpringBoard candidate entitlements were not produced"
+[[ -f "$SPRINGBOARD_CANDIDATE_MANIFEST" ]] || \
+    die "SpringBoard candidate manifest was not produced"
+codesign --verify --strict --all-architectures --ignore-resources \
+    "$SPRINGBOARD_CANDIDATE" || \
+    die "SpringBoard candidate signature is invalid"
 
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
@@ -579,6 +629,26 @@ codesign --verify --strict --all-architectures "$EXEC_INTERPOSER" || \
     die "execution interposer signature is invalid"
 
 xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -install_name "$DYLD_JB_ADMISSION_HOOK_INSTALL_NAME" \
+    -Os -fvisibility=hidden -Wall -Wextra -Werror \
+    "$DYLD_JB_ADMISSION_HOOK_SOURCE" \
+    -o "$DYLD_JB_ADMISSION_HOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$DYLD_JB_ADMISSION_HOOK"
+codesign --verify --strict --all-architectures \
+    "$DYLD_JB_ADMISSION_HOOK" || \
+    die "dyld /var/jb admission hook signature is invalid"
+[[ "$(lipo -archs "$DYLD_JB_ADMISSION_HOOK")" == arm64e ]] || \
+    die "dyld /var/jb admission hook is not exactly arm64e"
+[[ "$(otool -D "$DYLD_JB_ADMISSION_HOOK" | tail -n 1)" == \
+   "$DYLD_JB_ADMISSION_HOOK_INSTALL_NAME" ]] || \
+    die "dyld /var/jb admission hook install name is invalid"
+
+xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
@@ -610,8 +680,10 @@ for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
     "$EXEC_INTERPOSER" \
+    "$DYLD_JB_ADMISSION_HOOK" \
     "$RUNTIME_TRUST_CLIENT" \
-    "$RUNTIME_TRUST_HELPER"; do
+    "$RUNTIME_TRUST_HELPER" \
+    "$SPRINGBOARD_CANDIDATE"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
             2>&1 | sed -n 's/^CDHash=//p')

@@ -525,26 +525,80 @@ static bool is_managed_documents_deb_path(const char *path) {
            strcmp(leaf + leafLength - strlen(".deb"), ".deb") == 0;
 }
 
-static bool run_postboot_install_driver(os_log_t log, int *exitCode) {
+static bool parse_debugserver_loopback_port(const char *text,
+                                            unsigned int *portOut) {
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value < 49152UL ||
+        value > 65535UL) {
+        return false;
+    }
+    *portOut = (unsigned int)value;
+    return true;
+}
+
+static bool run_postboot_driver(os_log_t log, int *exitCode) {
     const char *mode = getenv("CODEX_POSTBOOT_DRIVER");
     if (mode == NULL) {
         return false;
     }
     const char *debPath = getenv("CODEX_POSTBOOT_INSTALL_DEB");
-    if (strcmp(mode, "install-deb-v1") != 0 ||
-        !is_managed_documents_deb_path(debPath)) {
+    bool installDeb = strcmp(mode, "install-deb-v1") == 0;
+    bool debugserverLoopback =
+        strcmp(mode, "debugserver-loopback-v1") == 0;
+    unsigned int debugserverPort = 0;
+    const char *debugserverPortText =
+        getenv("CODEX_POSTBOOT_DEBUGSERVER_PORT");
+    if ((!installDeb && !debugserverLoopback) ||
+        (installDeb && !is_managed_documents_deb_path(debPath)) ||
+        (debugserverLoopback &&
+         !parse_debugserver_loopback_port(debugserverPortText,
+                                          &debugserverPort))) {
         os_log_error(log,
-                     "postboot driver rejected mode=%{public}s path=%{public}s",
-                     mode, debPath != NULL ? debPath : "none");
+                     "postboot driver rejected mode=%{public}s "
+                     "path=%{public}s port=%{public}s",
+                     mode, debPath != NULL ? debPath : "none",
+                     debugserverPortText != NULL ? debugserverPortText
+                                                 : "none");
         dprintf(STDERR_FILENO,
-                "codex-postboot-driver rejected mode=%s path=%s\n", mode,
-                debPath != NULL ? debPath : "none");
+                "codex-postboot-driver rejected mode=%s path=%s port=%s\n",
+                mode, debPath != NULL ? debPath : "none",
+                debugserverPortText != NULL ? debugserverPortText : "none");
         *exitCode = 126;
         return true;
     }
 
-    char *arguments[] = {"/var/jb/usr/bin/dpkg", "-i", (char *)debPath,
-                         NULL};
+    char environmentPath[PATH_MAX];
+    char endpoint[64];
+    char *arguments[5] = {0};
+    uint32_t argumentCount = 0;
+    if (installDeb) {
+        arguments[0] = "/var/jb/usr/bin/dpkg";
+        arguments[1] = "-i";
+        arguments[2] = (char *)debPath;
+        argumentCount = 3;
+    } else {
+        int environmentLength = snprintf(environmentPath,
+                                         sizeof(environmentPath),
+                                         "%s/usr/bin/env", gJailbreakRoot);
+        int endpointLength = snprintf(endpoint, sizeof(endpoint),
+                                      "127.0.0.1:%u", debugserverPort);
+        if (environmentLength < 0 ||
+            (size_t)environmentLength >= sizeof(environmentPath) ||
+            endpointLength < 0 || (size_t)endpointLength >= sizeof(endpoint)) {
+            *exitCode = 126;
+            return true;
+        }
+        arguments[0] = environmentPath;
+        arguments[1] = "-i";
+        arguments[2] = "/usr/libexec/debugserver";
+        arguments[3] = endpoint;
+        argumentCount = 4;
+    }
     int descriptors[2];
     int descriptorNumbers[2];
     uint32_t descriptorCount = 0;
@@ -558,7 +612,7 @@ static bool run_postboot_install_driver(os_log_t log, int *exitCode) {
     }
     int32_t status = 126 << 8;
     bool ran = descriptorCount != 0 &&
-        run_broker_request(arguments, 3, NULL, 0, descriptors,
+        run_broker_request(arguments, argumentCount, NULL, 0, descriptors,
                            descriptorNumbers, descriptorCount, &status);
     if (!ran) {
         int savedError = errno;
@@ -578,13 +632,16 @@ static bool run_postboot_install_driver(os_log_t log, int *exitCode) {
     } else {
         *exitCode = 126;
     }
-    os_log(log,
-           "postboot driver complete path=%{public}s status=%{public}d "
-           "exit=%{public}d",
-           debPath, status, *exitCode);
+    os_log(log, "postboot driver complete mode=%{public}s "
+                "path=%{public}s port=%{public}u status=%{public}d "
+                "exit=%{public}d",
+           mode, debPath != NULL ? debPath : "none", debugserverPort, status,
+           *exitCode);
     dprintf(STDERR_FILENO,
-            "codex-postboot-driver complete path=%s status=%d exit=%d\n",
-            debPath, status, *exitCode);
+            "codex-postboot-driver complete mode=%s path=%s port=%u "
+            "status=%d exit=%d\n",
+            mode, debPath != NULL ? debPath : "none", debugserverPort, status,
+            *exitCode);
     return true;
 }
 
@@ -1190,7 +1247,7 @@ __attribute__((constructor)) static void initialize_sileo_broker(void) {
         _exit(126);
     }
     int driverExitCode = 0;
-    if (run_postboot_install_driver(gConstructorLog, &driverExitCode)) {
+    if (run_postboot_driver(gConstructorLog, &driverExitCode)) {
         _exit(driverExitCode);
     }
     if (verify_spawn_bridge(gConstructorLog) != 0) {

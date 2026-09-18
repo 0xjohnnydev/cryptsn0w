@@ -105,6 +105,17 @@ constructor broker. Set `CODEX_SILEO_LAUNCHER_IPA` and
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
+The build also derives a dormant SpringBoard replacement candidate from the
+pinned 24A437 arm64e executable. `Scripts/build_springboard_candidate.py`
+checks its SHA-256, UUID, and `com.apple.springboard` identifier; preserves its
+original entitlement dictionary; adds the explicitly configured debugger/JIT
+policy; regenerates XML and DER entitlement slots; and proves the ad-hoc output
+is deterministic. The static trust cache includes that fixed candidate and the
+installer copies it, without launching it, to
+`/var/jb/usr/libexec/codex-springboard-candidate/SpringBoard`. An alternate
+source path can be supplied with `CODEX_SPRINGBOARD_CANDIDATE_SOURCE`, but it
+must still match the pinned exact-build identity.
+
 The root installer performs a non-mutating `apt-get check` before launching
 Sileo. Treat `aptDependencyCheckExit=0`, `sileoSystemRootBrokerReady=true`,
 `root broker preflight complete`, and `result=success` as the acceptance

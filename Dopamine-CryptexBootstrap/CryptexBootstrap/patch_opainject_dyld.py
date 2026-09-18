@@ -10,6 +10,13 @@ import pathlib
 EXPECTED_SHA256 = "4fe459ee8039e599d1e59ce4dc8f72496cf0396b7f1700a95d6b83c481397c70"
 
 
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"expected one {label} patch site, found {count}")
+    return text.replace(old, new, 1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Adapt pinned opa334/opainject image iteration for tagged iOS 27 pointers."
@@ -70,6 +77,36 @@ def main() -> int:
 }
 '''
     patched = text[:start] + replacement + text[end:]
+    patched = replace_once(
+        patched,
+        '''\t\tif(strcmp(iterImagePath, imagePath) == 0)
+\t\t{
+\t\t\toutAddr = (vm_address_t)imageInfo->imageLoadAddress;
+\t\t}
+''',
+        '''\t\tif(strcmp(iterImagePath, imagePath) == 0)
+\t\t{
+\t\t\toutAddr = (vm_address_t)imageInfo->imageLoadAddress;
+\t\t\t*stop = YES;
+\t\t}
+''',
+        "image lookup early stop",
+    )
+    patched = replace_once(
+        patched,
+        '''\t\t\tif(strcmp(iterSymbolName, symbolName) == 0)
+\t\t\t{
+\t\t\t\toutAddr = value;
+\t\t\t}
+''',
+        '''\t\t\tif(strcmp(iterSymbolName, symbolName) == 0)
+\t\t\t{
+\t\t\t\toutAddr = value;
+\t\t\t\t*stop = YES;
+\t\t\t}
+''',
+        "symbol lookup early stop",
+    )
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     args.destination.write_text(patched)
     return 0

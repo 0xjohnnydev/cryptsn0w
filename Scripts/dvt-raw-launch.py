@@ -38,6 +38,19 @@ async def launch(args: argparse.Namespace) -> dict[str, Any]:
                     if not pid:
                         raise RuntimeError("device returned an empty PID")
 
+                    if args.leave_suspended:
+                        return {
+                            "arguments": args.arguments,
+                            "bundleID": bundle_id,
+                            "elapsedSeconds": round(time.monotonic() - started, 3),
+                            "environment": args.env,
+                            "leftSuspended": True,
+                            "output": output,
+                            "path": args.path,
+                            "pid": pid,
+                            "timedOut": False,
+                        }
+
                     await process_control.service.startObservingPid_(pid)
                     await process_control.signal(pid, int(signal.SIGCONT))
 
@@ -96,6 +109,11 @@ def parse_args() -> argparse.Namespace:
         help="encode the bundle identifier as nil so Instruments uses --path",
     )
     parser.add_argument("--timeout", type=float, default=45.0)
+    parser.add_argument(
+        "--leave-suspended",
+        action="store_true",
+        help="return the new PID without resuming it, for debugger attachment",
+    )
     parser.add_argument("--env", action="append", default=[])
     parser.add_argument("arguments", nargs="*")
     return parser.parse_args()
