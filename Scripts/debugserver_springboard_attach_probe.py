@@ -21,6 +21,7 @@ import uuid
 from pymobiledevice3.remote.remote_service_discovery import (
     RemoteServiceDiscoveryService,
 )
+from pymobiledevice3.remote.rsd_tunnel import PreferredRsdTunnel
 
 from debugserver_carrier_spawn import (
     CPU_SUBTYPE_ARM64E,
@@ -47,8 +48,15 @@ MOBILE_UID = 501
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("host")
-    parser.add_argument("port", type=int)
+    parser.add_argument("host", nargs="?")
+    parser.add_argument("port", nargs="?", type=int)
+    parser.add_argument(
+        "--userspace-udid",
+        help=(
+            "establish a no-root in-process USB tunnel for this UDID; "
+            "host and port are omitted"
+        ),
+    )
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--timeout", type=float, default=20.0)
     return parser.parse_args()
@@ -139,7 +147,25 @@ async def run(args: argparse.Namespace) -> int:
     if args.timeout <= 0 or args.timeout > 60:
         raise ProtocolError("timeout must be in the range (0, 60]")
 
-    async with RemoteServiceDiscoveryService((args.host, args.port)) as rsd:
+    if args.userspace_udid:
+        if args.host is not None or args.port is not None:
+            raise ProtocolError(
+                "host/port cannot be combined with --userspace-udid"
+            )
+    elif args.host is None or args.port is None:
+        raise ProtocolError(
+            "host and port are required without --userspace-udid"
+        )
+
+    rsd_context = (
+        PreferredRsdTunnel(
+            serial=args.userspace_udid,
+            prefer_native=False,
+        )
+        if args.userspace_udid
+        else RemoteServiceDiscoveryService((args.host, args.port))
+    )
+    async with rsd_context as rsd:
         connection = await rsd.create_service_connection(
             rsd.get_service_port(DEBUG_PROXY_SERVICE)
         )

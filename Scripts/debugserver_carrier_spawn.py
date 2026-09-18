@@ -1400,6 +1400,24 @@ def parse_args() -> argparse.Namespace:
         help="run the installed loader's bounded page probe on SpringBoard",
     )
     mode.add_argument(
+        "--springboard-resident-hook",
+        metavar="PID",
+        type=int,
+        help=(
+            "load the fixed admission hook into SpringBoard without "
+            "closing its remote dlopen handle"
+        ),
+    )
+    mode.add_argument(
+        "--springboard-resident-canary",
+        metavar="PID",
+        type=int,
+        help=(
+            "load the fixed live canary into SpringBoard without closing "
+            "its remote dlopen handle"
+        ),
+    )
+    mode.add_argument(
         "--spawn-suspended-ptrauth-loader",
         metavar="PID",
         type=int,
@@ -2671,6 +2689,8 @@ async def run(args: argparse.Namespace) -> int:
     for target_pid in (
         args.springboard_inspect_pid,
         args.springboard_page_probe,
+        args.springboard_resident_hook,
+        args.springboard_resident_canary,
         args.run_jsc_springboard_probe,
         args.spawn_suspended_ptrauth_loader,
         args.spawn_suspended_ptrauth_loader_amfid,
@@ -3656,6 +3676,26 @@ async def run(args: argparse.Namespace) -> int:
                     "--page-probe-pid",
                     str(args.springboard_page_probe),
                 )
+            elif args.springboard_resident_hook is not None:
+                spawn_arguments = (
+                    "/var/jb/usr/bin/sh",
+                    "-c",
+                    f"exec {LOADER_PATH} --inject-pid "
+                    f"{args.springboard_resident_hook} "
+                    f"{DYLD_JB_ADMISSION_HOOK_PATH} "
+                    ">/var/mobile/Media/"
+                    "codex-springboard-resident-hook-run.txt 2>&1",
+                )
+            elif args.springboard_resident_canary is not None:
+                spawn_arguments = (
+                    "/var/jb/usr/bin/sh",
+                    "-c",
+                    f"exec {LOADER_PATH} --inject-pid "
+                    f"{args.springboard_resident_canary} "
+                    f"{SPRINGBOARD_LIVE_CANARY_PATH} "
+                    ">/var/mobile/Media/"
+                    "codex-springboard-resident-canary-run.txt 2>&1",
+                )
             else:
                 spawn_arguments = WORKER_ARGUMENTS
             payload, argv_address, envp_address, pid_address = (
@@ -3818,6 +3858,8 @@ async def run(args: argparse.Namespace) -> int:
                 or args.terminate_verified_orphan is not None
                 or args.springboard_inspect_pid is not None
                 or args.springboard_page_probe is not None
+                or args.springboard_resident_hook is not None
+                or args.springboard_resident_canary is not None
             ):
                 await write_memory(remote, scratch, b"\0" * 8)
                 wait_registers = {
@@ -4194,7 +4236,7 @@ async def run(args: argparse.Namespace) -> int:
                     print(
                         "springboard-external-live-proof=success "
                         f"child-pid={child_pid} "
-                        "child-exit-contract=proof-and-exact-rollback"
+                        "child-exit-contract=exact-commit-or-exact-rollback"
                     )
                 elif args.run_springboard_external_parallel_bind_audit:
                     print(
@@ -4479,6 +4521,20 @@ async def run(args: argparse.Namespace) -> int:
                     print(
                         f"springboard-inspect=success child-pid={child_pid} "
                         f"target-pid={args.springboard_inspect_pid}"
+                    )
+                elif args.springboard_resident_hook is not None:
+                    print(
+                        "springboard-resident-hook=success "
+                        f"child-pid={child_pid} "
+                        f"target-pid={args.springboard_resident_hook} "
+                        "dlclose=omitted removal=reboot"
+                    )
+                elif args.springboard_resident_canary is not None:
+                    print(
+                        "springboard-resident-canary=success "
+                        f"child-pid={child_pid} "
+                        f"target-pid={args.springboard_resident_canary} "
+                        "dlclose=omitted removal=reboot"
                     )
                 else:
                     print(

@@ -59,6 +59,13 @@
 #define CODEX_DYLD_MATURITY_TIMEOUT_MSEC 200U
 #define CODEX_DYLD_MATURITY_POLL_USEC 250U
 #define CODEX_REMOTE_IMAGE_LIMIT 4096U
+#define CODEX_REMOTE_THREAD_LIMIT 4096U
+#define CODEX_REMOTE_THREAD_MAX_PASSES 8U
+#define CODEX_REMOTE_THREAD_STABLE_PASSES 2U
+#define CODEX_CARRIER_RUNTIME_TIMEOUT_MSEC 3000U
+#define CODEX_REMOTE_EXEC_SEGMENT_LIMIT (128U * 1024U * 1024U)
+#define CODEX_REMOTE_EXEC_TOTAL_LIMIT (256U * 1024U * 1024U)
+#define CODEX_REMOTE_EXEC_SEGMENT_COUNT 64U
 #define CODEX_RESTORE_VERIFY_MSEC 8000U
 #define CODEX_WATCHDOG_DELAY_MSEC 60000U
 #define CODEX_EXTERNAL_WATCHDOG_DELAY_MSEC 45000U
@@ -73,6 +80,13 @@
 #define CODEX_HELPER_RECORD_MAGIC 0x434f444558484c50ULL
 #define CODEX_HELPER_RECORD_VERSION 1U
 #define CODEX_HELPER_PHASE_SIZE 32U
+#define CODEX_CANDIDATE_RESULT_FD 195
+#define CODEX_CANDIDATE_RESULT_MAGIC 0x43494252U
+#define CODEX_CANDIDATE_RESULT_VERSION 1U
+#define CODEX_CARRIER_MMAP_UNSLID 0x100006cccULL
+#define CODEX_CARRIER_FCNTL_UNSLID 0x100006f5cULL
+#define CODEX_DYLD_MMAP_SITE_OFFSET 0x147d4ULL
+#define CODEX_DYLD_FCNTL_SITE_OFFSET 0xb6ccULL
 
 #define CODEX_MAGIC "codex-springboard-live-precursor-v1"
 
@@ -86,6 +100,17 @@ static const char *const kExternalLaunchctlPath =
     "/var/jb/usr/bin/launchctl";
 static const char *const kWorkerPath =
     "/var/jb/usr/libexec/codex-exec-worker";
+static const char *const kInjectionCarrierPath =
+    "/private/var/containers/Bundle/Application/"
+    "C0DEC0DE-C0DE-40DE-80DE-C0DEC0DEC0DE/"
+    "CodexInjectionCarrier.app/"
+    "CodexInjectionCarrier";
+static const char *const kBaselineLoaderPath =
+    "/var/jb/usr/libexec/codex-ellekit-loader";
+static const char *const kCarrierIdlePayloadPath =
+    "/var/jb/usr/libexec/customd-jit-target";
+static const char *const kCandidateInjectionBridgePath =
+    "/var/jb/usr/lib/codex-candidate-injection-bridge.dylib";
 static const char *const kPrecursorPath =
     "/var/jb/usr/libexec/codex-springboard-live-precursor";
 static const char *const kLoaderCandidatePath =
@@ -163,10 +188,71 @@ static const uint8_t
         0x06, 0x4d, 0xf9, 0xc9, 0xe2, 0x1b, 0x0a, 0xf0,
 };
 static const uint8_t kExpectedLoaderSHA256[CODEX_SHA256_SIZE] = {
-    0x5b, 0x63, 0xba, 0xf3, 0x30, 0x23, 0x7a, 0xe1,
-    0xe3, 0xb9, 0x5e, 0x02, 0xb2, 0xb9, 0x35, 0xb1,
-    0x82, 0x54, 0x10, 0xd9, 0x4e, 0x7c, 0xb7, 0x6b,
-    0xc4, 0xa1, 0x52, 0xd6, 0x11, 0x4b, 0x0c, 0x78,
+    0xe8, 0x7c, 0x79, 0xce, 0x08, 0x97, 0xd2, 0xc0,
+    0xb9, 0xbd, 0x7b, 0xab, 0x5c, 0xb3, 0x1f, 0xda,
+    0x99, 0xfa, 0x4c, 0x04, 0xca, 0xd3, 0x71, 0x1d,
+    0x26, 0xb4, 0x29, 0x15, 0xc6, 0x88, 0x3c, 0xcf,
+};
+static const uint8_t kExpectedWorkerSHA256[CODEX_SHA256_SIZE] = {
+    0x6d, 0x34, 0x6b, 0x38, 0x8e, 0x84, 0x4e, 0x4e,
+    0x8e, 0xee, 0x48, 0x7a, 0xd2, 0x26, 0x1f, 0x7a,
+    0x97, 0xec, 0x85, 0x08, 0xe7, 0xbf, 0xaa, 0x7e,
+    0xd9, 0xce, 0xab, 0x97, 0xbf, 0x69, 0x76, 0x57,
+};
+static const uint8_t kExpectedBaselineLoaderSHA256[CODEX_SHA256_SIZE] = {
+    0xcf, 0xf7, 0x43, 0xb0, 0x4b, 0x82, 0x8b, 0xa9,
+    0x71, 0x4c, 0x3d, 0xf5, 0xc3, 0xe5, 0x9c, 0x5d,
+    0x80, 0xc8, 0x19, 0xc0, 0x7f, 0x3c, 0xbc, 0x36,
+    0xfa, 0x02, 0x12, 0x80, 0x72, 0xad, 0x56, 0x5d,
+};
+static const uint8_t kExpectedCarrierIdlePayloadSHA256[CODEX_SHA256_SIZE] = {
+    0x5f, 0x2e, 0xc7, 0x87, 0xa4, 0x88, 0x84, 0x66,
+    0xc0, 0xaf, 0x63, 0xd2, 0x7a, 0x71, 0x50, 0x7c,
+    0x8a, 0x70, 0x63, 0x5d, 0xcf, 0x22, 0x40, 0x33,
+    0xbe, 0x3e, 0x19, 0x7a, 0x2d, 0xf1, 0x7a, 0x4f,
+};
+static const uint8_t kExpectedCandidateInjectionBridgeSHA256
+    [CODEX_SHA256_SIZE] = {
+        0x36, 0xde, 0xde, 0x6a, 0x01, 0x0b, 0x7a, 0x42,
+        0xb6, 0xc2, 0x13, 0x43, 0xdc, 0x61, 0x31, 0x0d,
+        0x5f, 0x85, 0x4c, 0x09, 0x1b, 0xb5, 0x30, 0xcf,
+        0x76, 0xab, 0x40, 0x16, 0x6c, 0x7f, 0x8d, 0x7e,
+};
+static const uint8_t kExpectedCarrierUUID[16] = {
+    0x7a, 0xd0, 0xe7, 0xfc, 0xfe, 0xff, 0x3e, 0x8c,
+    0xa7, 0x53, 0xf3, 0xa2, 0x07, 0x3b, 0xb9, 0xa1,
+};
+static const uint8_t kExpectedDyldUUID[16] = {
+    0xd3, 0xf5, 0x9b, 0x02, 0xee, 0x07, 0x37, 0x1b,
+    0xb0, 0x91, 0x3f, 0x15, 0x0a, 0x07, 0x8e, 0xd8,
+};
+static const uint8_t kDyldMmapSyscallPattern[8] = {
+    0xb0, 0x18, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
+};
+static const uint8_t kDyldFcntlSyscallPattern[8] = {
+    0x90, 0x0b, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
+};
+static const uint8_t kExpectedDyldMmapSite[20] = {
+    0xb0, 0x18, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
+    0x03, 0x01, 0x00, 0x54, 0x7f, 0x23, 0x03, 0xd5,
+    0xfd, 0x7b, 0xbf, 0xa9,
+};
+static const uint8_t kExpectedDyldFcntlSite[20] = {
+    0x90, 0x0b, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
+    0x03, 0x01, 0x00, 0x54, 0x7f, 0x23, 0x03, 0xd5,
+    0xfd, 0x7b, 0xbf, 0xa9,
+};
+static const uint8_t kExpectedCarrierMmapPrologue[32] = {
+    0xff, 0xc3, 0x02, 0xd1, 0xfd, 0x7b, 0x0a, 0xa9,
+    0xfd, 0x83, 0x02, 0x91, 0xa0, 0x03, 0x1f, 0xf8,
+    0xa1, 0x83, 0x1e, 0xf8, 0xa2, 0x43, 0x1e, 0xb8,
+    0xa3, 0x03, 0x1e, 0xb8, 0xa4, 0xc3, 0x1d, 0xb8,
+};
+static const uint8_t kExpectedCarrierFcntlPrologue[32] = {
+    0xff, 0x03, 0x01, 0xd1, 0xfd, 0x7b, 0x03, 0xa9,
+    0xfd, 0xc3, 0x00, 0x91, 0xa0, 0x83, 0x1f, 0xb8,
+    0xa1, 0x43, 0x1f, 0xb8, 0xe2, 0x0f, 0x00, 0xf9,
+    0xa8, 0x43, 0x5f, 0xb8, 0x08, 0x85, 0x01, 0x71,
 };
 static const uint8_t kExpectedHookSHA256[CODEX_SHA256_SIZE] = {
     0x90, 0xbd, 0xcd, 0x15, 0xdd, 0xa2, 0x2a, 0xe3,
@@ -238,6 +324,52 @@ struct candidate_pid_hold {
     bool owned;
 };
 
+struct candidate_thread_hold {
+    task_t task;
+    struct codex_proc_uniqidentifierinfo generation;
+    thread_act_array_t threads;
+    uint64_t *thread_identifiers;
+    integer_t *baseline_suspend_counts;
+    bool *owned;
+    mach_msg_type_number_t thread_count;
+};
+
+struct candidate_injection_result {
+    uint32_t magic;
+    uint32_t version;
+    int32_t status;
+    int32_t candidate_pid;
+};
+
+struct remote_executable_segment {
+    mach_vm_address_t address;
+    mach_vm_size_t size;
+    uint64_t unslid_address;
+};
+
+struct remote_macho_layout {
+    mach_vm_address_t header_address;
+    int64_t slide;
+    uint8_t uuid[16];
+    struct remote_executable_segment
+        executable_segments[CODEX_REMOTE_EXEC_SEGMENT_COUNT];
+    uint32_t executable_segment_count;
+};
+
+struct remote_patch_result {
+    kern_return_t writable_result;
+    kern_return_t write_result;
+    kern_return_t flush_result;
+    kern_return_t restore_result;
+    kern_return_t readback_result;
+    mach_vm_size_t readback_size;
+    bool original_exact;
+    bool readback_exact;
+};
+
+_Static_assert(sizeof(struct candidate_injection_result) == 16,
+               "candidate injection result ABI changed");
+
 struct command_result {
     int spawn_error;
     bool timed_out;
@@ -282,6 +414,15 @@ extern int pid_suspend(int pid);
 extern int pid_resume(int pid);
 extern int posix_spawnattr_set_ptrauth_task_port_np(
     posix_spawnattr_t *restrict attributes, mach_port_t task_port);
+extern kern_return_t mach_vm_protect(vm_map_t target,
+                                     mach_vm_address_t address,
+                                     mach_vm_size_t size,
+                                     boolean_t set_maximum,
+                                     vm_prot_t protection);
+extern kern_return_t mach_vm_write(vm_map_t target,
+                                   mach_vm_address_t address,
+                                   vm_offset_t data,
+                                   mach_msg_type_number_t size);
 
 static int gJournalDescriptor = -1;
 static int gStateDirectoryDescriptor = -1;
@@ -620,6 +761,22 @@ static bool file_sha256_exact(const char *path,
         close(descriptor);
     }
     return true;
+}
+
+static bool carrier_lane_artifacts_exact(void) {
+    return file_sha256_exact(kWorkerPath, kExpectedWorkerSHA256, true, 0,
+                             NULL, NULL) &&
+           file_sha256_exact(kInjectionCarrierPath, kExpectedWorkerSHA256,
+                             true, 0, NULL, NULL) &&
+           file_sha256_exact(kBaselineLoaderPath,
+                             kExpectedBaselineLoaderSHA256, true, 0, NULL,
+                             NULL) &&
+           file_sha256_exact(kCarrierIdlePayloadPath,
+                             kExpectedCarrierIdlePayloadSHA256, true, 0,
+                             NULL, NULL) &&
+           file_sha256_exact(kCandidateInjectionBridgePath,
+                             kExpectedCandidateInjectionBridgeSHA256,
+                             false, 0, NULL, NULL);
 }
 
 static bool external_launchctl_file_valid(void) {
@@ -2673,16 +2830,18 @@ static bool controller_preflight(const char *invocation_path,
         kDyldAdmissionHookPath, kExpectedHookSHA256, false, 0, NULL, NULL);
     bool canary_valid = file_sha256_exact(
         kFreshCanaryPath, kExpectedCanarySHA256, false, 0, NULL, NULL);
+    bool carrier_lane_valid = carrier_lane_artifacts_exact();
     bool injection_artifacts_valid = !prepare_canary ||
                                      (launchctl_valid && loader_valid &&
-                                      hook_valid && canary_valid);
+                                      hook_valid && canary_valid &&
+                                      carrier_lane_valid);
     if (!candidate_valid || !injection_artifacts_valid) {
         (void)journal_event("event=preflight-artifact-rejected candidate=%d "
                             "injectionArtifacts=%d launchctl=%d loader=%d "
-                            "hook=%d canary=%d",
+                            "hook=%d canary=%d carrierLane=%d",
                             candidate_valid, injection_artifacts_valid,
                             launchctl_valid, loader_valid, hook_valid,
-                            canary_valid);
+                            canary_valid, carrier_lane_valid);
         return false;
     }
 
@@ -2717,7 +2876,11 @@ static bool controller_preflight(const char *invocation_path,
         "candidateReal=%s candidateDev=%llu candidateInode=%llu "
         "infoDev=%llu infoInode=%llu "
         "launchctlSha256=3eb2dbb554964a6ce221c07d6d8a068156606e2761c3ccc04a72f198dfeddfdc "
-        "loaderSha256=5b63baf330237ae1e3b95e02b2b935b1825410d94e7cb76bc4a152d6114b0c78 "
+        "loaderCandidateSha256=e87c79ce0897d2c0b9bd7bab5cb31fda99fa4c04cad3711d26b42915c6883ccf "
+        "workerSha256=6d346b388e844e4e8eee487ad2261f7a97ec8508e7bfaa7ed9ceab97bf697657 "
+        "baselineLoaderSha256=cff743b04b828ba9714c3df5c3e59c5d80c819c07f3cbc36fa02128072ad565d "
+        "carrierIdleSha256=5f2ec787a4888466c0af63d27a71507c8a70635dcf224033be3e197a2df17a4f "
+        "carrierBridgeSha256=36dede6a010b7a42b6c21343dc61310d5f854c091bb530cf76ab40166c7f8d7e "
         "hookSha256=90bdcd15dda22ae32343be47a8d54d949deac0b0679f3b8c8a9bf0f9e6a696ee "
         "canarySha256=5753976c89f1643076b51de9d34faf79cbd613c134eef01ec93df3f18431d8be "
         "candidateSha256=73a2ccc27f94ecc35266029df82d12ca7eb0f27ff5f2e047bc9ea35681877126 "
@@ -3613,6 +3776,453 @@ static bool remote_dyld_maturity_complete(
            maturity->version >= 15 && maturity->lib_system_initialized;
 }
 
+static bool add_remote_slide(uint64_t unslid_address, int64_t slide,
+                             mach_vm_address_t *address_out) {
+    if (address_out == NULL) {
+        return false;
+    }
+    uint64_t address = 0;
+    if (slide >= 0) {
+        uint64_t delta = (uint64_t)slide;
+        if (unslid_address > UINT64_MAX - delta) {
+            return false;
+        }
+        address = unslid_address + delta;
+    } else {
+        uint64_t delta = (uint64_t)(-(slide + 1)) + 1U;
+        if (unslid_address < delta) {
+            return false;
+        }
+        address = unslid_address - delta;
+    }
+    if (address == 0 || canonical_remote_address(address) != address) {
+        return false;
+    }
+    *address_out = (mach_vm_address_t)address;
+    return true;
+}
+
+static bool copy_remote_macho_layout(
+    task_t task, mach_vm_address_t header_address, uint32_t expected_filetype,
+    const uint8_t expected_uuid[16], bool require_arm64e,
+    struct remote_macho_layout *layout_out) {
+    if (!MACH_PORT_VALID(task) || header_address == 0 ||
+        layout_out == NULL) {
+        return false;
+    }
+    memset(layout_out, 0, sizeof(*layout_out));
+    struct mach_header_64 header = {0};
+    if (!read_remote_exact(task, header_address, &header, sizeof(header)) ||
+        header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 ||
+        (require_arm64e &&
+         (header.cpusubtype & ~CPU_SUBTYPE_MASK) != CPU_SUBTYPE_ARM64E) ||
+        header.filetype != expected_filetype || header.ncmds == 0 ||
+        header.ncmds > 4096U || header.sizeofcmds == 0 ||
+        header.sizeofcmds < sizeof(struct load_command) ||
+        header.sizeofcmds > 16U * 1024U * 1024U ||
+        header_address > UINT64_MAX - sizeof(header)) {
+        return false;
+    }
+    uint8_t *commands = malloc(header.sizeofcmds);
+    if (commands == NULL ||
+        !read_remote_exact(task, header_address + sizeof(header), commands,
+                           header.sizeofcmds)) {
+        free(commands);
+        return false;
+    }
+
+    bool valid = true;
+    bool uuid_found = false;
+    bool anchor_found = false;
+    uint64_t anchor_vm_address = 0;
+    size_t offset = 0;
+    uint32_t executable_count = 0;
+    uint64_t executable_total = 0;
+    for (uint32_t index = 0; valid && index < header.ncmds; ++index) {
+        if (offset > header.sizeofcmds - sizeof(struct load_command)) {
+            valid = false;
+            break;
+        }
+        const struct load_command *command =
+            (const struct load_command *)(commands + offset);
+        if (command->cmdsize < sizeof(*command) ||
+            command->cmdsize > header.sizeofcmds - offset) {
+            valid = false;
+            break;
+        }
+        if (command->cmd == LC_UUID) {
+            if (uuid_found ||
+                command->cmdsize < sizeof(struct uuid_command)) {
+                valid = false;
+                break;
+            }
+            const struct uuid_command *uuid_command =
+                (const struct uuid_command *)command;
+            memcpy(layout_out->uuid, uuid_command->uuid,
+                   sizeof(layout_out->uuid));
+            uuid_found = true;
+        } else if (command->cmd == LC_SEGMENT_64) {
+            if (command->cmdsize < sizeof(struct segment_command_64)) {
+                valid = false;
+                break;
+            }
+            const struct segment_command_64 *segment =
+                (const struct segment_command_64 *)command;
+            if ((segment->initprot & VM_PROT_EXECUTE) != 0) {
+                if (!anchor_found) {
+                    anchor_vm_address = segment->vmaddr;
+                    anchor_found = true;
+                }
+                if (segment->filesize == 0) {
+                    offset += command->cmdsize;
+                    continue;
+                }
+                if (segment->filesize > segment->vmsize ||
+                    segment->filesize > CODEX_REMOTE_EXEC_SEGMENT_LIMIT ||
+                    executable_count >= CODEX_REMOTE_EXEC_SEGMENT_COUNT ||
+                    executable_total > CODEX_REMOTE_EXEC_TOTAL_LIMIT -
+                                           segment->filesize) {
+                    valid = false;
+                    break;
+                }
+                struct remote_executable_segment *remote_segment =
+                    &layout_out->executable_segments[executable_count++];
+                remote_segment->size =
+                    (mach_vm_size_t)segment->filesize;
+                remote_segment->unslid_address = segment->vmaddr;
+                executable_total += segment->filesize;
+            }
+        }
+        offset += command->cmdsize;
+    }
+    valid = valid && offset == header.sizeofcmds && uuid_found &&
+            anchor_found && executable_count != 0 &&
+            header_address <= (mach_vm_address_t)INT64_MAX &&
+            anchor_vm_address <= (uint64_t)INT64_MAX;
+    if (valid) {
+        layout_out->header_address = header_address;
+        layout_out->slide = (int64_t)header_address -
+                            (int64_t)anchor_vm_address;
+        layout_out->executable_segment_count = executable_count;
+        mach_vm_address_t anchored_header = 0;
+        valid = add_remote_slide(anchor_vm_address, layout_out->slide,
+                                 &anchored_header) &&
+                anchored_header == header_address;
+    }
+    for (uint32_t index = 0; valid && index < executable_count; ++index) {
+        struct remote_executable_segment *segment =
+            &layout_out->executable_segments[index];
+        valid = add_remote_slide(segment->unslid_address,
+                                 layout_out->slide, &segment->address) &&
+                segment->address <= UINT64_MAX - segment->size &&
+                canonical_remote_address(segment->address +
+                                         segment->size - 1U) ==
+                    segment->address + segment->size - 1U;
+    }
+    if (valid && expected_uuid != NULL) {
+        valid = memcmp(layout_out->uuid, expected_uuid,
+                       sizeof(layout_out->uuid)) == 0;
+    }
+    free(commands);
+    if (!valid) {
+        memset(layout_out, 0, sizeof(*layout_out));
+    }
+    return valid;
+}
+
+static bool remote_layout_contains_unslid_span(
+    const struct remote_macho_layout *layout, uint64_t unslid_address,
+    uint64_t span, mach_vm_address_t *remote_address_out) {
+    if (layout == NULL || span == 0 ||
+        unslid_address > UINT64_MAX - span) {
+        return false;
+    }
+    for (uint32_t index = 0; index < layout->executable_segment_count;
+         ++index) {
+        const struct remote_executable_segment *segment =
+            &layout->executable_segments[index];
+        if (unslid_address < segment->unslid_address ||
+            segment->unslid_address > UINT64_MAX - segment->size ||
+            unslid_address + span >
+                segment->unslid_address + segment->size) {
+            continue;
+        }
+        mach_vm_address_t remote_address = 0;
+        if (!add_remote_slide(unslid_address, layout->slide,
+                              &remote_address)) {
+            return false;
+        }
+        if (remote_address_out != NULL) {
+            *remote_address_out = remote_address;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool find_unique_remote_executable_pattern(
+    task_t task, const struct remote_macho_layout *layout,
+    const uint8_t *pattern, size_t pattern_size,
+    mach_vm_address_t *match_out, uint32_t *match_count_out) {
+    if (!MACH_PORT_VALID(task) || layout == NULL || pattern == NULL ||
+        pattern_size == 0 || pattern_size > 64U || match_out == NULL ||
+        match_count_out == NULL) {
+        return false;
+    }
+    *match_out = 0;
+    *match_count_out = 0;
+    for (uint32_t segment_index = 0;
+         segment_index < layout->executable_segment_count;
+         ++segment_index) {
+        const struct remote_executable_segment *segment =
+            &layout->executable_segments[segment_index];
+        if (segment->size < pattern_size || segment->size > SIZE_MAX) {
+            continue;
+        }
+        size_t size = (size_t)segment->size;
+        uint8_t *bytes = malloc(size);
+        if (bytes == NULL ||
+            !read_remote_exact(task, segment->address, bytes, size)) {
+            free(bytes);
+            return false;
+        }
+        for (size_t offset = 0; offset + pattern_size <= size;
+             offset += sizeof(uint32_t)) {
+            if (memcmp(bytes + offset, pattern, pattern_size) != 0) {
+                continue;
+            }
+            if (offset + 20U > size || *match_count_out == UINT32_MAX) {
+                free(bytes);
+                return false;
+            }
+            ++*match_count_out;
+            *match_out = segment->address + offset;
+            if (*match_count_out > 1U) {
+                free(bytes);
+                return false;
+            }
+        }
+        free(bytes);
+    }
+    return *match_count_out == 1U && *match_out != 0;
+}
+
+static bool copy_remote_carrier_dyld_layout(
+    task_t task, const char *carrier_real_path,
+    struct remote_macho_layout *carrier_layout_out,
+    struct remote_macho_layout *dyld_layout_out,
+    mach_vm_address_t *mmap_hook_out,
+    mach_vm_address_t *fcntl_hook_out,
+    mach_vm_address_t *mmap_site_out,
+    mach_vm_address_t *fcntl_site_out,
+    uint32_t *mmap_match_count_out,
+    uint32_t *fcntl_match_count_out) {
+    if (!MACH_PORT_VALID(task) || carrier_real_path == NULL ||
+        carrier_layout_out == NULL || dyld_layout_out == NULL ||
+        mmap_hook_out == NULL || fcntl_hook_out == NULL ||
+        mmap_site_out == NULL || fcntl_site_out == NULL ||
+        mmap_match_count_out == NULL || fcntl_match_count_out == NULL) {
+        return false;
+    }
+    task_dyld_info_data_t task_dyld_info = {0};
+    mach_msg_type_number_t task_dyld_count = TASK_DYLD_INFO_COUNT;
+    kern_return_t task_dyld_result = task_info(
+        task, TASK_DYLD_INFO, (task_info_t)&task_dyld_info,
+        &task_dyld_count);
+    if (task_dyld_result != KERN_SUCCESS ||
+        task_dyld_count < TASK_DYLD_INFO_COUNT ||
+        task_dyld_info.all_image_info_addr == 0 ||
+        task_dyld_info.all_image_info_format !=
+            TASK_DYLD_ALL_IMAGE_INFO_64 ||
+        task_dyld_info.all_image_info_size <
+            sizeof(struct dyld_all_image_infos)) {
+        return false;
+    }
+    struct dyld_all_image_infos image_infos = {0};
+    if (!read_remote_exact(task, task_dyld_info.all_image_info_addr,
+                           &image_infos, sizeof(image_infos)) ||
+        !image_infos.libSystemInitialized || image_infos.infoArrayCount == 0 ||
+        image_infos.infoArrayCount > CODEX_REMOTE_IMAGE_LIMIT) {
+        return false;
+    }
+    mach_vm_address_t info_array = canonical_remote_address(
+        (uint64_t)image_infos.infoArray);
+    mach_vm_address_t dyld_header = canonical_remote_address(
+        (uint64_t)image_infos.dyldImageLoadAddress);
+    if (info_array == 0 || dyld_header == 0) {
+        return false;
+    }
+    size_t images_size = (size_t)image_infos.infoArrayCount *
+                         sizeof(struct dyld_image_info);
+    struct dyld_image_info *images = malloc(images_size);
+    if (images == NULL ||
+        !read_remote_exact(task, info_array, images, images_size)) {
+        free(images);
+        return false;
+    }
+    uint32_t carrier_matches = 0;
+    uint32_t carrier_index = UINT32_MAX;
+    mach_vm_address_t carrier_header = 0;
+    for (uint32_t index = 0; index < image_infos.infoArrayCount; ++index) {
+        mach_vm_address_t path_address = canonical_remote_address(
+            (uint64_t)images[index].imageFilePath);
+        if (!remote_string_equals(task, path_address,
+                                  carrier_real_path)) {
+            continue;
+        }
+        ++carrier_matches;
+        carrier_index = index;
+        carrier_header = canonical_remote_address(
+            (uint64_t)images[index].imageLoadAddress);
+    }
+    free(images);
+    bool layouts_exact =
+        carrier_matches == 1U && carrier_index == 0U &&
+        carrier_header != 0 &&
+        copy_remote_macho_layout(
+            task, carrier_header, MH_EXECUTE, kExpectedCarrierUUID, false,
+            carrier_layout_out) &&
+        copy_remote_macho_layout(
+            task, dyld_header, MH_DYLINKER, kExpectedDyldUUID, false,
+            dyld_layout_out) &&
+        remote_layout_contains_unslid_span(
+            carrier_layout_out, CODEX_CARRIER_MMAP_UNSLID,
+            sizeof(kExpectedCarrierMmapPrologue), mmap_hook_out) &&
+        remote_layout_contains_unslid_span(
+            carrier_layout_out, CODEX_CARRIER_FCNTL_UNSLID,
+            sizeof(kExpectedCarrierFcntlPrologue), fcntl_hook_out) &&
+        (*mmap_hook_out % sizeof(uint32_t)) == 0 &&
+        (*fcntl_hook_out % sizeof(uint32_t)) == 0;
+    uint8_t mmap_prologue[sizeof(kExpectedCarrierMmapPrologue)] = {0};
+    uint8_t fcntl_prologue[sizeof(kExpectedCarrierFcntlPrologue)] = {0};
+    layouts_exact =
+        layouts_exact &&
+        read_remote_exact(task, *mmap_hook_out, mmap_prologue,
+                          sizeof(mmap_prologue)) &&
+        memcmp(mmap_prologue, kExpectedCarrierMmapPrologue,
+               sizeof(mmap_prologue)) == 0 &&
+        read_remote_exact(task, *fcntl_hook_out, fcntl_prologue,
+                          sizeof(fcntl_prologue)) &&
+        memcmp(fcntl_prologue, kExpectedCarrierFcntlPrologue,
+               sizeof(fcntl_prologue)) == 0 &&
+        find_unique_remote_executable_pattern(
+            task, dyld_layout_out, kDyldMmapSyscallPattern,
+            sizeof(kDyldMmapSyscallPattern), mmap_site_out,
+            mmap_match_count_out) &&
+        find_unique_remote_executable_pattern(
+            task, dyld_layout_out, kDyldFcntlSyscallPattern,
+            sizeof(kDyldFcntlSyscallPattern), fcntl_site_out,
+            fcntl_match_count_out);
+    uint8_t mmap_site[sizeof(kExpectedDyldMmapSite)] = {0};
+    uint8_t fcntl_site[sizeof(kExpectedDyldFcntlSite)] = {0};
+    return layouts_exact &&
+           dyld_header <= UINT64_MAX - CODEX_DYLD_MMAP_SITE_OFFSET &&
+           dyld_header <= UINT64_MAX - CODEX_DYLD_FCNTL_SITE_OFFSET &&
+           *mmap_site_out == dyld_header + CODEX_DYLD_MMAP_SITE_OFFSET &&
+           *fcntl_site_out ==
+               dyld_header + CODEX_DYLD_FCNTL_SITE_OFFSET &&
+           *mmap_site_out != *fcntl_site_out &&
+           read_remote_exact(task, *mmap_site_out, mmap_site,
+                             sizeof(mmap_site)) &&
+           memcmp(mmap_site, kExpectedDyldMmapSite,
+                  sizeof(mmap_site)) == 0 &&
+           read_remote_exact(task, *fcntl_site_out, fcntl_site,
+                             sizeof(fcntl_site)) &&
+           memcmp(fcntl_site, kExpectedDyldFcntlSite,
+                  sizeof(fcntl_site)) == 0;
+}
+
+static uint32_t carrier_arm64_movk(unsigned int register_number,
+                                   uint16_t immediate,
+                                   unsigned int shift) {
+    return 0xf2800000U | ((shift / 16U) << 21U) |
+           ((uint32_t)immediate << 5U) | (register_number & 0x1fU);
+}
+
+static void make_carrier_branch_patch(
+    mach_vm_address_t target, uint32_t patch[5]) {
+    patch[0] = carrier_arm64_movk(
+        16U, (uint16_t)(target >> 0U), 0U);
+    patch[1] = carrier_arm64_movk(
+        16U, (uint16_t)(target >> 16U), 16U);
+    patch[2] = carrier_arm64_movk(
+        16U, (uint16_t)(target >> 32U), 32U);
+    patch[3] = carrier_arm64_movk(
+        16U, (uint16_t)(target >> 48U), 48U);
+    patch[4] = 0xd61f0200U; /* br x16 */
+}
+
+static bool patch_remote_dyld_site(
+    task_t task, mach_vm_address_t site,
+    const uint8_t expected_site[20], mach_vm_address_t hook,
+    struct remote_patch_result *result_out) {
+    if (!MACH_PORT_VALID(task) || site == 0 || hook == 0 ||
+        expected_site == NULL || result_out == NULL) {
+        return false;
+    }
+    memset(result_out, 0, sizeof(*result_out));
+    result_out->writable_result = KERN_INVALID_ARGUMENT;
+    result_out->write_result = KERN_INVALID_ARGUMENT;
+    result_out->flush_result = KERN_INVALID_ARGUMENT;
+    result_out->restore_result = KERN_INVALID_ARGUMENT;
+    result_out->readback_result = KERN_INVALID_ARGUMENT;
+    uint8_t original[20] = {0};
+    result_out->original_exact =
+        read_remote_exact(task, site, original, sizeof(original)) &&
+        memcmp(original, expected_site, sizeof(original)) == 0;
+    vm_size_t page_size = (vm_size_t)getpagesize();
+    if (!result_out->original_exact || page_size == 0 ||
+        page_size > 64U * 1024U ||
+        (page_size & (page_size - 1U)) != 0 ||
+        site > UINT64_MAX - sizeof(original)) {
+        return false;
+    }
+    mach_vm_address_t page =
+        site & ~((mach_vm_address_t)page_size - 1U);
+    mach_vm_address_t end =
+        (site + sizeof(original) + page_size - 1U) &
+        ~((mach_vm_address_t)page_size - 1U);
+    if (end <= page) {
+        return false;
+    }
+    mach_vm_size_t span = end - page;
+    uint32_t patch[5] = {0};
+    make_carrier_branch_patch(hook, patch);
+    result_out->writable_result = mach_vm_protect(
+        task, page, span, FALSE,
+        VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (result_out->writable_result != KERN_SUCCESS) {
+        return false;
+    }
+    result_out->write_result = mach_vm_write(
+        task, site, (vm_offset_t)(uintptr_t)patch,
+        (mach_msg_type_number_t)sizeof(patch));
+    if (result_out->write_result == KERN_SUCCESS) {
+        vm_machine_attribute_val_t cache_value = MATTR_VAL_CACHE_FLUSH;
+        result_out->flush_result = vm_machine_attribute(
+            task, (vm_address_t)page, (vm_size_t)span, MATTR_CACHE,
+            &cache_value);
+    }
+    result_out->restore_result = mach_vm_protect(
+        task, page, span, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    uint8_t readback[sizeof(patch)] = {0};
+    if (result_out->restore_result == KERN_SUCCESS) {
+        vm_size_t copied = 0;
+        result_out->readback_result = vm_read_overwrite(
+            task, (vm_address_t)site, (vm_size_t)sizeof(readback),
+            (vm_address_t)readback, &copied);
+        result_out->readback_size = copied;
+        result_out->readback_exact =
+            result_out->readback_result == KERN_SUCCESS &&
+            copied == sizeof(readback) &&
+            memcmp(readback, patch, sizeof(readback)) == 0;
+    }
+    return result_out->write_result == KERN_SUCCESS &&
+           result_out->flush_result == KERN_SUCCESS &&
+           result_out->restore_result == KERN_SUCCESS &&
+           result_out->readback_exact;
+}
+
 enum traced_child_wait_state {
     TRACED_CHILD_NO_EVENT,
     TRACED_CHILD_STOP_EVENT,
@@ -3740,6 +4350,433 @@ static bool candidate_pid_hold_is_exact(
         *flags_out = flags;
     }
     return exact;
+}
+
+static bool copy_thread_suspend_count(thread_act_t thread,
+                                      integer_t *count_out) {
+    if (!MACH_PORT_VALID(thread) || count_out == NULL) {
+        return false;
+    }
+    thread_basic_info_data_t information = {0};
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    kern_return_t result = thread_info(
+        thread, THREAD_BASIC_INFO, (thread_info_t)&information, &count);
+    if (result != KERN_SUCCESS || count < THREAD_BASIC_INFO_COUNT ||
+        information.suspend_count < 0) {
+        return false;
+    }
+    *count_out = information.suspend_count;
+    return true;
+}
+
+static bool copy_thread_identifier(thread_act_t thread,
+                                   uint64_t *identifier_out) {
+    if (!MACH_PORT_VALID(thread) || identifier_out == NULL) {
+        return false;
+    }
+    thread_identifier_info_data_t information = {0};
+    mach_msg_type_number_t count = THREAD_IDENTIFIER_INFO_COUNT;
+    kern_return_t result = thread_info(
+        thread, THREAD_IDENTIFIER_INFO, (thread_info_t)&information, &count);
+    if (result != KERN_SUCCESS || count != THREAD_IDENTIFIER_INFO_COUNT ||
+        information.thread_id == 0) {
+        return false;
+    }
+    *identifier_out = information.thread_id;
+    return true;
+}
+
+static void dispose_thread_snapshot(thread_act_array_t threads,
+                                    mach_msg_type_number_t thread_count) {
+    if (threads == NULL) {
+        return;
+    }
+    for (mach_msg_type_number_t index = 0; index < thread_count; ++index) {
+        if (MACH_PORT_VALID(threads[index])) {
+            (void)mach_port_deallocate(mach_task_self(), threads[index]);
+        }
+    }
+    (void)vm_deallocate(
+        mach_task_self(), (vm_address_t)threads,
+        (vm_size_t)(sizeof(*threads) * thread_count));
+}
+
+static bool candidate_task_generation_is_exact(
+    const struct process_snapshot *candidate, task_t task,
+    const struct codex_proc_uniqidentifierinfo *generation) {
+    struct codex_proc_uniqidentifierinfo current = {0};
+    return candidate != NULL && generation != NULL &&
+           task_port_audit_matches_candidate(task, candidate, NULL, NULL) &&
+           copy_stable_process_generation(candidate->pid, &current) &&
+           process_generation_equal(&current, generation) &&
+           process_generation_equal(generation, &candidate->unique);
+}
+
+static void dispose_candidate_thread_hold(
+    struct candidate_thread_hold *hold) {
+    if (hold == NULL) {
+        return;
+    }
+    if (hold->threads != NULL) {
+        for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+             ++index) {
+            if (MACH_PORT_VALID(hold->threads[index])) {
+                (void)mach_port_deallocate(mach_task_self(),
+                                           hold->threads[index]);
+            }
+        }
+    }
+    free(hold->threads);
+    free(hold->thread_identifiers);
+    free(hold->baseline_suspend_counts);
+    free(hold->owned);
+    memset(hold, 0, sizeof(*hold));
+    hold->task = MACH_PORT_NULL;
+}
+
+static bool candidate_thread_hold_counts_are_exact(
+    const struct candidate_thread_hold *hold, bool held) {
+    if (hold == NULL || hold->threads == NULL ||
+        hold->thread_identifiers == NULL ||
+        hold->baseline_suspend_counts == NULL || hold->owned == NULL ||
+        hold->thread_count == 0) {
+        return false;
+    }
+    for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+         ++index) {
+        integer_t count = 0;
+        uint64_t identifier = 0;
+        integer_t expected = hold->baseline_suspend_counts[index] +
+                             (held && hold->owned[index] ? 1 : 0);
+        if (!copy_thread_identifier(hold->threads[index], &identifier) ||
+            identifier != hold->thread_identifiers[index] ||
+            !copy_thread_suspend_count(hold->threads[index], &count) ||
+            count != expected || (held && !hold->owned[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The gated injector deliberately borrows one controller-held thread for a
+   bounded remote call: it consumes exactly our one suspend, performs the
+   call, then restores the original register state and suspend count.  While
+   that call is active, accept either the fully-held state or exactly one
+   owned thread at its recorded baseline.  The completion gate still requires
+   candidate_thread_hold_counts_are_exact(..., true) before success. */
+static bool candidate_thread_hold_counts_allow_one_borrow(
+    const struct candidate_thread_hold *hold) {
+    if (hold == NULL || hold->threads == NULL ||
+        hold->thread_identifiers == NULL ||
+        hold->baseline_suspend_counts == NULL || hold->owned == NULL ||
+        hold->thread_count == 0) {
+        return false;
+    }
+    mach_msg_type_number_t borrowed = 0;
+    for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+         ++index) {
+        integer_t count = 0;
+        uint64_t identifier = 0;
+        if (!hold->owned[index] ||
+            !copy_thread_identifier(hold->threads[index], &identifier) ||
+            identifier != hold->thread_identifiers[index] ||
+            !copy_thread_suspend_count(hold->threads[index], &count)) {
+            return false;
+        }
+        integer_t baseline = hold->baseline_suspend_counts[index];
+        if (count == baseline + 1) {
+            continue;
+        }
+        /* The fixed loader only selects an absolute suspend count of one,
+           which corresponds to a zero baseline plus our single hold. */
+        if (baseline == 0 && count == baseline && borrowed == 0) {
+            borrowed = 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool candidate_thread_hold_contains_identifier(
+    const struct candidate_thread_hold *hold, uint64_t identifier) {
+    if (hold == NULL || hold->thread_identifiers == NULL || identifier == 0) {
+        return false;
+    }
+    for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+         ++index) {
+        if (hold->thread_identifiers[index] == identifier) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool fail_closed_candidate_thread_hold(
+    const struct process_snapshot *candidate,
+    struct candidate_thread_hold *hold, const char *phase) {
+    if (candidate == NULL || hold == NULL) {
+        return false;
+    }
+    mach_msg_type_number_t owned_before = 0;
+    for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+         ++index) {
+        owned_before += hold->owned != NULL && hold->owned[index] ? 1U : 0U;
+    }
+    kern_return_t terminate_result =
+        MACH_PORT_VALID(hold->task) ? task_terminate(hold->task)
+                                   : KERN_INVALID_TASK;
+    bool resolved = terminate_result == KERN_SUCCESS;
+    bool generation_exact = candidate_task_generation_is_exact(
+        candidate, hold->task, &hold->generation);
+    mach_msg_type_number_t balanced = 0;
+    if (!resolved && generation_exact && hold->threads != NULL &&
+        hold->owned != NULL) {
+        for (mach_msg_type_number_t index = 0; index < hold->thread_count;
+             ++index) {
+            if (!hold->owned[index]) {
+                continue;
+            }
+            if (thread_resume(hold->threads[index]) == KERN_SUCCESS) {
+                hold->owned[index] = false;
+                ++balanced;
+            }
+        }
+        resolved = balanced == owned_before;
+    }
+    if (!resolved && !candidate_task_generation_is_exact(
+                         candidate, hold->task, &hold->generation)) {
+        resolved = true;
+    }
+    (void)journal_event(
+        "event=gated-pair-thread-hold-cleanup phase=%s target=%d "
+        "threads=%u ownedBefore=%u terminate=%d generationExact=%d "
+        "balanced=%u resolved=%d",
+        phase != NULL ? phase : "unknown", candidate->pid,
+        hold->thread_count, owned_before, terminate_result, generation_exact,
+        balanced, resolved);
+    dispose_candidate_thread_hold(hold);
+    return resolved;
+}
+
+static bool acquire_candidate_thread_hold(
+    const struct process_snapshot *candidate, task_t task,
+    struct candidate_thread_hold *hold, uint32_t *flags_out) {
+    if (candidate == NULL || candidate->pid <= 1 || hold == NULL ||
+        hold->threads != NULL || hold->thread_identifiers != NULL ||
+        hold->baseline_suspend_counts != NULL || hold->owned != NULL ||
+        hold->thread_count != 0 || MACH_PORT_VALID(hold->task) ||
+        !MACH_PORT_VALID(task)) {
+        return false;
+    }
+    struct codex_proc_uniqidentifierinfo generation = {0};
+    integer_t task_suspend_before = -1;
+    uint32_t flags = 0;
+    bool bound = task_port_audit_matches_candidate(
+                     task, candidate, NULL, NULL) &&
+                 copy_stable_process_generation(candidate->pid,
+                                                &generation) &&
+                 process_generation_equal(&generation,
+                                          &candidate->unique) &&
+                 copy_task_suspend_count(task, &task_suspend_before) &&
+                 task_suspend_before == 0 &&
+                 candidate_traced_snapshot_still_exact_for_mode(
+                     candidate, NULL, true, &flags) &&
+                 (flags & CODEX_CS_DEBUGGED) != 0 &&
+                 (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    thread_act_array_t threads =
+        bound ? calloc(CODEX_REMOTE_THREAD_LIMIT, sizeof(*threads)) : NULL;
+    uint64_t *identifiers =
+        bound ? calloc(CODEX_REMOTE_THREAD_LIMIT, sizeof(*identifiers))
+              : NULL;
+    integer_t *baselines =
+        bound ? calloc(CODEX_REMOTE_THREAD_LIMIT, sizeof(*baselines)) : NULL;
+    bool *owned =
+        bound ? calloc(CODEX_REMOTE_THREAD_LIMIT, sizeof(*owned)) : NULL;
+    bool allocated = threads != NULL && identifiers != NULL &&
+                     baselines != NULL && owned != NULL;
+
+    hold->task = task;
+    hold->generation = generation;
+    hold->threads = threads;
+    hold->thread_identifiers = identifiers;
+    hold->baseline_suspend_counts = baselines;
+    hold->owned = owned;
+    hold->thread_count = 0;
+
+    bool exact = bound && allocated;
+    kern_return_t threads_result = KERN_INVALID_TASK;
+    mach_msg_type_number_t observed_max = 0;
+    mach_msg_type_number_t newly_suspended_total = 0;
+    uint32_t completed_passes = 0;
+    uint32_t stable_passes = 0;
+    integer_t task_suspend_after = -1;
+    for (uint32_t pass = 1;
+         exact && pass <= CODEX_REMOTE_THREAD_MAX_PASSES &&
+         stable_passes < CODEX_REMOTE_THREAD_STABLE_PASSES;
+         ++pass) {
+        completed_passes = pass;
+        uint32_t pass_flags = 0;
+        exact = candidate_task_generation_is_exact(
+                    candidate, task, &generation) &&
+                copy_task_suspend_count(task, &task_suspend_after) &&
+                task_suspend_after == 0 &&
+                candidate_traced_snapshot_still_exact_for_mode(
+                    candidate, NULL, true, &pass_flags) &&
+                (pass_flags & CODEX_CS_DEBUGGED) != 0 &&
+                (pass_flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+        if (!exact) {
+            break;
+        }
+        flags = pass_flags;
+
+        thread_act_array_t snapshot = NULL;
+        mach_msg_type_number_t snapshot_count = 0;
+        threads_result = task_threads(task, &snapshot, &snapshot_count);
+        bool snapshot_valid =
+            threads_result == KERN_SUCCESS && snapshot != NULL &&
+            snapshot_count > 0 &&
+            snapshot_count <= CODEX_REMOTE_THREAD_LIMIT;
+        if (snapshot_count > observed_max) {
+            observed_max = snapshot_count;
+        }
+        mach_msg_type_number_t newly_suspended = 0;
+        exact = snapshot_valid;
+        for (mach_msg_type_number_t index = 0;
+             index < snapshot_count; ++index) {
+            if (!exact) {
+                continue;
+            }
+            thread_act_t thread = snapshot[index];
+            uint64_t identifier = 0;
+            if (!copy_thread_identifier(thread, &identifier)) {
+                exact = false;
+                continue;
+            }
+            if (candidate_thread_hold_contains_identifier(hold,
+                                                          identifier)) {
+                continue;
+            }
+            if (hold->thread_count >= CODEX_REMOTE_THREAD_LIMIT) {
+                exact = false;
+                continue;
+            }
+
+            integer_t baseline = 0;
+            integer_t after = 0;
+            if (!copy_thread_suspend_count(thread, &baseline) ||
+                baseline < 0 || baseline >= INT_MAX) {
+                exact = false;
+                continue;
+            }
+            kern_return_t suspend_result = thread_suspend(thread);
+            if (suspend_result != KERN_SUCCESS) {
+                exact = false;
+                continue;
+            }
+
+            mach_msg_type_number_t retained_index = hold->thread_count++;
+            hold->threads[retained_index] = thread;
+            hold->thread_identifiers[retained_index] = identifier;
+            hold->baseline_suspend_counts[retained_index] = baseline;
+            hold->owned[retained_index] = true;
+            snapshot[index] = MACH_PORT_NULL;
+            ++newly_suspended;
+            ++newly_suspended_total;
+            exact = copy_thread_suspend_count(thread, &after) &&
+                    after == baseline + 1;
+        }
+        dispose_thread_snapshot(snapshot, snapshot_count);
+        exact = exact &&
+                candidate_task_generation_is_exact(
+                    candidate, task, &generation) &&
+                copy_task_suspend_count(task, &task_suspend_after) &&
+                task_suspend_after == 0 &&
+                candidate_thread_hold_counts_are_exact(hold, true);
+        if (exact) {
+            stable_passes = newly_suspended == 0 ? stable_passes + 1U : 0U;
+        }
+    }
+    exact = exact && hold->thread_count > 0 &&
+            stable_passes >= CODEX_REMOTE_THREAD_STABLE_PASSES &&
+            candidate_task_generation_is_exact(candidate, task, &generation) &&
+            copy_task_suspend_count(task, &task_suspend_after) &&
+            task_suspend_after == 0 &&
+            candidate_thread_hold_counts_are_exact(hold, true);
+    (void)journal_event(
+        "event=gated-pair-thread-hold target=%d taskBound=%d taskThreads=%d "
+        "threads=%u observedMax=%u allocated=%d suspended=%u passes=%u "
+        "stablePasses=%u taskSuspendBefore=%d taskSuspendAfter=%d "
+        "exact=%d flags=0x%08x",
+        candidate->pid, bound, threads_result, hold->thread_count,
+        observed_max, allocated, newly_suspended_total, completed_passes,
+        stable_passes, task_suspend_before, task_suspend_after, exact, flags);
+    if (!exact) {
+        (void)fail_closed_candidate_thread_hold(candidate, hold,
+                                                "acquire-rejected");
+        return false;
+    }
+    if (flags_out != NULL) {
+        *flags_out = flags;
+    }
+    return true;
+}
+
+static bool release_candidate_thread_hold(
+    const struct process_snapshot *candidate,
+    struct candidate_thread_hold *hold, uint32_t *flags_out) {
+    if (candidate == NULL || hold == NULL) {
+        return false;
+    }
+    integer_t task_suspend_before = -1;
+    bool exact_before = candidate_task_generation_is_exact(
+                            candidate, hold->task, &hold->generation) &&
+                        copy_task_suspend_count(hold->task,
+                                                &task_suspend_before) &&
+                        task_suspend_before == 0 &&
+                        candidate_thread_hold_counts_are_exact(hold, true);
+    mach_msg_type_number_t resumed = 0;
+    bool balanced = exact_before;
+    for (mach_msg_type_number_t index = 0;
+         balanced && index < hold->thread_count; ++index) {
+        kern_return_t resume_result = thread_resume(hold->threads[index]);
+        if (resume_result == KERN_SUCCESS) {
+            hold->owned[index] = false;
+            ++resumed;
+        }
+        integer_t after = 0;
+        balanced = resume_result == KERN_SUCCESS &&
+                   copy_thread_suspend_count(hold->threads[index], &after) &&
+                   after == hold->baseline_suspend_counts[index];
+    }
+    integer_t task_suspend_after = -1;
+    uint32_t flags = 0;
+    bool exact_after =
+        balanced && resumed == hold->thread_count &&
+        candidate_task_generation_is_exact(candidate, hold->task,
+                                           &hold->generation) &&
+        copy_task_suspend_count(hold->task, &task_suspend_after) &&
+        task_suspend_after == 0 &&
+        candidate_snapshot_still_unique_for_mode(
+            candidate, NULL, &flags) &&
+        (flags & CODEX_CS_DEBUGGED) != 0 &&
+        (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    (void)journal_event(
+        "event=gated-pair-thread-release target=%d threads=%u resumed=%u "
+        "exactBefore=%d balanced=%d taskSuspendBefore=%d "
+        "taskSuspendAfter=%d exactAfter=%d flags=0x%08x",
+        candidate->pid, hold->thread_count, resumed, exact_before, balanced,
+        task_suspend_before, task_suspend_after, exact_after, flags);
+    if (!exact_after) {
+        (void)fail_closed_candidate_thread_hold(candidate, hold,
+                                                "release-rejected");
+        return false;
+    }
+    dispose_candidate_thread_hold(hold);
+    if (flags_out != NULL) {
+        *flags_out = flags;
+    }
+    return true;
 }
 
 static bool balance_owned_pid_hold(
@@ -4034,6 +5071,446 @@ static bool mature_and_restop_traced_candidate(
     return result;
 }
 
+static bool copy_environment_with_candidate_pid(
+    pid_t candidate_pid, char ***environment_out,
+    char **assignment_out) {
+    static const char prefix[] = "CODEX_CANDIDATE_PID=";
+    if (candidate_pid <= 1 || environment_out == NULL ||
+        assignment_out == NULL) {
+        return false;
+    }
+    *environment_out = NULL;
+    *assignment_out = NULL;
+
+    size_t count = 0;
+    while (environ != NULL && environ[count] != NULL) {
+        if (count >= 4096U) {
+            return false;
+        }
+        ++count;
+    }
+    char **environment = calloc(count + 2U, sizeof(*environment));
+    char *assignment = calloc(1U, sizeof(prefix) + 23U);
+    if (environment == NULL || assignment == NULL) {
+        free(environment);
+        free(assignment);
+        return false;
+    }
+    int length = snprintf(assignment, sizeof(prefix) + 23U, "%s%d",
+                          prefix, candidate_pid);
+    if (length <= 0 || (size_t)length >= sizeof(prefix) + 23U) {
+        free(environment);
+        free(assignment);
+        return false;
+    }
+
+    size_t written = 0;
+    for (size_t index = 0; index < count; ++index) {
+        if (strncmp(environ[index], prefix, sizeof(prefix) - 1U) == 0) {
+            continue;
+        }
+        environment[written++] = environ[index];
+    }
+    environment[written++] = assignment;
+    environment[written] = NULL;
+    *environment_out = environment;
+    *assignment_out = assignment;
+    return true;
+}
+
+static bool copy_environment_without_candidate_pid(
+    char ***environment_out) {
+    static const char prefix[] = "CODEX_CANDIDATE_PID=";
+    if (environment_out == NULL) {
+        return false;
+    }
+    *environment_out = NULL;
+    size_t count = 0;
+    while (environ != NULL && environ[count] != NULL) {
+        if (count >= 4096U) {
+            return false;
+        }
+        ++count;
+    }
+    char **environment = calloc(count + 1U, sizeof(*environment));
+    if (environment == NULL) {
+        return false;
+    }
+    size_t written = 0;
+    for (size_t index = 0; index < count; ++index) {
+        if (strncmp(environ[index], prefix, sizeof(prefix) - 1U) == 0) {
+            continue;
+        }
+        environment[written++] = environ[index];
+    }
+    environment[written] = NULL;
+    *environment_out = environment;
+    return true;
+}
+
+static bool read_exact_owned_child_snapshot(
+    pid_t pid, const char *expected_real_path, bool require_stopped,
+    struct process_snapshot *snapshot_out, uint32_t *flags_out) {
+    if (pid <= 1 || expected_real_path == NULL ||
+        expected_real_path[0] != '/' || snapshot_out == NULL ||
+        getpid() <= 1 || geteuid() != 0) {
+        return false;
+    }
+    struct process_snapshot first = {.pid = pid};
+    struct codex_proc_uniqidentifierinfo second_unique = {0};
+    struct codex_proc_uniqidentifierinfo parent_unique = {0};
+    char second_path[CODEX_PATH_SIZE] = {0};
+    uint32_t flags = 0;
+    bool exact =
+        copy_process_path(pid, first.path) &&
+        strcmp(first.path, expected_real_path) == 0 &&
+        copy_bsd_info(pid, &first.bsd) && first.bsd.pbi_uid == 0 &&
+        first.bsd.pbi_ppid == (uint32_t)getpid() &&
+        first.bsd.pbi_pgid == (uint32_t)pid && getpgid(pid) == pid &&
+        (!require_stopped ||
+         first.bsd.pbi_status == CODEX_PROC_STATUS_STOPPED) &&
+        copy_unique_info(pid, &first.unique) &&
+        copy_stable_process_generation(getpid(), &parent_unique) &&
+        first.unique.parent_unique_id == parent_unique.unique_id &&
+        csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+        (flags & CODEX_CS_VALID) != 0 &&
+        copy_process_path(pid, second_path) &&
+        strcmp(first.path, second_path) == 0 &&
+        copy_unique_info(pid, &second_unique) &&
+        unique_identity_equal(&first.unique, &second_unique);
+    if (!exact) {
+        return false;
+    }
+    first.cs_flags = flags;
+    *snapshot_out = first;
+    if (flags_out != NULL) {
+        *flags_out = flags;
+    }
+    return true;
+}
+
+static bool exact_owned_child_still_bound(
+    const struct process_snapshot *expected, const char *expected_real_path,
+    bool require_stopped, uint32_t *flags_out) {
+    if (expected == NULL || expected->pid <= 1) {
+        return false;
+    }
+    struct process_snapshot current = {0};
+    uint32_t flags = 0;
+    bool exact = read_exact_owned_child_snapshot(
+                     expected->pid, expected_real_path, require_stopped,
+                     &current, &flags) &&
+                 current.bsd.pbi_uid == expected->bsd.pbi_uid &&
+                 current.bsd.pbi_ppid == expected->bsd.pbi_ppid &&
+                 current.bsd.pbi_pgid == expected->bsd.pbi_pgid &&
+                 strcmp(current.path, expected->path) == 0 &&
+                 unique_identity_equal(&current.unique, &expected->unique);
+    if (exact && flags_out != NULL) {
+        *flags_out = flags;
+    }
+    return exact;
+}
+
+static bool carrier_debug_policy_still_exact(
+    const struct process_snapshot *carrier, const char *carrier_real_path,
+    task_t carrier_task, uint32_t *flags_out) {
+    uint32_t flags = 0;
+    bool exact = exact_owned_child_still_bound(
+                     carrier, carrier_real_path, false, &flags) &&
+                 task_port_audit_matches_generation(
+                     carrier_task, carrier->pid,
+                     carrier->unique.pid_version, NULL, NULL) &&
+                 (flags & (CODEX_CS_VALID | CODEX_CS_DEBUGGED)) ==
+                     (CODEX_CS_VALID | CODEX_CS_DEBUGGED) &&
+                 (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    if (exact && flags_out != NULL) {
+        *flags_out = flags;
+    }
+    return exact;
+}
+
+static bool install_remote_carrier_dyld_bypass(
+    const struct process_snapshot *carrier, const char *carrier_real_path,
+    task_t carrier_task) {
+    if (carrier == NULL || carrier->pid <= 1 ||
+        carrier_real_path == NULL || !MACH_PORT_VALID(carrier_task) ||
+        !carrier_debug_policy_still_exact(
+            carrier, carrier_real_path, carrier_task, NULL)) {
+        return false;
+    }
+    errno = 0;
+    int stop_result = kill(carrier->pid, SIGSTOP);
+    int stop_error = stop_result == 0 ? 0 : errno;
+    int stop_status = 0;
+    bool stop_exact =
+        stop_result == 0 &&
+        wait_for_owned_stop(carrier->pid, CODEX_TRACE_TIMEOUT_MSEC,
+                            &stop_status) &&
+        WIFSTOPPED(stop_status) && WSTOPSIG(stop_status) == SIGSTOP &&
+        exact_owned_child_still_bound(
+            carrier, carrier_real_path, true, NULL) &&
+        carrier_debug_policy_still_exact(
+            carrier, carrier_real_path, carrier_task, NULL) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier->pid, carrier->unique.pid_version, NULL,
+            NULL);
+
+    struct remote_macho_layout carrier_layout = {0};
+    struct remote_macho_layout dyld_layout = {0};
+    mach_vm_address_t mmap_hook = 0;
+    mach_vm_address_t fcntl_hook = 0;
+    mach_vm_address_t mmap_site = 0;
+    mach_vm_address_t fcntl_site = 0;
+    uint32_t mmap_matches = 0;
+    uint32_t fcntl_matches = 0;
+    bool layout_exact =
+        stop_exact &&
+        copy_remote_carrier_dyld_layout(
+            carrier_task, carrier_real_path, &carrier_layout, &dyld_layout,
+            &mmap_hook, &fcntl_hook, &mmap_site, &fcntl_site,
+            &mmap_matches, &fcntl_matches);
+    struct remote_patch_result fcntl_patch = {0};
+    struct remote_patch_result mmap_patch = {0};
+    bool fcntl_installed =
+        layout_exact &&
+        patch_remote_dyld_site(
+            carrier_task, fcntl_site, kExpectedDyldFcntlSite, fcntl_hook,
+            &fcntl_patch);
+    bool stopped_after_fcntl =
+        fcntl_installed &&
+        exact_owned_child_still_bound(
+            carrier, carrier_real_path, true, NULL) &&
+        carrier_debug_policy_still_exact(
+            carrier, carrier_real_path, carrier_task, NULL) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier->pid, carrier->unique.pid_version, NULL,
+            NULL);
+    bool mmap_installed =
+        stopped_after_fcntl &&
+        patch_remote_dyld_site(
+            carrier_task, mmap_site, kExpectedDyldMmapSite, mmap_hook,
+            &mmap_patch);
+    bool stopped_after_patches =
+        mmap_installed &&
+        exact_owned_child_still_bound(
+            carrier, carrier_real_path, true, NULL) &&
+        carrier_debug_policy_still_exact(
+            carrier, carrier_real_path, carrier_task, NULL) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier->pid, carrier->unique.pid_version, NULL,
+            NULL);
+    errno = 0;
+    int resume_result =
+        stopped_after_patches ? kill(carrier->pid, SIGCONT) : -1;
+    int resume_error = resume_result == 0 ? 0 : errno;
+    bool resumed_exact = false;
+    uint64_t resume_deadline = monotonic_msec() + 500U;
+    while (resume_result == 0 && monotonic_msec() < resume_deadline) {
+        struct process_snapshot resumed = {0};
+        if (read_exact_owned_child_snapshot(
+                carrier->pid, carrier_real_path, false, &resumed, NULL) &&
+            resumed.bsd.pbi_status != CODEX_PROC_STATUS_STOPPED &&
+            unique_identity_equal(&resumed.unique, &carrier->unique) &&
+            carrier_debug_policy_still_exact(
+                carrier, carrier_real_path, carrier_task, NULL)) {
+            resumed_exact = true;
+            break;
+        }
+        usleep(2U * 1000U);
+    }
+    bool installed = stopped_after_patches && resume_result == 0 &&
+                     resumed_exact;
+    kern_return_t terminate_result = KERN_SUCCESS;
+    if (!installed) {
+        terminate_result = task_terminate(carrier_task);
+    }
+    (void)journal_event(
+        "event=carrier-dyld-bypass carrierPid=%d stop=%d stopErrno=%d "
+        "stopStatus=0x%x stopExact=%d layoutExact=%d "
+        "main=0x%llx mainSlide=0x%llx dyld=0x%llx "
+        "dyldSlide=0x%llx mmapMatches=%u mmapSite=0x%llx "
+        "mmapHook=0x%llx fcntlMatches=%u fcntlSite=0x%llx "
+        "fcntlHook=0x%llx fcntlOriginal=%d fcntlWriteProtect=%d "
+        "fcntlWrite=%d fcntlFlush=%d fcntlRestore=%d "
+        "fcntlRead=%d fcntlReadSize=%llu fcntlReadExact=%d "
+        "stoppedAfterFcntl=%d mmapOriginal=%d mmapWriteProtect=%d "
+        "mmapWrite=%d mmapFlush=%d mmapRestore=%d mmapRead=%d "
+        "mmapReadSize=%llu mmapReadExact=%d stoppedAfterPatches=%d "
+        "resume=%d resumeErrno=%d resumedExact=%d installed=%d "
+        "terminate=%d",
+        carrier->pid, stop_result, stop_error, stop_status, stop_exact,
+        layout_exact,
+        (unsigned long long)carrier_layout.header_address,
+        (unsigned long long)(uint64_t)carrier_layout.slide,
+        (unsigned long long)dyld_layout.header_address,
+        (unsigned long long)(uint64_t)dyld_layout.slide, mmap_matches,
+        (unsigned long long)mmap_site, (unsigned long long)mmap_hook,
+        fcntl_matches, (unsigned long long)fcntl_site,
+        (unsigned long long)fcntl_hook, fcntl_patch.original_exact,
+        fcntl_patch.writable_result, fcntl_patch.write_result,
+        fcntl_patch.flush_result, fcntl_patch.restore_result,
+        fcntl_patch.readback_result,
+        (unsigned long long)fcntl_patch.readback_size,
+        fcntl_patch.readback_exact, stopped_after_fcntl,
+        mmap_patch.original_exact, mmap_patch.writable_result,
+        mmap_patch.write_result, mmap_patch.flush_result,
+        mmap_patch.restore_result, mmap_patch.readback_result,
+        (unsigned long long)mmap_patch.readback_size,
+        mmap_patch.readback_exact, stopped_after_patches, resume_result,
+        resume_error, resumed_exact, installed, terminate_result);
+    return installed;
+}
+
+static bool soften_and_resume_carrier(
+    const struct process_snapshot *carrier, const char *carrier_real_path,
+    task_t carrier_task, uint32_t *flags_out) {
+    if (carrier == NULL || carrier->pid <= 1 ||
+        !MACH_PORT_VALID(carrier_task) ||
+        !exact_owned_child_still_bound(carrier, carrier_real_path, true,
+                                       NULL)) {
+        return false;
+    }
+    errno = 0;
+    int attach_result = ptrace(PT_ATTACHEXC, carrier->pid, NULL, 0);
+    int attach_error = attach_result == 0 ? 0 : errno;
+    int attach_status = 0;
+    bool attach_stopped =
+        attach_result == 0 &&
+        wait_for_owned_stop(carrier->pid, CODEX_TRACE_TIMEOUT_MSEC,
+                            &attach_status);
+    uint32_t attached_flags = 0;
+    bool attached_exact =
+        attach_stopped &&
+        exact_owned_child_still_bound(carrier, carrier_real_path, true,
+                                      &attached_flags) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier->pid, carrier->unique.pid_version, NULL,
+            NULL) &&
+        (attached_flags & (CODEX_CS_VALID | CODEX_CS_DEBUGGED)) ==
+            (CODEX_CS_VALID | CODEX_CS_DEBUGGED) &&
+        (attached_flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    errno = 0;
+    int detach_result =
+        attached_exact ? ptrace(PT_DETACH, carrier->pid, NULL, 0) : -1;
+    int detach_error = detach_result == 0 ? 0 : errno;
+    errno = 0;
+    int resume_result =
+        detach_result == 0 ? kill(carrier->pid, SIGCONT) : -1;
+    int resume_error = resume_result == 0 ? 0 : errno;
+    uint32_t resumed_flags = 0;
+    bool resumed_exact =
+        resume_result == 0 &&
+        carrier_debug_policy_still_exact(
+            carrier, carrier_real_path, carrier_task, &resumed_flags);
+    if (attach_result == 0 && detach_result != 0) {
+        (void)ptrace(PT_KILL, carrier->pid, NULL, 0);
+    }
+    (void)journal_event(
+        "event=carrier-soften carrierPid=%d attach=%d attachErrno=%d "
+        "attachStopped=%d attachStatus=0x%x attachedExact=%d "
+        "attachedFlags=0x%08x detach=%d detachErrno=%d resume=%d "
+        "resumeErrno=%d resumedExact=%d resumedFlags=0x%08x",
+        carrier->pid, attach_result, attach_error, attach_stopped,
+        attach_status, attached_exact, attached_flags, detach_result,
+        detach_error, resume_result, resume_error, resumed_exact,
+        resumed_flags);
+    if (resumed_exact && flags_out != NULL) {
+        *flags_out = resumed_flags;
+    }
+    return resumed_exact;
+}
+
+static bool wait_for_carrier_runtime(
+    const struct process_snapshot *carrier, const char *carrier_real_path,
+    task_t carrier_task, struct remote_dyld_maturity *maturity_out) {
+    struct remote_dyld_maturity maturity = {0};
+    bool ready = false;
+    uint64_t deadline =
+        monotonic_msec() + CODEX_CARRIER_RUNTIME_TIMEOUT_MSEC;
+    do {
+        if (!carrier_debug_policy_still_exact(
+                carrier, carrier_real_path, carrier_task, NULL)) {
+            break;
+        }
+        if (copy_remote_dyld_maturity(carrier_task, &maturity, false) &&
+            remote_dyld_maturity_complete(&maturity)) {
+            ready = true;
+            break;
+        }
+        usleep(2U * 1000U);
+    } while (monotonic_msec() < deadline && !gStopRequested &&
+             !takeover_requested());
+    (void)journal_event(
+        "event=carrier-runtime carrierPid=%d ready=%d dyld=0x%llx "
+        "array=0x%llx version=%u count=%u initialized=%d",
+        carrier != NULL ? carrier->pid : -1, ready,
+        (unsigned long long)maturity.all_image_info_address,
+        (unsigned long long)maturity.info_array_address, maturity.version,
+        maturity.image_count, maturity.lib_system_initialized);
+    if (ready && maturity_out != NULL) {
+        *maturity_out = maturity;
+    }
+    return ready;
+}
+
+static bool process_group_absent(pid_t group) {
+    if (group <= 1) {
+        return false;
+    }
+    errno = 0;
+    int result = kill(-group, 0);
+    return result != 0 && errno == ESRCH;
+}
+
+static bool terminate_reap_and_verify_process_group(
+    pid_t leader, bool *leader_reaped_io, int *leader_status_io) {
+    if (leader <= 1 || leader_reaped_io == NULL ||
+        leader_status_io == NULL) {
+        return false;
+    }
+    bool reaped = *leader_reaped_io;
+    int status = *leader_status_io;
+    if (!process_group_absent(leader)) {
+        (void)kill(-leader, SIGTERM);
+    }
+    uint64_t deadline = monotonic_msec() + CODEX_HELPER_TERMINATE_MSEC;
+    do {
+        if (!reaped) {
+            pid_t waited = waitpid(leader, &status, WNOHANG);
+            if (waited == leader) {
+                reaped = true;
+            } else if (waited < 0 && errno != EINTR) {
+                break;
+            }
+        }
+        if (reaped && process_group_absent(leader)) {
+            break;
+        }
+        usleep(10U * 1000U);
+    } while (monotonic_msec() < deadline);
+    if (!process_group_absent(leader)) {
+        (void)kill(-leader, SIGKILL);
+    }
+    deadline = monotonic_msec() + CODEX_HELPER_KILL_MSEC;
+    do {
+        if (!reaped) {
+            pid_t waited = waitpid(leader, &status, WNOHANG);
+            if (waited == leader) {
+                reaped = true;
+            } else if (waited < 0 && errno != EINTR) {
+                break;
+            }
+        }
+        if (reaped && process_group_absent(leader)) {
+            break;
+        }
+        usleep(10U * 1000U);
+    } while (monotonic_msec() < deadline);
+    *leader_reaped_io = reaped;
+    *leader_status_io = status;
+    return reaped && process_group_absent(leader);
+}
+
 static int run_candidate_loader_pair_gated(
     const struct process_snapshot *candidate, uint32_t *candidate_flags_io,
     bool *candidate_attached_io, struct candidate_pid_hold *candidate_hold) {
@@ -4048,6 +5525,9 @@ static int run_candidate_loader_pair_gated(
     }
 
     task_t target_task = candidate_hold->task;
+    struct candidate_thread_hold thread_hold = {
+        .task = MACH_PORT_NULL,
+    };
     integer_t suspend_before = candidate_hold->baseline_suspend_count;
     struct codex_proc_uniqidentifierinfo held_generation =
         candidate_hold->generation;
@@ -4079,13 +5559,11 @@ static int run_candidate_loader_pair_gated(
         candidate_hold->owned && task_audit_exact &&
         copy_task_suspend_count(target_task, &suspend_after);
     bool fixed_artifacts_exact =
-        secure_existing_regular_file(kWorkerPath, 0, true, NULL, NULL) &&
-        secure_existing_regular_file(kLoaderCandidatePath, 0, true, NULL,
-                                     NULL) &&
-        secure_existing_regular_file(kDyldAdmissionHookPath, 0, false, NULL,
-                                     NULL) &&
-        secure_existing_regular_file(kFreshCanaryPath, 0, false, NULL,
-                                     NULL);
+        carrier_lane_artifacts_exact() &&
+        file_sha256_exact(kDyldAdmissionHookPath, kExpectedHookSHA256, false,
+                          0, NULL, NULL) &&
+        file_sha256_exact(kFreshCanaryPath, kExpectedCanarySHA256, false, 0,
+                          NULL, NULL);
     bool pid_hold_exact =
         suspend_before >= 0 && suspend_before < INT_MAX &&
         held_generation_exact && task_audit_exact && task_bsd_exact &&
@@ -4114,21 +5592,31 @@ static int run_candidate_loader_pair_gated(
         return 81;
     }
 
+    int result_pipe[2] = {-1, -1};
     int ready_pipe[2] = {-1, -1};
     int release_pipe[2] = {-1, -1};
-    int pipe_result = pipe(ready_pipe) == 0 && pipe(release_pipe) == 0
+    int pipe_result = pipe(result_pipe) == 0 && pipe(ready_pipe) == 0 &&
+                              pipe(release_pipe) == 0
                           ? 0
                           : errno;
     bool fixed_fd_collision = false;
     for (size_t index = 0; index < 2; ++index) {
-        fixed_fd_collision =
-            fixed_fd_collision || ready_pipe[index] == CODEX_GATE_READY_FD ||
+        fixed_fd_collision = fixed_fd_collision ||
+            result_pipe[index] == CODEX_CANDIDATE_RESULT_FD ||
+            result_pipe[index] == CODEX_GATE_READY_FD ||
+            result_pipe[index] == CODEX_GATE_RELEASE_FD ||
+            ready_pipe[index] == CODEX_CANDIDATE_RESULT_FD ||
+            ready_pipe[index] == CODEX_GATE_READY_FD ||
             ready_pipe[index] == CODEX_GATE_RELEASE_FD ||
+            release_pipe[index] == CODEX_CANDIDATE_RESULT_FD ||
             release_pipe[index] == CODEX_GATE_READY_FD ||
             release_pipe[index] == CODEX_GATE_RELEASE_FD;
     }
     if (pipe_result != 0 || fixed_fd_collision) {
         for (size_t index = 0; index < 2; ++index) {
+            if (result_pipe[index] >= 0) {
+                close(result_pipe[index]);
+            }
             if (ready_pipe[index] >= 0) {
                 close(ready_pipe[index]);
             }
@@ -4144,19 +5632,22 @@ static int run_candidate_loader_pair_gated(
             cleanup_resolved);
         return 82;
     }
+    set_close_on_exec(result_pipe[0]);
     set_close_on_exec(ready_pipe[0]);
     set_close_on_exec(release_pipe[1]);
 
     char pid_text[24];
-    char ready_fd_text[16];
-    char release_fd_text[16];
     int pid_length = snprintf(pid_text, sizeof(pid_text), "%d",
                               candidate->pid);
-    int ready_fd_length = snprintf(ready_fd_text, sizeof(ready_fd_text), "%d",
-                                   CODEX_GATE_READY_FD);
-    int release_fd_length = snprintf(release_fd_text,
-                                     sizeof(release_fd_text), "%d",
-                                     CODEX_GATE_RELEASE_FD);
+    char carrier_real_path[CODEX_PATH_SIZE] = {0};
+    char loader_real_path[CODEX_PATH_SIZE] = {0};
+    bool fixed_real_paths =
+        realpath(kInjectionCarrierPath, carrier_real_path) != NULL &&
+        realpath(kBaselineLoaderPath, loader_real_path) != NULL;
+    char **carrier_environment = NULL;
+    char *carrier_pid_assignment = NULL;
+    bool carrier_environment_valid = copy_environment_with_candidate_pid(
+        candidate->pid, &carrier_environment, &carrier_pid_assignment);
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
     int actions_result = posix_spawn_file_actions_init(&actions);
@@ -4173,6 +5664,10 @@ static int run_candidate_loader_pair_gated(
     }
     if (setup_result == 0) {
         setup_result = posix_spawn_file_actions_adddup2(
+            &actions, result_pipe[1], CODEX_CANDIDATE_RESULT_FD);
+    }
+    if (setup_result == 0) {
+        setup_result = posix_spawn_file_actions_adddup2(
             &actions, ready_pipe[1], CODEX_GATE_READY_FD);
     }
     if (setup_result == 0) {
@@ -4181,7 +5676,11 @@ static int run_candidate_loader_pair_gated(
     }
     for (size_t index = 0; setup_result == 0 && index < 2; ++index) {
         setup_result = posix_spawn_file_actions_addclose(
-            &actions, ready_pipe[index]);
+            &actions, result_pipe[index]);
+        if (setup_result == 0) {
+            setup_result = posix_spawn_file_actions_addclose(
+                &actions, ready_pipe[index]);
+        }
         if (setup_result == 0) {
             setup_result = posix_spawn_file_actions_addclose(
                 &actions, release_pipe[index]);
@@ -4189,7 +5688,9 @@ static int run_candidate_loader_pair_gated(
     }
     if (setup_result == 0) {
         setup_result = posix_spawnattr_setflags(
-            &attributes, POSIX_SPAWN_SETPGROUP);
+            &attributes,
+            (short)(POSIX_SPAWN_START_SUSPENDED |
+                    POSIX_SPAWN_SETPGROUP));
     }
     if (setup_result == 0) {
         setup_result = posix_spawnattr_setpgroup(&attributes, 0);
@@ -4200,29 +5701,19 @@ static int run_candidate_loader_pair_gated(
     }
 
     char *arguments[] = {
-        (char *)kWorkerPath,
+        (char *)kInjectionCarrierPath,
         (char *)"--macho",
-        (char *)kLoaderCandidatePath,
-        (char *)"--inject-pid-pair-gated",
-        pid_text,
-        (char *)kDyldAdmissionHookPath,
-        (char *)kFreshCanaryPath,
-        ready_fd_text,
-        release_fd_text,
-        (char *)"--ptrauth-child",
+        (char *)kCarrierIdlePayloadPath,
         NULL,
     };
-    bool argument_lengths_valid =
-        pid_length > 0 && (size_t)pid_length < sizeof(pid_text) &&
-        ready_fd_length > 0 &&
-        (size_t)ready_fd_length < sizeof(ready_fd_text) &&
-        release_fd_length > 0 &&
-        (size_t)release_fd_length < sizeof(release_fd_text);
-    pid_t child = -1;
+    bool argument_lengths_valid = pid_length > 0 &&
+                                  (size_t)pid_length < sizeof(pid_text);
+    pid_t carrier = -1;
     int spawn_result =
-        setup_result == 0 && argument_lengths_valid
-            ? posix_spawn(&child, kWorkerPath, &actions, &attributes,
-                          arguments, environ)
+        setup_result == 0 && argument_lengths_valid && fixed_real_paths &&
+                carrier_environment_valid
+            ? posix_spawn(&carrier, kInjectionCarrierPath, &actions,
+                          &attributes, arguments, carrier_environment)
             : (setup_result != 0 ? setup_result : EINVAL);
     if (actions_result == 0) {
         (void)posix_spawn_file_actions_destroy(&actions);
@@ -4230,37 +5721,220 @@ static int run_candidate_loader_pair_gated(
     if (attributes_result == 0) {
         (void)posix_spawnattr_destroy(&attributes);
     }
+    free(carrier_environment);
+    free(carrier_pid_assignment);
+    close(result_pipe[1]);
+    result_pipe[1] = -1;
     close(ready_pipe[1]);
     ready_pipe[1] = -1;
     close(release_pipe[0]);
     release_pipe[0] = -1;
     (void)journal_event(
-        "event=gated-pair-worker-spawn target=%d child=%d spawn=%d "
-        "readyFd=%d releaseFd=%d",
-        candidate->pid, child, spawn_result, CODEX_GATE_READY_FD,
-        CODEX_GATE_RELEASE_FD);
-    if (spawn_result != 0 || child <= 1 || getpgid(child) != child) {
-        if (child > 1) {
-            (void)kill(child, SIGKILL);
-            (void)waitpid(child, NULL, 0);
+        "event=gated-pair-carrier-spawn target=%d carrier=%d spawn=%d "
+        "resultFd=%d readyFd=%d releaseFd=%d environment=%d",
+        candidate->pid, carrier, spawn_result, CODEX_CANDIDATE_RESULT_FD,
+        CODEX_GATE_READY_FD, CODEX_GATE_RELEASE_FD,
+        carrier_environment_valid);
+    if (spawn_result != 0 || carrier <= 1 || getpgid(carrier) != carrier) {
+        if (carrier > 1) {
+            (void)kill(carrier, SIGKILL);
+            (void)waitpid(carrier, NULL, 0);
         }
+        close(result_pipe[0]);
         close(ready_pipe[0]);
         close(release_pipe[1]);
         bool cleanup_resolved = cleanup_candidate_pid_hold(
-            candidate, candidate_hold, "worker-spawn");
+            candidate, candidate_hold, "carrier-spawn");
         (void)journal_event(
-            "event=gated-pair-cleanup-disposition phase=worker-spawn "
+            "event=gated-pair-cleanup-disposition phase=carrier-spawn "
             "resolved=%d next=outer-rollback",
             cleanup_resolved);
         return 82;
     }
 
+    int carrier_status = 0;
+    bool carrier_reaped = false;
+    struct process_snapshot carrier_snapshot = {0};
+    bool carrier_start_stopped = wait_for_owned_stop(
+        carrier, CODEX_TRACE_TIMEOUT_MSEC, &carrier_status);
+    bool carrier_bound =
+        carrier_start_stopped &&
+        read_exact_owned_child_snapshot(
+            carrier, carrier_real_path, true, &carrier_snapshot, NULL);
+    task_t carrier_task = MACH_PORT_NULL;
+    kern_return_t carrier_task_result =
+        carrier_bound
+            ? task_for_pid(mach_task_self(), carrier, &carrier_task)
+            : KERN_INVALID_TASK;
+    bool carrier_task_exact =
+        carrier_task_result == KERN_SUCCESS &&
+        MACH_PORT_VALID(carrier_task) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier, carrier_snapshot.unique.pid_version,
+            NULL, NULL);
+    uint32_t carrier_flags = 0;
+    bool carrier_softened =
+        carrier_task_exact &&
+        soften_and_resume_carrier(&carrier_snapshot, carrier_real_path,
+                                  carrier_task, &carrier_flags);
+    struct remote_dyld_maturity carrier_maturity = {0};
+    bool carrier_runtime_ready =
+        carrier_softened &&
+        wait_for_carrier_runtime(&carrier_snapshot, carrier_real_path,
+                                 carrier_task, &carrier_maturity);
+    bool carrier_bypass_installed =
+        carrier_runtime_ready && carrier_lane_artifacts_exact() &&
+        install_remote_carrier_dyld_bypass(
+            &carrier_snapshot, carrier_real_path, carrier_task);
+    (void)journal_event(
+        "event=gated-pair-carrier-bind target=%d carrier=%d "
+        "startStopped=%d startStatus=0x%x bound=%d taskKr=%d "
+        "taskExact=%d softened=%d runtimeReady=%d bypassInstalled=%d "
+        "flags=0x%08x path=%s",
+        candidate->pid, carrier, carrier_start_stopped, carrier_status,
+        carrier_bound, carrier_task_result, carrier_task_exact,
+        carrier_softened, carrier_runtime_ready, carrier_bypass_installed,
+        carrier_flags, carrier_snapshot.path);
+    if (!carrier_bypass_installed || !carrier_lane_artifacts_exact() ||
+        gStopRequested || takeover_requested()) {
+        close(result_pipe[0]);
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        if (MACH_PORT_VALID(carrier_task)) {
+            (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        }
+        bool cleanup_resolved = cleanup_candidate_pid_hold(
+            candidate, candidate_hold, "carrier-bind");
+        (void)journal_event(
+            "event=gated-pair-cleanup-disposition phase=carrier-bind "
+            "carrierClean=%d resolved=%d next=outer-rollback",
+            carrier_clean, cleanup_resolved);
+        return 82;
+    }
+
+    posix_spawn_file_actions_t loader_actions;
+    posix_spawnattr_t loader_attributes;
+    int loader_actions_result =
+        posix_spawn_file_actions_init(&loader_actions);
+    int loader_attributes_result = posix_spawnattr_init(&loader_attributes);
+    int loader_setup_result =
+        loader_actions_result != 0 ? loader_actions_result
+                                   : loader_attributes_result;
+    if (loader_setup_result == 0) {
+        loader_setup_result = posix_spawn_file_actions_adddup2(
+            &loader_actions, gJournalDescriptor, STDOUT_FILENO);
+    }
+    if (loader_setup_result == 0) {
+        loader_setup_result = posix_spawn_file_actions_adddup2(
+            &loader_actions, gJournalDescriptor, STDERR_FILENO);
+    }
+    if (loader_setup_result == 0) {
+        loader_setup_result = posix_spawnattr_setflags(
+            &loader_attributes,
+            (short)(POSIX_SPAWN_START_SUSPENDED |
+                    POSIX_SPAWN_SETPGROUP));
+    }
+    if (loader_setup_result == 0) {
+        loader_setup_result =
+            posix_spawnattr_setpgroup(&loader_attributes, 0);
+    }
+    if (loader_setup_result == 0) {
+        loader_setup_result = posix_spawnattr_set_ptrauth_task_port_np(
+            &loader_attributes, carrier_task);
+    }
+    char carrier_pid_text[24];
+    int carrier_pid_length = snprintf(
+        carrier_pid_text, sizeof(carrier_pid_text), "%d", carrier);
+    char *loader_arguments[] = {
+        (char *)kBaselineLoaderPath,
+        (char *)"--inject-pid",
+        carrier_pid_text,
+        (char *)kCandidateInjectionBridgePath,
+        (char *)"--ptrauth-child",
+        NULL,
+    };
+    pid_t loader = -1;
+    int loader_spawn_result =
+        loader_setup_result == 0 && carrier_pid_length > 0 &&
+                (size_t)carrier_pid_length < sizeof(carrier_pid_text)
+            ? posix_spawn(&loader, kBaselineLoaderPath, &loader_actions,
+                          &loader_attributes, loader_arguments, environ)
+            : (loader_setup_result != 0 ? loader_setup_result : EINVAL);
+    if (loader_actions_result == 0) {
+        (void)posix_spawn_file_actions_destroy(&loader_actions);
+    }
+    if (loader_attributes_result == 0) {
+        (void)posix_spawnattr_destroy(&loader_attributes);
+    }
+    int loader_status = 0;
+    bool loader_reaped = false;
+    bool loader_start_stopped =
+        loader_spawn_result == 0 && loader > 1 &&
+        wait_for_owned_stop(loader, CODEX_TRACE_TIMEOUT_MSEC,
+                            &loader_status);
+    struct process_snapshot loader_snapshot = {0};
+    bool loader_bound =
+        loader_start_stopped && getpgid(loader) == loader &&
+        read_exact_owned_child_snapshot(
+            loader, loader_real_path, true, &loader_snapshot, NULL);
+    task_t loader_task = MACH_PORT_NULL;
+    kern_return_t loader_task_result =
+        loader_bound
+            ? task_for_pid(mach_task_self(), loader, &loader_task)
+            : KERN_INVALID_TASK;
+    bool loader_task_exact =
+        loader_task_result == KERN_SUCCESS && MACH_PORT_VALID(loader_task) &&
+        task_port_audit_matches_generation(
+            loader_task, loader, loader_snapshot.unique.pid_version, NULL,
+            NULL);
+    if (MACH_PORT_VALID(loader_task)) {
+        (void)mach_port_deallocate(mach_task_self(), loader_task);
+    }
+    errno = 0;
+    int loader_resume_result =
+        loader_task_exact ? kill(loader, SIGCONT) : -1;
+    int loader_resume_error = loader_resume_result == 0 ? 0 : errno;
+    (void)journal_event(
+        "event=gated-pair-loader-spawn target=%d carrier=%d loader=%d "
+        "spawn=%d startStopped=%d startStatus=0x%x bound=%d taskKr=%d "
+        "taskExact=%d resume=%d resumeErrno=%d path=%s",
+        candidate->pid, carrier, loader, loader_spawn_result,
+        loader_start_stopped, loader_status, loader_bound,
+        loader_task_result, loader_task_exact, loader_resume_result,
+        loader_resume_error, loader_snapshot.path);
+    if (loader_spawn_result != 0 || loader <= 1 ||
+        loader_resume_result != 0) {
+        if (loader > 1) {
+            if (getpgid(loader) == loader) {
+                (void)terminate_reap_and_verify_process_group(
+                    loader, &loader_reaped, &loader_status);
+            } else {
+                loader_reaped = terminate_and_reap_owned_child(
+                    loader, &loader_status);
+            }
+        }
+        close(result_pipe[0]);
+        close(ready_pipe[0]);
+        close(release_pipe[1]);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        bool cleanup_resolved = cleanup_candidate_pid_hold(
+            candidate, candidate_hold, "loader-spawn");
+        (void)journal_event(
+            "event=gated-pair-cleanup-disposition phase=loader-spawn "
+            "carrierClean=%d resolved=%d next=outer-rollback",
+            carrier_clean, cleanup_resolved);
+        return 82;
+    }
+
+    set_nonblocking(result_pipe[0]);
     set_nonblocking(ready_pipe[0]);
     bool ready = false;
     bool protocol_valid = true;
     bool candidate_exact = true;
-    bool complete = false;
-    int status = 0;
     uint64_t ready_deadline =
         monotonic_msec() + CODEX_INJECTION_TIMEOUT_MSEC;
     do {
@@ -4268,9 +5942,11 @@ static int run_candidate_loader_pair_gated(
         ssize_t amount = read(ready_pipe[0], &ready_byte,
                               sizeof(ready_byte));
         if (amount == (ssize_t)sizeof(ready_byte)) {
-            ready = ready_byte == (uint8_t)'R';
-            protocol_valid = ready;
-            break;
+            if (ready || ready_byte != (uint8_t)'R') {
+                protocol_valid = false;
+                break;
+            }
+            ready = true;
         }
         if (amount == 0 ||
             (amount < 0 && errno != EINTR && errno != EAGAIN &&
@@ -4278,12 +5954,39 @@ static int run_candidate_loader_pair_gated(
             protocol_valid = false;
             break;
         }
-        pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child) {
-            complete = true;
-            break;
+        if (!loader_reaped) {
+            pid_t waited = waitpid(loader, &loader_status, WNOHANG);
+            if (waited == loader) {
+                loader_reaped = true;
+            } else if (waited < 0 && errno != EINTR) {
+                protocol_valid = false;
+                break;
+            }
         }
-        if (waited < 0 && errno != EINTR) {
+        bool loader_exit_valid =
+            !loader_reaped ||
+            (WIFEXITED(loader_status) && WEXITSTATUS(loader_status) == 0);
+        bool loader_live_exact =
+            loader_reaped || exact_owned_child_still_bound(
+                                  &loader_snapshot, loader_real_path, false,
+                                  NULL);
+        if (!loader_exit_valid || !loader_live_exact) {
+            if (!loader_reaped) {
+                pid_t waited = waitpid(loader, &loader_status, WNOHANG);
+                loader_reaped = waited == loader;
+                loader_exit_valid =
+                    loader_reaped && WIFEXITED(loader_status) &&
+                    WEXITSTATUS(loader_status) == 0;
+            }
+            if (!loader_exit_valid) {
+                protocol_valid = false;
+                break;
+            }
+        }
+        bool carrier_exact = carrier_debug_policy_still_exact(
+            &carrier_snapshot, carrier_real_path, carrier_task, NULL);
+        if (!carrier_exact) {
+            protocol_valid = false;
             break;
         }
         candidate_exact = candidate_pid_hold_is_exact(
@@ -4291,32 +5994,53 @@ static int run_candidate_loader_pair_gated(
         if (!candidate_exact || gStopRequested || takeover_requested()) {
             break;
         }
+        if (ready && loader_reaped && WIFEXITED(loader_status) &&
+            WEXITSTATUS(loader_status) == 0) {
+            break;
+        }
         usleep(2U * 1000U);
     } while (monotonic_msec() < ready_deadline);
 
+    bool loader_exit_zero =
+        loader_reaped && WIFEXITED(loader_status) &&
+        WEXITSTATUS(loader_status) == 0;
     candidate_exact =
-        ready && protocol_valid && !complete &&
+        ready && protocol_valid && loader_exit_zero &&
         candidate_pid_hold_is_exact(candidate, target_task,
-                                    candidate_hold->owned, NULL, &flags);
+                                    candidate_hold->owned, NULL, &flags) &&
+        carrier_debug_policy_still_exact(
+            &carrier_snapshot, carrier_real_path, carrier_task, NULL) &&
+        carrier_lane_artifacts_exact();
     close(ready_pipe[0]);
     ready_pipe[0] = -1;
     if (!candidate_exact || gStopRequested || takeover_requested()) {
+        close(result_pipe[0]);
+        result_pipe[0] = -1;
         close(release_pipe[1]);
         release_pipe[1] = -1;
-        if (!complete) {
-            terminate_injection_process_group(child);
+        bool loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        int early_result = loader_reaped && WIFEXITED(loader_status)
+                               ? WEXITSTATUS(loader_status)
+                               : 83;
+        if (early_result == 0) {
+            early_result = 83;
         }
-        int early_result =
-            complete && WIFEXITED(status) ? WEXITSTATUS(status) : 83;
         (void)journal_event(
-            "event=gated-pair-ready target=%d child=%d ready=%d "
-            "protocolValid=%d candidateExact=%d complete=%d result=%d",
-            candidate->pid, child, ready, protocol_valid, candidate_exact,
-            complete, early_result);
+            "event=gated-pair-ready target=%d carrier=%d loader=%d "
+            "ready=%d protocolValid=%d candidateExact=%d "
+            "loaderReaped=%d loaderStatus=0x%x loaderClean=%d "
+            "carrierClean=%d result=%d",
+            candidate->pid, carrier, loader, ready, protocol_valid,
+            candidate_exact, loader_reaped, loader_status, loader_clean,
+            carrier_clean, early_result);
         bool cleanup_resolved = cleanup_candidate_pid_hold(
-            candidate, candidate_hold, "worker-ready");
+            candidate, candidate_hold, "carrier-ready");
         (void)journal_event(
-            "event=gated-pair-cleanup-disposition phase=worker-ready "
+            "event=gated-pair-cleanup-disposition phase=carrier-ready "
             "resolved=%d next=outer-rollback",
             cleanup_resolved);
         return early_result;
@@ -4392,34 +6116,75 @@ static int run_candidate_loader_pair_gated(
         suspend_after_resume, suspend_count_restored,
         candidate_hold->owned, pid_release_exact, flags);
     if (!pid_release_exact || gStopRequested || takeover_requested()) {
+        close(result_pipe[0]);
+        result_pipe[0] = -1;
         close(release_pipe[1]);
         release_pipe[1] = -1;
-        terminate_injection_process_group(child);
+        bool loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
         bool cleanup_resolved = cleanup_candidate_pid_hold(
             candidate, candidate_hold, "pid-release");
         (void)journal_event(
             "event=gated-pair-cleanup-disposition phase=pid-release "
-            "resolved=%d next=outer-rollback",
-            cleanup_resolved);
+            "loaderClean=%d carrierClean=%d resolved=%d "
+            "next=outer-rollback",
+            loader_clean, carrier_clean, cleanup_resolved);
         return 85;
     }
 
     bool maturity_ready = mature_and_restop_traced_candidate(
         candidate, target_task, &flags);
     if (!maturity_ready || gStopRequested || takeover_requested()) {
+        close(result_pipe[0]);
+        result_pipe[0] = -1;
         close(release_pipe[1]);
         release_pipe[1] = -1;
-        terminate_injection_process_group(child);
+        bool loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
         bool cleanup_resolved = cleanup_candidate_pid_hold(
             candidate, candidate_hold, "maturity");
         (void)journal_event(
             "event=gated-pair-cleanup-disposition phase=maturity "
-            "resolved=%d next=outer-rollback",
-            cleanup_resolved);
+            "loaderClean=%d carrierClean=%d resolved=%d "
+            "next=outer-rollback",
+            loader_clean, carrier_clean, cleanup_resolved);
         (void)journal_event(
-            "event=gated-pair-maturity-rejected target=%d child=%d "
+            "event=gated-pair-maturity-rejected target=%d carrier=%d "
             "maturityReady=%d flags=0x%08x",
-            candidate->pid, child, maturity_ready, flags);
+            candidate->pid, carrier, maturity_ready, flags);
+        return 85;
+    }
+
+    bool thread_hold_exact = acquire_candidate_thread_hold(
+        candidate, target_task, &thread_hold, &flags);
+    if (!thread_hold_exact || gStopRequested || takeover_requested()) {
+        close(result_pipe[0]);
+        result_pipe[0] = -1;
+        close(release_pipe[1]);
+        release_pipe[1] = -1;
+        bool loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        if (thread_hold_exact) {
+            (void)fail_closed_candidate_thread_hold(
+                candidate, &thread_hold, "thread-hold-interrupted");
+        }
+        bool cleanup_resolved = cleanup_candidate_pid_hold(
+            candidate, candidate_hold, "thread-hold");
+        (void)journal_event(
+            "event=gated-pair-cleanup-disposition phase=thread-hold "
+            "threadHoldExact=%d loaderClean=%d carrierClean=%d "
+            "resolved=%d next=outer-rollback",
+            thread_hold_exact, loader_clean, carrier_clean,
+            cleanup_resolved);
         return 85;
     }
 
@@ -4439,48 +6204,182 @@ static int run_candidate_loader_pair_gated(
     close(release_pipe[1]);
     release_pipe[1] = -1;
     (void)journal_event(
-        "event=gated-pair-release target=%d child=%d ready=1 "
-        "releaseWritten=%d detach=%d detachErrno=%d flags=0x%08x",
-        candidate->pid, child, release_written, detach_result, detach_error,
-        flags);
+        "event=gated-pair-release target=%d carrier=%d loader=%d ready=1 "
+        "releaseWritten=%d detach=%d detachErrno=%d threadsHeld=%u "
+        "flags=0x%08x",
+        candidate->pid, carrier, loader, release_written, detach_result,
+        detach_error, thread_hold.thread_count, flags);
     if (!release_written || detach_result != 0) {
-        terminate_injection_process_group(child);
+        close(result_pipe[0]);
+        result_pipe[0] = -1;
+        bool loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+        bool carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        (void)fail_closed_candidate_thread_hold(
+            candidate, &thread_hold, "detach-or-release");
         (void)cleanup_candidate_pid_hold(
             candidate, candidate_hold, "detach-or-release");
+        (void)journal_event(
+            "event=gated-pair-cleanup-disposition "
+            "phase=detach-or-release loaderClean=%d carrierClean=%d "
+            "next=outer-rollback",
+            loader_clean, carrier_clean);
         return 86;
     }
-    if (!candidate_hold->owned && MACH_PORT_VALID(candidate_hold->task)) {
-        (void)mach_port_deallocate(mach_task_self(), candidate_hold->task);
-        candidate_hold->task = MACH_PORT_NULL;
-    }
 
-    complete = false;
+    uint8_t result_wire[sizeof(struct candidate_injection_result) + 1U] = {
+        0,
+    };
+    size_t result_used = 0;
+    bool result_complete = false;
+    bool result_protocol_valid = true;
+    bool borrow_shape_anomaly = false;
+    bool candidate_generation_anomaly = false;
+    bool carrier_policy_anomaly = false;
     uint64_t completion_deadline =
         monotonic_msec() + CODEX_INJECTION_TIMEOUT_MSEC;
     do {
-        pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child) {
-            complete = true;
+        ssize_t amount = read(
+            result_pipe[0], result_wire + result_used,
+            sizeof(result_wire) - result_used);
+        if (amount > 0) {
+            result_used += (size_t)amount;
+            if (result_used > sizeof(struct candidate_injection_result)) {
+                result_protocol_valid = false;
+                break;
+            }
+            if (result_used == sizeof(struct candidate_injection_result)) {
+                uint8_t extra = 0;
+                ssize_t extra_amount = read(result_pipe[0], &extra,
+                                            sizeof(extra));
+                if (extra_amount > 0 ||
+                    (extra_amount < 0 && errno != EINTR &&
+                     errno != EAGAIN && errno != EWOULDBLOCK)) {
+                    result_protocol_valid = false;
+                } else {
+                    result_complete = true;
+                }
+                break;
+            }
+        } else if (amount == 0 ||
+                   (amount < 0 && errno != EINTR && errno != EAGAIN &&
+                    errno != EWOULDBLOCK)) {
+            result_protocol_valid = false;
             break;
         }
-        if (waited < 0 && errno != EINTR) {
-            break;
-        }
+        /* The pinned loader and hook temporarily mutate thread state while
+           completing the trusted transaction.  proc/task and csops samples
+           are likewise not transactionally stable during that handoff, so
+           retain all live observations as diagnostics without racing the
+           call.  Fresh identity, policy, and strict thread-state samples are
+           mandatory after the complete result record arrives. */
+        borrow_shape_anomaly =
+            borrow_shape_anomaly ||
+            !candidate_thread_hold_counts_allow_one_borrow(&thread_hold);
+        candidate_generation_anomaly =
+            candidate_generation_anomaly ||
+            !candidate_task_generation_is_exact(
+                candidate, target_task, &thread_hold.generation);
+        carrier_policy_anomaly =
+            carrier_policy_anomaly ||
+            !carrier_debug_policy_still_exact(
+                &carrier_snapshot, carrier_real_path, carrier_task, NULL);
         if (gStopRequested || takeover_requested()) {
             break;
         }
         usleep(2U * 1000U);
     } while (monotonic_msec() < completion_deadline);
-    if (!complete) {
-        terminate_injection_process_group(child);
+
+    struct candidate_injection_result bridge_result = {0};
+    if (result_complete && result_protocol_valid) {
+        memcpy(&bridge_result, result_wire, sizeof(bridge_result));
     }
-    int result = complete && WIFEXITED(status) ? WEXITSTATUS(status) : 83;
+    bool final_threads_exact =
+        candidate_thread_hold_counts_are_exact(&thread_hold, true);
+    bool final_generation_exact = candidate_task_generation_is_exact(
+        candidate, target_task, &thread_hold.generation);
+    bool final_carrier_exact = carrier_debug_policy_still_exact(
+        &carrier_snapshot, carrier_real_path, carrier_task, NULL);
+    bool held_state_exact = final_threads_exact && final_generation_exact &&
+                            final_carrier_exact;
+    bool bridge_result_exact =
+        result_complete && result_protocol_valid && held_state_exact &&
+        bridge_result.magic == CODEX_CANDIDATE_RESULT_MAGIC &&
+        bridge_result.version == CODEX_CANDIDATE_RESULT_VERSION &&
+        bridge_result.status == 0 &&
+        bridge_result.candidate_pid == candidate->pid;
+    close(result_pipe[0]);
+    result_pipe[0] = -1;
+
+    /* The bridge lives in the carrier.  Both helper process groups must be
+       gone before any candidate thread is released, even on success. */
+    bool loader_clean = terminate_reap_and_verify_process_group(
+        loader, &loader_reaped, &loader_status);
+    bool carrier_clean = terminate_reap_and_verify_process_group(
+        carrier, &carrier_reaped, &carrier_status);
+    if (MACH_PORT_VALID(carrier_task)) {
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        carrier_task = MACH_PORT_NULL;
+    }
+    bool artifacts_exact_after = carrier_lane_artifacts_exact();
+    bool helpers_clean = loader_clean && carrier_clean && loader_reaped &&
+                         carrier_reaped && process_group_absent(loader) &&
+                         process_group_absent(carrier);
+    int result = bridge_result_exact && helpers_clean &&
+                         artifacts_exact_after && !gStopRequested &&
+                         !takeover_requested()
+                     ? 0
+                     : (bridge_result.status > 0 &&
+                                bridge_result.status <= 255
+                            ? bridge_result.status
+                            : 83);
+    bool thread_release_exact =
+        result == 0 && !gStopRequested && !takeover_requested()
+            ? release_candidate_thread_hold(candidate, &thread_hold,
+                                            &flags)
+            : fail_closed_candidate_thread_hold(
+                  candidate, &thread_hold, "carrier-or-bridge-failed");
+    if (result == 0 && !thread_release_exact) {
+        result = 87;
+    }
+    if (result == 0) {
+        if (!candidate_hold->owned &&
+            MACH_PORT_VALID(candidate_hold->task)) {
+            (void)mach_port_deallocate(mach_task_self(),
+                                       candidate_hold->task);
+            candidate_hold->task = MACH_PORT_NULL;
+        }
+    } else {
+        (void)cleanup_candidate_pid_hold(
+            candidate, candidate_hold, "carrier-or-thread-release");
+    }
     bool candidate_exact_after =
+        result == 0 && thread_release_exact &&
         candidate_debug_policy_still_exact(candidate, candidate_flags_io);
     (void)journal_event(
-        "event=gated-pair-final target=%d child=%d complete=%d "
-        "status=0x%x result=%d candidateExactAfter=%d",
-        candidate->pid, child, complete, status, result,
+        "event=gated-pair-final target=%d carrier=%d loader=%d "
+        "resultComplete=%d resultProtocol=%d resultBytes=%zu "
+        "resultMagic=0x%08x resultVersion=%u bridgeStatus=%d "
+        "bridgePid=%d bridgeExact=%d heldStateExact=%d "
+        "finalThreadsExact=%d finalGenerationExact=%d "
+        "finalCarrierExact=%d borrowShapeAnomaly=%d "
+        "candidateGenerationAnomaly=%d carrierPolicyAnomaly=%d "
+        "loaderReaped=%d loaderStatus=0x%x loaderClean=%d "
+        "carrierReaped=%d carrierStatus=0x%x carrierClean=%d "
+        "artifactsExact=%d result=%d threadReleaseExact=%d "
+        "candidateExactAfter=%d",
+        candidate->pid, carrier, loader, result_complete,
+        result_protocol_valid, result_used, bridge_result.magic,
+        bridge_result.version, bridge_result.status,
+        bridge_result.candidate_pid, bridge_result_exact,
+        held_state_exact, final_threads_exact, final_generation_exact,
+        final_carrier_exact, borrow_shape_anomaly,
+        candidate_generation_anomaly, carrier_policy_anomaly,
+        loader_reaped, loader_status, loader_clean,
+        carrier_reaped, carrier_status, carrier_clean,
+        artifacts_exact_after, result, thread_release_exact,
         candidate_exact_after);
     return result;
 }
@@ -6057,6 +7956,78 @@ static int external_controller_main(const char *invocation_path) {
         canary_loaded, marker_matches, candidate_observed,
         candidate_flags);
 
+    /* A successful live injection is a one-way transaction for this boot.
+       RTLD_NODELETE pins both images in the target.  Keep the exact candidate
+       alive, record the commit, and retire the recovery watchdog instead of
+       booting the candidate out merely to prove that cleanup works. */
+    bool control_released =
+        !candidate_attached && !candidate_hold.owned &&
+        !MACH_PORT_VALID(candidate_hold.task);
+    if (live_injection_proved && candidate_observed && control_released) {
+        bool retained_observed = observe_candidate(&candidate, NULL);
+        bool commit_ready =
+            retained_observed && !gStopRequested && !takeover_requested() &&
+            candidate_debug_policy_still_exact(&candidate,
+                                               &candidate_flags) &&
+            fresh_canary_marker_matches(candidate.pid) &&
+            watchdog_pid > 1 && owned_child_live(watchdog_pid);
+        bool commit_ready_logged =
+            commit_ready && journal_event(
+            "event=external-commit-ready candidatePid=%d "
+            "candidatePidVersion=%d candidateUniqueId=%llu "
+            "hookInstalled=%d canaryLoaded=%d markerMatches=%d "
+            "controlReleased=%d retainedObserved=%d stopRequested=%d "
+            "takeoverRequested=%d watchdogLive=%d",
+            candidate.pid, candidate.unique.pid_version,
+            (unsigned long long)candidate.unique.unique_id,
+            hook_installed, canary_loaded, marker_matches,
+            control_released, retained_observed, gStopRequested,
+            takeover_requested(), owned_child_live(watchdog_pid));
+        bool final_commit_gate =
+            commit_ready_logged && !gStopRequested && !takeover_requested() &&
+            candidate_debug_policy_still_exact(&candidate,
+                                               &candidate_flags) &&
+            fresh_canary_marker_matches(candidate.pid) &&
+            owned_child_live(watchdog_pid);
+        bool watchdog_neutralized =
+            final_commit_gate &&
+            terminate_and_reap_owned_child(watchdog_pid, NULL);
+        if (watchdog_neutralized) {
+            /* Reaping the recovery watchdog is the irreversible commit point.
+               No fallible operation below may return to rollback. */
+            watchdog_pid = -1;
+            rollback_armed = false;
+            bool commit_marker = create_marker("commit");
+            (void)journal_event(
+                "event=external-commit-final candidatePid=%d "
+                "candidatePidVersion=%d candidateUniqueId=%llu "
+                "hookInstalled=%d canaryLoaded=%d markerMatches=%d "
+                "controlReleased=%d retainedObserved=%d commitMarker=%d "
+                "watchdogNeutralized=1 committedExact=1 committed=1",
+                candidate.pid, candidate.unique.pid_version,
+                (unsigned long long)candidate.unique.unique_id,
+                hook_installed, canary_loaded, marker_matches,
+                control_released, retained_observed, commit_marker);
+            dprintf(STDOUT_FILENO,
+                    "external-live-proof status=0 candidateObserved=1 "
+                    "liveInjectionProved=1 markerRequired=1 restored=0 "
+                    "candidateAbsent=0 stockCount=0 candidatePid=%d "
+                    "candidatePidVersion=%d candidateUniqueId=%llu "
+                    "watchdogNeutralized=1 rollbackArmed=0 committed=1\n",
+                    candidate.pid, candidate.unique.pid_version,
+                    (unsigned long long)candidate.unique.unique_id);
+            return 0;
+        }
+        (void)journal_event(
+            "event=external-commit-rejected candidatePid=%d "
+            "retainedObserved=%d commitReady=%d commitReadyLogged=%d "
+            "finalCommitGate=%d watchdogNeutralized=%d "
+            "next=outer-rollback",
+            candidate.pid, retained_observed, commit_ready,
+            commit_ready_logged, final_commit_gate,
+            watchdog_neutralized);
+    }
+
 rollback:
     if (candidate.pid > 1 &&
         (candidate_hold.owned || MACH_PORT_VALID(candidate_hold.task))) {
@@ -6428,6 +8399,414 @@ rollback:
                : (restored ? 76 : 77);
 }
 
+static int carrier_bridge_load_audit_main(const char *invocation_path) {
+    gRole = "carrier-bridge-audit";
+    uuid_t run_uuid;
+    uuid_generate_random(run_uuid);
+    uuid_unparse_lower(run_uuid, gRunToken);
+
+    gLockDescriptor = open(kLockPath,
+                           O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    struct stat lock_status = {0};
+    bool preflight =
+        geteuid() == 0 && getpid() > 1 && gLockDescriptor >= 0 &&
+        fstat(gLockDescriptor, &lock_status) == 0 &&
+        S_ISREG(lock_status.st_mode) && lock_status.st_uid == 0 &&
+        lock_status.st_nlink == 1 && (lock_status.st_mode & 0077) == 0 &&
+        fchmod(gLockDescriptor, 0600) == 0 &&
+        flock(gLockDescriptor, LOCK_EX | LOCK_NB) == 0 &&
+        prepare_common_paths(false) && ensure_state_directory() &&
+        open_journal() && precursor_argument_exact(invocation_path) &&
+        carrier_lane_artifacts_exact();
+    if (!preflight) {
+        return 80;
+    }
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = stop_handler;
+    (void)sigemptyset(&action.sa_mask);
+    bool handlers_installed =
+        sigaction(SIGTERM, &action, NULL) == 0 &&
+        sigaction(SIGINT, &action, NULL) == 0 &&
+        sigaction(SIGHUP, &action, NULL) == 0;
+    struct process_snapshot original_stock = {0};
+    bool original_stock_exact =
+        handlers_installed && find_unique_stock(&original_stock) &&
+        original_stock_still_unique(&original_stock);
+    if (!original_stock_exact) {
+        (void)journal_event(
+            "event=carrier-bridge-load-audit phase=stock-preflight "
+            "handlers=%d stockExact=%d rejected=1",
+            handlers_installed, original_stock_exact);
+        return 80;
+    }
+
+    char carrier_real_path[CODEX_PATH_SIZE] = {0};
+    char loader_real_path[CODEX_PATH_SIZE] = {0};
+    bool real_paths_exact =
+        realpath(kInjectionCarrierPath, carrier_real_path) != NULL &&
+        realpath(kBaselineLoaderPath, loader_real_path) != NULL;
+    int result_pipe[2] = {-1, -1};
+    bool pipe_exact =
+        real_paths_exact && pipe(result_pipe) == 0 &&
+        result_pipe[0] != CODEX_CANDIDATE_RESULT_FD &&
+        result_pipe[1] != CODEX_CANDIDATE_RESULT_FD;
+    if (!pipe_exact) {
+        if (result_pipe[0] >= 0) {
+            close(result_pipe[0]);
+        }
+        if (result_pipe[1] >= 0) {
+            close(result_pipe[1]);
+        }
+        (void)journal_event(
+            "event=carrier-bridge-load-audit phase=pipe rejected=1");
+        return 81;
+    }
+    set_close_on_exec(result_pipe[0]);
+    char **carrier_environment = NULL;
+    bool environment_exact =
+        copy_environment_without_candidate_pid(&carrier_environment);
+
+    posix_spawn_file_actions_t carrier_actions;
+    posix_spawnattr_t carrier_attributes;
+    int carrier_actions_result =
+        posix_spawn_file_actions_init(&carrier_actions);
+    int carrier_attributes_result =
+        posix_spawnattr_init(&carrier_attributes);
+    int carrier_setup = carrier_actions_result != 0
+                            ? carrier_actions_result
+                            : carrier_attributes_result;
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawn_file_actions_adddup2(
+            &carrier_actions, gJournalDescriptor, STDOUT_FILENO);
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawn_file_actions_adddup2(
+            &carrier_actions, gJournalDescriptor, STDERR_FILENO);
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawn_file_actions_adddup2(
+            &carrier_actions, result_pipe[1], CODEX_CANDIDATE_RESULT_FD);
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawn_file_actions_addclose(
+            &carrier_actions, result_pipe[0]);
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawn_file_actions_addclose(
+            &carrier_actions, result_pipe[1]);
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawnattr_setflags(
+            &carrier_attributes,
+            (short)(POSIX_SPAWN_START_SUSPENDED |
+                    POSIX_SPAWN_SETPGROUP));
+    }
+    if (carrier_setup == 0) {
+        carrier_setup = posix_spawnattr_setpgroup(&carrier_attributes, 0);
+    }
+    char *carrier_arguments[] = {
+        (char *)kInjectionCarrierPath,
+        (char *)"--macho",
+        (char *)kCarrierIdlePayloadPath,
+        NULL,
+    };
+    pid_t carrier = -1;
+    int carrier_spawn =
+        carrier_setup == 0 && environment_exact
+            ? posix_spawn(&carrier, kInjectionCarrierPath,
+                          &carrier_actions, &carrier_attributes,
+                          carrier_arguments, carrier_environment)
+            : (carrier_setup != 0 ? carrier_setup : EINVAL);
+    if (carrier_actions_result == 0) {
+        (void)posix_spawn_file_actions_destroy(&carrier_actions);
+    }
+    if (carrier_attributes_result == 0) {
+        (void)posix_spawnattr_destroy(&carrier_attributes);
+    }
+    free(carrier_environment);
+    close(result_pipe[1]);
+    result_pipe[1] = -1;
+
+    int carrier_status = 0;
+    bool carrier_reaped = false;
+    bool carrier_start_stopped =
+        carrier_spawn == 0 && carrier > 1 && getpgid(carrier) == carrier &&
+        wait_for_owned_stop(carrier, CODEX_TRACE_TIMEOUT_MSEC,
+                            &carrier_status);
+    struct process_snapshot carrier_snapshot = {0};
+    bool carrier_bound =
+        carrier_start_stopped &&
+        read_exact_owned_child_snapshot(
+            carrier, carrier_real_path, true, &carrier_snapshot, NULL);
+    task_t carrier_task = MACH_PORT_NULL;
+    kern_return_t carrier_task_result =
+        carrier_bound
+            ? task_for_pid(mach_task_self(), carrier, &carrier_task)
+            : KERN_INVALID_TASK;
+    bool carrier_task_exact =
+        carrier_task_result == KERN_SUCCESS &&
+        MACH_PORT_VALID(carrier_task) &&
+        task_port_audit_matches_generation(
+            carrier_task, carrier, carrier_snapshot.unique.pid_version,
+            NULL, NULL);
+    uint32_t carrier_flags = 0;
+    bool carrier_softened =
+        carrier_task_exact &&
+        soften_and_resume_carrier(&carrier_snapshot, carrier_real_path,
+                                  carrier_task, &carrier_flags);
+    struct remote_dyld_maturity carrier_maturity = {0};
+    bool carrier_runtime_ready =
+        carrier_softened &&
+        wait_for_carrier_runtime(&carrier_snapshot, carrier_real_path,
+                                 carrier_task, &carrier_maturity);
+    bool bypass_installed =
+        carrier_runtime_ready && !gStopRequested &&
+        original_stock_still_unique(&original_stock) &&
+        carrier_lane_artifacts_exact() &&
+        install_remote_carrier_dyld_bypass(
+            &carrier_snapshot, carrier_real_path, carrier_task);
+
+    pid_t loader = -1;
+    int loader_status = 0;
+    bool loader_reaped = false;
+    struct process_snapshot loader_snapshot = {0};
+    int loader_spawn = EINVAL;
+    bool loader_start_stopped = false;
+    bool loader_bound = false;
+    kern_return_t loader_task_result = KERN_INVALID_TASK;
+    bool loader_task_exact = false;
+    int loader_resume = -1;
+    int loader_resume_error = 0;
+    if (bypass_installed && !gStopRequested &&
+        original_stock_still_unique(&original_stock)) {
+        posix_spawn_file_actions_t loader_actions;
+        posix_spawnattr_t loader_attributes;
+        int loader_actions_result =
+            posix_spawn_file_actions_init(&loader_actions);
+        int loader_attributes_result =
+            posix_spawnattr_init(&loader_attributes);
+        int loader_setup = loader_actions_result != 0
+                               ? loader_actions_result
+                               : loader_attributes_result;
+        if (loader_setup == 0) {
+            loader_setup = posix_spawn_file_actions_adddup2(
+                &loader_actions, gJournalDescriptor, STDOUT_FILENO);
+        }
+        if (loader_setup == 0) {
+            loader_setup = posix_spawn_file_actions_adddup2(
+                &loader_actions, gJournalDescriptor, STDERR_FILENO);
+        }
+        if (loader_setup == 0) {
+            loader_setup = posix_spawnattr_setflags(
+                &loader_attributes,
+                (short)(POSIX_SPAWN_START_SUSPENDED |
+                        POSIX_SPAWN_SETPGROUP));
+        }
+        if (loader_setup == 0) {
+            loader_setup =
+                posix_spawnattr_setpgroup(&loader_attributes, 0);
+        }
+        if (loader_setup == 0) {
+            loader_setup = posix_spawnattr_set_ptrauth_task_port_np(
+                &loader_attributes, carrier_task);
+        }
+        char carrier_pid_text[24] = {0};
+        int carrier_pid_length = snprintf(
+            carrier_pid_text, sizeof(carrier_pid_text), "%d", carrier);
+        char *loader_arguments[] = {
+            (char *)kBaselineLoaderPath,
+            (char *)"--inject-pid",
+            carrier_pid_text,
+            (char *)kCandidateInjectionBridgePath,
+            (char *)"--ptrauth-child",
+            NULL,
+        };
+        loader_spawn =
+            loader_setup == 0 && carrier_pid_length > 0 &&
+                    (size_t)carrier_pid_length < sizeof(carrier_pid_text)
+                ? posix_spawn(&loader, kBaselineLoaderPath, &loader_actions,
+                              &loader_attributes, loader_arguments, environ)
+                : (loader_setup != 0 ? loader_setup : EINVAL);
+        if (loader_actions_result == 0) {
+            (void)posix_spawn_file_actions_destroy(&loader_actions);
+        }
+        if (loader_attributes_result == 0) {
+            (void)posix_spawnattr_destroy(&loader_attributes);
+        }
+        loader_start_stopped =
+            loader_spawn == 0 && loader > 1 && getpgid(loader) == loader &&
+            wait_for_owned_stop(loader, CODEX_TRACE_TIMEOUT_MSEC,
+                                &loader_status);
+        loader_bound =
+            loader_start_stopped &&
+            read_exact_owned_child_snapshot(
+                loader, loader_real_path, true, &loader_snapshot, NULL);
+        task_t loader_task = MACH_PORT_NULL;
+        loader_task_result =
+            loader_bound
+                ? task_for_pid(mach_task_self(), loader, &loader_task)
+                : KERN_INVALID_TASK;
+        loader_task_exact =
+            loader_task_result == KERN_SUCCESS &&
+            MACH_PORT_VALID(loader_task) &&
+            task_port_audit_matches_generation(
+                loader_task, loader, loader_snapshot.unique.pid_version,
+                NULL, NULL);
+        if (MACH_PORT_VALID(loader_task)) {
+            (void)mach_port_deallocate(mach_task_self(), loader_task);
+        }
+        errno = 0;
+        loader_resume = loader_task_exact ? kill(loader, SIGCONT) : -1;
+        loader_resume_error = loader_resume == 0 ? 0 : errno;
+    }
+
+    set_nonblocking(result_pipe[0]);
+    uint8_t result_wire[sizeof(struct candidate_injection_result) + 1U] = {
+        0,
+    };
+    size_t result_used = 0;
+    bool result_complete = false;
+    bool result_protocol_exact = true;
+    bool runtime_exact = bypass_installed && loader_resume == 0 &&
+                         !gStopRequested &&
+                         original_stock_still_unique(&original_stock);
+    uint64_t deadline = monotonic_msec() + CODEX_INJECTION_TIMEOUT_MSEC;
+    while (runtime_exact && monotonic_msec() < deadline) {
+        uint8_t extra = 0;
+        void *read_address = result_complete
+                                 ? (void *)&extra
+                                 : (void *)(result_wire + result_used);
+        size_t read_size = result_complete
+                               ? sizeof(extra)
+                               : sizeof(result_wire) - result_used;
+        ssize_t amount = read(result_pipe[0], read_address, read_size);
+        if (amount > 0) {
+            if (result_complete) {
+                result_protocol_exact = false;
+                break;
+            }
+            result_used += (size_t)amount;
+            if (result_used > sizeof(struct candidate_injection_result)) {
+                result_protocol_exact = false;
+                break;
+            }
+            result_complete =
+                result_used == sizeof(struct candidate_injection_result);
+        } else if (amount == 0 ||
+                   (amount < 0 && errno != EINTR && errno != EAGAIN &&
+                    errno != EWOULDBLOCK)) {
+            result_protocol_exact = false;
+            break;
+        }
+        if (!loader_reaped) {
+            pid_t waited = waitpid(loader, &loader_status, WNOHANG);
+            if (waited == loader) {
+                loader_reaped = true;
+            } else if (waited < 0 && errno != EINTR) {
+                runtime_exact = false;
+                break;
+            }
+        }
+        bool loader_exit_exact =
+            !loader_reaped ||
+            (WIFEXITED(loader_status) && WEXITSTATUS(loader_status) == 0);
+        bool loader_live_exact =
+            loader_reaped || exact_owned_child_still_bound(
+                                  &loader_snapshot, loader_real_path, false,
+                                  NULL);
+        if (!loader_live_exact && !loader_reaped) {
+            pid_t waited = waitpid(loader, &loader_status, WNOHANG);
+            loader_reaped = waited == loader;
+            loader_exit_exact =
+                loader_reaped && WIFEXITED(loader_status) &&
+                WEXITSTATUS(loader_status) == 0;
+        }
+        runtime_exact =
+            loader_exit_exact && !gStopRequested &&
+            original_stock_still_unique(&original_stock) &&
+            carrier_debug_policy_still_exact(
+                &carrier_snapshot, carrier_real_path, carrier_task, NULL);
+        if (result_complete && loader_reaped && loader_exit_exact) {
+            break;
+        }
+        usleep(2U * 1000U);
+    }
+    close(result_pipe[0]);
+    result_pipe[0] = -1;
+    struct candidate_injection_result bridge_result = {0};
+    if (result_complete && result_protocol_exact) {
+        memcpy(&bridge_result, result_wire, sizeof(bridge_result));
+    }
+    bool bridge_exact = result_complete && result_protocol_exact &&
+                        bridge_result.magic ==
+                            CODEX_CANDIDATE_RESULT_MAGIC &&
+                        bridge_result.version ==
+                            CODEX_CANDIDATE_RESULT_VERSION &&
+                        bridge_result.status == 64 &&
+                        bridge_result.candidate_pid == 0;
+    bool loader_exit_zero =
+        loader_reaped && WIFEXITED(loader_status) &&
+        WEXITSTATUS(loader_status) == 0;
+
+    bool loader_clean = false;
+    if (loader > 1) {
+        loader_clean = terminate_reap_and_verify_process_group(
+            loader, &loader_reaped, &loader_status);
+    }
+    bool carrier_clean = false;
+    if (carrier > 1) {
+        carrier_clean = terminate_reap_and_verify_process_group(
+            carrier, &carrier_reaped, &carrier_status);
+    }
+    if (MACH_PORT_VALID(carrier_task)) {
+        (void)mach_port_deallocate(mach_task_self(), carrier_task);
+        carrier_task = MACH_PORT_NULL;
+    }
+    bool artifacts_exact_after = carrier_lane_artifacts_exact();
+    bool stock_exact_after =
+        original_stock_still_unique(&original_stock);
+    bool success = preflight && real_paths_exact && environment_exact &&
+                   carrier_spawn == 0 && carrier_bound &&
+                   carrier_task_exact && carrier_softened &&
+                   carrier_runtime_ready && bypass_installed &&
+                   loader_spawn == 0 && loader_bound && loader_task_exact &&
+                   loader_resume == 0 && runtime_exact && bridge_exact &&
+                   loader_exit_zero && loader_clean && carrier_clean &&
+                   artifacts_exact_after && stock_exact_after &&
+                   !gStopRequested;
+    (void)journal_event(
+        "event=carrier-bridge-load-audit carrier=%d carrierSpawn=%d "
+        "carrierStartStopped=%d carrierStatus=0x%x carrierBound=%d "
+        "carrierTaskKr=%d carrierTaskExact=%d carrierSoftened=%d "
+        "carrierRuntime=%d bypassInstalled=%d carrierFlags=0x%08x "
+        "loader=%d loaderSpawn=%d loaderStartStopped=%d "
+        "loaderBound=%d loaderTaskKr=%d loaderTaskExact=%d "
+        "loaderResume=%d loaderResumeErrno=%d loaderReaped=%d "
+        "loaderStatus=0x%x loaderExitZero=%d resultComplete=%d "
+        "resultProtocol=%d resultBytes=%zu resultMagic=0x%08x "
+        "resultVersion=%u bridgeStatus=%d bridgePid=%d bridgeExact=%d "
+        "runtimeExact=%d loaderClean=%d carrierReaped=%d "
+        "carrierClean=%d artifactsExact=%d stockPid=%d "
+        "stockPidVersion=%d stockUniqueId=%llu stockExactAfter=%d "
+        "success=%d",
+        carrier, carrier_spawn, carrier_start_stopped, carrier_status,
+        carrier_bound, carrier_task_result, carrier_task_exact,
+        carrier_softened, carrier_runtime_ready, bypass_installed,
+        carrier_flags, loader, loader_spawn, loader_start_stopped,
+        loader_bound, loader_task_result, loader_task_exact, loader_resume,
+        loader_resume_error, loader_reaped, loader_status,
+        loader_exit_zero, result_complete, result_protocol_exact,
+        result_used, bridge_result.magic, bridge_result.version,
+        bridge_result.status, bridge_result.candidate_pid, bridge_exact,
+        runtime_exact, loader_clean, carrier_reaped, carrier_clean,
+        artifacts_exact_after, original_stock.pid,
+        original_stock.unique.pid_version,
+        (unsigned long long)original_stock.unique.unique_id,
+        stock_exact_after, success);
+    return success ? 0 : 84;
+}
+
 int main(int argc, char **argv) {
     if (argc == 10 &&
         strcmp(argv[1], "--parallel-bind-watchdog") == 0) {
@@ -6471,6 +8850,10 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "--soften-cryptexd") == 0) {
         return soften_cryptexd_main(argv[2]);
     }
+    if (argc == 2 &&
+        strcmp(argv[1], "--carrier-bridge-load-audit") == 0) {
+        return carrier_bridge_load_audit_main(argv[0]);
+    }
     {
         fprintf(stderr,
                 "usage: %s --first-live-precursor|--watchdog-arm-test|"
@@ -6478,7 +8861,7 @@ int main(int argc, char **argv) {
                 "--external-parallel-bind-audit|"
                 "--external-parallel-live-proof|"
                 "--inject-existing-candidate PID|"
-                "--soften-cryptexd PID\n"
+                "--soften-cryptexd PID|--carrier-bridge-load-audit\n"
                 "This precursor restores or preserves exact stock "
                 "SpringBoard according to the selected mode.\n",
                 argv[0]);

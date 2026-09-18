@@ -65,6 +65,22 @@ TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
+CUSTOMD_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd.sh"
+CUSTOMD_TRACE_REEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_trace_me_reexec_probe.sh"
+CUSTOMD_SETEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_springboard_setexec.sh"
+CUSTOMD_BUILD_DIRECTORY="$WORK_DIR/customd-build"
+CUSTOMD_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd"
+CUSTOMCTL_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customctl"
+CUSTOMD_REGISTRAR_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-candidate-registrar"
+CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-trace-me-reexec-probe"
+CUSTOMD_SETEXEC_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-springboard-setexec"
+CUSTOMD_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd"
+CUSTOMCTL_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customctl"
+CUSTOMD_REGISTRAR_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-candidate-registrar"
+CUSTOMD_TRACE_REEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-trace-me-reexec-probe"
+CUSTOMD_SETEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-springboard-setexec"
+CUSTOMD_JOB_PLIST_SOURCE="$SCRIPT_DIR/../../Sources/com.openai.customd.plist"
+EMBEDDED_CUSTOMD_JOB_PLIST="$IMAGE_ROOT/usr/local/share/codex-bootstrap/com.openai.customd.plist"
 DYLD_JB_ADMISSION_HOOK_SOURCE="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.c"
 DYLD_JB_ADMISSION_HOOK_HEADER="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.h"
 DYLD_JB_ADMISSION_HOOK="$IMAGE_ROOT/usr/local/lib/codex-dyld-jb-admission-hook.dylib"
@@ -259,6 +275,17 @@ require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
     die "missing pinned 24A437 SpringBoard source"
 [[ -f "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" ]] || \
     die "missing pinned 24A437 SpringBoard Info.plist source"
+[[ -x "$CUSTOMD_BUILDER" ]] || die "missing customd builder"
+[[ -x "$CUSTOMD_TRACE_REEXEC_BUILDER" ]] || \
+    die "missing customd trace/re-exec builder"
+[[ -x "$CUSTOMD_SETEXEC_BUILDER" ]] || \
+    die "missing customd SpringBoard SETEXEC builder"
+[[ -f "$CUSTOMD_JOB_PLIST_SOURCE" ]] || die "missing customd job plist"
+sh -n "$CUSTOMD_BUILDER"
+sh -n "$CUSTOMD_TRACE_REEXEC_BUILDER"
+zsh -n "$CUSTOMD_SETEXEC_BUILDER"
+plutil -lint "$CUSTOMD_JOB_PLIST_SOURCE" >/dev/null || \
+    die "invalid customd job plist"
 sh -n "$APT_LIST_NORMALIZER"
 [[ -f "$ELLEKIT_KEY" ]] || die "missing ElleKit repository keyring"
 [[ -f "$BIGBOSS_KEY" ]] || die "missing BigBoss repository keyring"
@@ -338,7 +365,7 @@ python3 "$SCRIPT_DIR/prepare_runtime_baseline_history.py" \
     "$PROCURSUS_RUNTIME_HISTORY_INPUT"
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ORIGINAL_TRUSTED_PACKAGE_ROOT" \
-    "$TRUSTED_PACKAGE_ROOT" \
+    "$TRUSTED_PACKAGE_ROOT" "$CUSTOMD_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" "$TRUSTED_PACKAGE_CDHASHES" \
     "$TRUSTED_RUNTIME_CDHASHES" "$PROCURSUS_RUNTIME_BASELINE_INPUT"
 mkdir -p \
@@ -613,6 +640,67 @@ codesign --force --sign - --timestamp=none --pagesize 4096 \
 codesign --verify --strict --all-architectures "$EXEC_WORKER" || \
     die "execution worker signature is invalid"
 
+# customd pins the finalized worker, candidate, candidate Info.plist, and
+# launchctl bytes plus its fixed transaction helpers at build time. Build the
+# helpers first, then customd only after every pinned input is complete. This
+# prevents a later bootstrap step from silently invalidating its boot policy
+# while retaining the system LaunchDaemon packaging.
+"$CUSTOMD_TRACE_REEXEC_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
+"$CUSTOMD_SETEXEC_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
+CODEX_CUSTOMD_WORKER_PATH="$EXEC_WORKER" \
+CODEX_CUSTOMD_CANDIDATE_PATH="$SPRINGBOARD_CANDIDATE" \
+CODEX_CUSTOMD_CANDIDATE_INFO_PATH="$SPRINGBOARD_CANDIDATE_INFO" \
+CODEX_CUSTOMD_LAUNCHCTL_PATH="$LAUNCHCTL" \
+CODEX_CUSTOMD_TRACE_REEXEC_PROBE_PATH="$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" \
+CODEX_CUSTOMD_SETEXEC_HELPER_PATH="$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" \
+    "$CUSTOMD_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
+[[ -x "$CUSTOMD_BUILD_EXECUTABLE" && -x "$CUSTOMCTL_BUILD_EXECUTABLE" && \
+   -x "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE" && \
+   -x "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" && \
+   -x "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" ]] || \
+    die "customd build did not produce all executables"
+cp "$CUSTOMD_BUILD_EXECUTABLE" "$CUSTOMD_EXECUTABLE"
+cp "$CUSTOMCTL_BUILD_EXECUTABLE" "$CUSTOMCTL_EXECUTABLE"
+cp "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE" \
+    "$CUSTOMD_REGISTRAR_EXECUTABLE"
+cp "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" \
+    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE"
+cp "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" "$CUSTOMD_SETEXEC_EXECUTABLE"
+chmod 0755 "$CUSTOMD_EXECUTABLE" "$CUSTOMCTL_EXECUTABLE" \
+    "$CUSTOMD_REGISTRAR_EXECUTABLE" "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" \
+    "$CUSTOMD_SETEXEC_EXECUTABLE"
+[[ "$(sha256_of "$CUSTOMD_BUILD_EXECUTABLE")" == \
+   "$(sha256_of "$CUSTOMD_EXECUTABLE")" && \
+   "$(sha256_of "$CUSTOMCTL_BUILD_EXECUTABLE")" == \
+   "$(sha256_of "$CUSTOMCTL_EXECUTABLE")" && \
+   "$(sha256_of "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE")" == \
+   "$(sha256_of "$CUSTOMD_REGISTRAR_EXECUTABLE")" && \
+   "$(sha256_of "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE")" == \
+   "$(sha256_of "$CUSTOMD_TRACE_REEXEC_EXECUTABLE")" && \
+   "$(sha256_of "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE")" == \
+   "$(sha256_of "$CUSTOMD_SETEXEC_EXECUTABLE")" ]] || \
+    die "embedded customd executables changed while copying"
+codesign --verify --strict --all-architectures "$CUSTOMD_EXECUTABLE" || \
+    die "customd signature is invalid"
+codesign --verify --strict --all-architectures "$CUSTOMCTL_EXECUTABLE" || \
+    die "customctl signature is invalid"
+codesign --verify --strict --all-architectures \
+    "$CUSTOMD_REGISTRAR_EXECUTABLE" || \
+    die "customd candidate registrar signature is invalid"
+codesign --verify --strict --all-architectures \
+    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" || \
+    die "customd trace/re-exec probe signature is invalid"
+codesign --verify --strict --all-architectures \
+    "$CUSTOMD_SETEXEC_EXECUTABLE" || \
+    die "customd SpringBoard SETEXEC helper signature is invalid"
+cp "$CUSTOMD_JOB_PLIST_SOURCE" "$EMBEDDED_CUSTOMD_JOB_PLIST"
+chmod 0644 "$EMBEDDED_CUSTOMD_JOB_PLIST"
+plutil -lint "$EMBEDDED_CUSTOMD_JOB_PLIST" >/dev/null || \
+    die "embedded customd job plist is invalid"
+[[ "$(sha256_of "$CUSTOMD_JOB_PLIST_SOURCE")" == \
+   "$(sha256_of "$EMBEDDED_CUSTOMD_JOB_PLIST")" ]] || \
+    die "embedded customd job plist changed while copying"
+
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -arch arm64e \
@@ -680,6 +768,11 @@ for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
     "$EXEC_INTERPOSER" \
+    "$CUSTOMD_EXECUTABLE" \
+    "$CUSTOMCTL_EXECUTABLE" \
+    "$CUSTOMD_REGISTRAR_EXECUTABLE" \
+    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" \
+    "$CUSTOMD_SETEXEC_EXECUTABLE" \
     "$DYLD_JB_ADMISSION_HOOK" \
     "$RUNTIME_TRUST_CLIENT" \
     "$RUNTIME_TRUST_HELPER" \

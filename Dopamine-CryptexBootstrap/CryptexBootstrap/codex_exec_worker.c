@@ -1121,6 +1121,62 @@ static void *find_main_entry(const struct mach_header_64 *header) {
     return NULL;
 }
 
+static int run_macho_inplace(const char *loadPath, int guestArgc,
+                             char **guestArgv) {
+    uint32_t flags = 0;
+    errno = 0;
+    int csStatus = csops(getpid(), CODEX_CS_OPS_STATUS, &flags,
+                         sizeof(flags));
+    int csError = csStatus == 0 ? 0 : errno;
+    bool debugged = csStatus == 0 &&
+                    (flags & CODEX_CS_DEBUGGED) != 0 &&
+                    (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    dprintf(debugged ? STDOUT_FILENO : STDERR_FILENO,
+            "codex-exec-worker pid=%d mode=macho-inplace "
+            "phase=debugged csops=%d errno=%d flags=0x%08x "
+            "debugged=%d\n",
+            getpid(), csStatus, csError, flags, debugged);
+    if (!debugged) {
+        return 96;
+    }
+
+    bool dyldBypassInstalled = install_dyld_validation_bypass();
+    bool signatureAttached =
+        !dyldBypassInstalled && attach_macho_signatures(loadPath);
+    dprintf(dyldBypassInstalled || signatureAttached ? STDOUT_FILENO
+                                                     : STDERR_FILENO,
+            "codex-exec-worker pid=%d mode=macho-inplace dyldBypass=%d "
+            "signatureAttached=%d path=%s\n",
+            getpid(), dyldBypassInstalled, signatureAttached, loadPath);
+
+    void *handle = dlopen(loadPath, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
+    if (handle == NULL) {
+        const char *error = dlerror();
+        dprintf(STDERR_FILENO,
+                "codex-exec-worker pid=%d mode=macho-inplace "
+                "dlopen=false path=%s error=%s\n",
+                getpid(), loadPath, error != NULL ? error : "unknown");
+        return 79;
+    }
+
+    const struct mach_header_64 *header = find_loaded_header(loadPath);
+    void *entry = find_main_entry(header);
+    if (entry == NULL) {
+        dprintf(STDERR_FILENO,
+                "codex-exec-worker pid=%d mode=macho-inplace "
+                "entry=false path=%s\n",
+                getpid(), loadPath);
+        return 83;
+    }
+    dprintf(STDOUT_FILENO,
+            "codex-exec-worker pid=%d mode=macho-inplace entry=%p "
+            "path=%s\n",
+            getpid(), entry, loadPath);
+    int result = ((int (*)(int, char **, char **))entry)(
+        guestArgc, guestArgv, environ);
+    return result & 0xff;
+}
+
 static int prepare_local_executable_pages(const uint8_t *payload,
                                           size_t payloadSize,
                                           mach_vm_address_t *address,
@@ -1674,9 +1730,31 @@ int main(int argc, char *argv[]) {
         unlink(runtimeCopy);
         return result;
     }
+    if (argc >= 3 && strcmp(argv[1], "--macho-inplace") == 0) {
+        char source[PATH_MAX];
+        char runtimeCopy[PATH_MAX] = {0};
+        if (!path_is_managed(argv[2], source) ||
+            !make_macho_copy(source, runtimeCopy)) {
+            dprintf(STDERR_FILENO,
+                    "codex-exec-worker mode=macho-inplace prepare=false "
+                    "path=%s errno=%d\n",
+                    argv[2], errno);
+            return 67;
+        }
+        argv[2] = source;
+        int result = run_macho_inplace(runtimeCopy, argc - 2, argv + 2);
+        if (unlink(runtimeCopy) != 0) {
+            dprintf(STDERR_FILENO,
+                    "codex-exec-worker mode=macho-inplace cleanup=false "
+                    "path=%s errno=%d\n",
+                    runtimeCopy, errno);
+        }
+        return result;
+    }
     dprintf(STDERR_FILENO,
             "usage: %s --self-test|--raw file|--dylib file|"
-            "--macho executable [arguments...]\n",
+            "--macho executable [arguments...]|"
+            "--macho-inplace executable [arguments...]\n",
             argv[0]);
     return 64;
 }

