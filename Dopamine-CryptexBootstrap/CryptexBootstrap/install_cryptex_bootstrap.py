@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
-from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
+from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 from pymobiledevice3.remote.xpc_message import XpcUInt64Type
 from pymobiledevice3.services.cryptexd import (
     DDI_NONCE_PERSISTENCE,
@@ -146,13 +146,25 @@ def _validate_bundle(
     }
 
 
-async def _open_rsd(args: argparse.Namespace) -> Any:
+async def _open_rsd(args: argparse.Namespace) -> tuple[Any, Any | None]:
     if args.tunneld:
         rsd = await get_tunneld_device_by_udid(args.udid)
         if rsd is None:
             raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
-        return rsd
-    return await establish_userspace_rsd(serial=args.udid)
+        return rsd, None
+    tunnel = UserspaceRsdTunnel(serial=args.udid, autopair=True)
+    try:
+        return await tunnel.aopen(), tunnel
+    except Exception:
+        await tunnel.aclose()
+        raise
+
+
+async def _close_rsd(rsd: Any, owner: Any | None) -> None:
+    if owner is not None:
+        await owner.aclose()
+    else:
+        await rsd.close()
 
 
 async def _install(args: argparse.Namespace) -> dict[str, Any]:
@@ -176,7 +188,7 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
     ).parent
     ticket = (variant_dir / "im4m").read_bytes()
 
-    rsd = await _open_rsd(args)
+    rsd, rsd_owner = await _open_rsd(args)
     try:
         service = CryptexdService(rsd)
         before = await service.copy_installed()
@@ -188,11 +200,9 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 f"refusing multiple installed versions of {identifier}: "
                 f"{[item.version for item in existing]}"
             )
-        if existing and existing[0].version == version:
-            raise ValueError(
-                f"refusing to replace {identifier} with the same version "
-                f"{version}"
-            )
+        exact_version_installed = bool(
+            existing and existing[0].version == version
+        )
         chip = await service.read_personalization_identifiers()
         nonce = await service.cryptex_nonce(identity["Cryptex1,NonceDomain"])
         ticket_checks = _ticket_checks(ticket, identity, chip, nonce, digests)
@@ -223,6 +233,15 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
         if args.validate_only:
             return preflight | {"installed": False}
 
+        if exact_version_installed:
+            return preflight | {
+                "installed": {"identifier": identifier, "version": version},
+                "replaced": None,
+                "installAttempts": 0,
+                "recoveredExistingInstall": True,
+                "sameVersionAlreadyInstalled": True,
+            }
+
         replaced = None
         if existing:
             replaced = {
@@ -233,7 +252,7 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 existing[0].identifier, existing[0].version
             )
     finally:
-        await rsd.close()
+        await _close_rsd(rsd, rsd_owner)
 
     expected = [{"identifier": identifier, "version": version}]
     properties: dict[str, Any] = {
@@ -263,8 +282,10 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
         StreamClosedError,
     )
     for attempt in range(1, INSTALL_ATTEMPTS + 1):
-        install_rsd = await _open_rsd(args)
+        install_rsd = None
+        install_rsd_owner = None
         try:
+            install_rsd, install_rsd_owner = await _open_rsd(args)
             service = CryptexdService(install_rsd)
             current = await service.copy_installed()
             installed = [
@@ -344,7 +365,11 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 flush=True,
             )
         finally:
-            await install_rsd.close()
+            if install_rsd is not None:
+                try:
+                    await _close_rsd(install_rsd, install_rsd_owner)
+                except retryable:
+                    pass
         await asyncio.sleep(attempt)
 
     raise AssertionError("unreachable Cryptex install retry state")

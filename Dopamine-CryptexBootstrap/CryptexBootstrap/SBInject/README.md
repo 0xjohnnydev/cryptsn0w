@@ -10,6 +10,14 @@ four required stages and drops its unrelated process-wide policy changes:
    supplied dyld mmap/fcntl validation bypass; and
 4. the hook loads ElleKit's injector before SpringBoard enters `main`.
 
+The same pre-main JIT/dyld lane redirects the stock Settings executable to the
+resigned `notPreferences` candidate. It loads pinned PreferenceLoader 2.3.3,
+then the fixed `preferences-bridge.dylib` that adapts registrations to iOS 27's
+`SettingsSidebarListState`. The bridge discovers Swift metadata at runtime,
+updates the section array and both lookup dictionaries before SwiftUI evaluates
+each snapshot, and sends row selections through libprefs to the installed
+preference bundle controller. It is inert when the iOS 27 model class is absent.
+
 The launchd hook is inert unless the root-owned
 `/var/jb/var/lib/sbinject/enabled` marker exists.  Three replacement launches
 inside sixty seconds remove that marker and return launchd to the stock
@@ -29,3 +37,9 @@ rootless `/var/jb` layout), identifies dylibs in the standard rootless tweak
 directories, requires this SBInject lane to be ready, and marks a respring. The
 debugged replacement SpringBoard and its dyld bypass provide the sole admission
 path for the ad-hoc signed third-party tweak dylibs ElleKit loads.
+
+Sileo itself is fixed control-plane code, not an incoming package exception.
+Its main executable, helper, constructor shim, and three bundled libraries are
+all byte-matched across the IPA, rootless app, and Cryptex payload, and their
+CDHashes are asserted in the generated fixed trust cache. The trust cache is
+never changed after installation.

@@ -64,26 +64,24 @@ BROKER_IMAGE_LEAF = "F/libzstd.1.dylib"
 MH_DYLIB = 6
 
 EXPECTED_BROKER_UUIDS = {
-    uuid.UUID("F4418229-5CB5-377C-9B89-979E821F27FA"),
-    uuid.UUID("8CCC6170-E98B-3008-A486-D3CF666AA2E5"),
+    uuid.UUID("D9E34AF7-0E0C-3EFB-9EB6-9F09D27F176E"),
 }
 BROKER_POSIX_SPAWN_OFFSET = 0x41DC
 EXPECTED_BROKER_POSIX_SPAWN_PREFIX = bytes.fromhex(
-    "fc6fbea9fd7b01a9fd430091ffc316d168000090084540f9"
+    "fc6fbea9fd7b01a9fd430091ff8318d168000090084540f9"
     "080140f9a8831ef8"
 )
-BROKER_WAITPID_OFFSET = 0x4B30
+BROKER_WAITPID_OFFSET = 0x4D50
 EXPECTED_BROKER_WAITPID_PREFIX = bytes.fromhex(
     "ff0301d1fd7b03a9fdc30091a0831fb8a1031ff8a2c31e"
     "b88000009000400291"
 )
-BROKER_RETURN_GATE_OFFSET = 0x6418
+BROKER_RETURN_GATE_OFFSET = 0x6528
 EXPECTED_BROKER_RETURN_GATE_CONTEXT = bytes.fromhex(
     "ff832791fd7b41a9fc6fc2a8c0035fd6"
 )
 BROKER_DIRECT_REQUEST_LAYOUTS = {
-    uuid.UUID("F4418229-5CB5-377C-9B89-979E821F27FA"): 0x81F0,
-    uuid.UUID("8CCC6170-E98B-3008-A486-D3CF666AA2E5"): 0x8464,
+    uuid.UUID("D9E34AF7-0E0C-3EFB-9EB6-9F09D27F176E"): 0x7FB0,
 }
 EXPECTED_BROKER_DIRECT_REQUEST_PREFIX = bytes.fromhex(
     "ff4307d1fc6f1ba9fd7b1ca9fd030791"
@@ -100,6 +98,8 @@ EXPECTED_WAITPID_STUB = bytes.fromhex(
 )
 
 INSTALL_PATH = "/var/jb/usr/bin/install"
+APT_GET_PATH = "/var/jb/usr/bin/apt-get"
+SBRELOAD_PATH = "/var/jb/usr/bin/sbreload"
 NOHUP_PATH = "/var/jb/usr/bin/nohup"
 SLEEP_PATH = "/var/jb/usr/bin/sleep"
 WORKER_PATH = "/var/jb/usr/libexec/codex-exec-worker"
@@ -180,6 +180,36 @@ RUNTIME_BROKER_HOOK_REQUEST_ARGUMENTS = (
     "print -r -- \"$response\" >| \"$request_log\"; "
     "[[ $response == 'OK injected' ]] || exit 94",
 )
+
+SILEO_APT_TRANSACTION_OPTIONS = (
+    "-qf",
+    "--yes",
+    "--allow-unauthenticated",
+    "--allow-remove-essential",
+    "--allow-change-held-packages",
+    "--allow-downgrades",
+    "--no-download",
+    "-oDir::State::lists=sileolists/",
+    "-oAcquire::AllowUnsizedPackages=true",
+    "-oDpkg::Use-Pty=0",
+)
+
+
+def package_name_argument(value: str) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,199}", value):
+        raise argparse.ArgumentTypeError("invalid Debian package name")
+    return value
+
+
+def package_spec_argument(value: str) -> str:
+    if not re.fullmatch(
+        r"[a-z0-9][a-z0-9+.-]{1,199}"
+        r"(?::[a-z0-9][a-z0-9-]{0,63})?"
+        r"(?:=[A-Za-z0-9][A-Za-z0-9.+:~_-]{0,199})?",
+        value,
+    ):
+        raise argparse.ArgumentTypeError("invalid Debian package specification")
+    return value
 WORKER_HOST_PROBE_UPLOAD_PATH = (
     "/var/mobile/Media/codex-worker-host-task-port-probe"
 )
@@ -324,6 +354,35 @@ def parse_args() -> argparse.Namespace:
         "--validate-only",
         action="store_true",
         help="validate the exact process and bound broker stubs without mutation",
+    )
+    actions.add_argument(
+        "--sileo-remove-package",
+        metavar="PACKAGE",
+        type=package_name_argument,
+        help="exercise Sileo's trailing-minus remove transaction through the broker",
+    )
+    actions.add_argument(
+        "--sileo-install-package",
+        metavar="PACKAGE[=VERSION]",
+        type=package_spec_argument,
+        help="exercise a fresh Sileo package install through the broker",
+    )
+    actions.add_argument(
+        "--sileo-reinstall-package",
+        metavar="PACKAGE[=VERSION]",
+        type=package_spec_argument,
+        help="exercise a Sileo --reinstall transaction through the broker",
+    )
+    actions.add_argument(
+        "--sileo-update-package",
+        metavar="PACKAGE[=VERSION]",
+        type=package_spec_argument,
+        help="exercise a version-changing Sileo install/update through the broker",
+    )
+    actions.add_argument(
+        "--sileo-respring-button",
+        action="store_true",
+        help="invoke Sileo's exact rootless sbreload button command",
     )
     actions.add_argument(
         "--stage-springboard-live-precursor",
@@ -1009,7 +1068,39 @@ async def run(args: argparse.Namespace) -> int:
                 f"scratch-allocated address=0x{scratch:x} size=0x{SCRATCH_SIZE:x}"
             )
 
-            if args.stage_springboard_live_precursor:
+            if args.sileo_remove_package is not None:
+                root_arguments = (
+                    APT_GET_PATH,
+                    *SILEO_APT_TRANSACTION_OPTIONS,
+                    "install",
+                    "--reinstall",
+                    f"{args.sileo_remove_package}-",
+                )
+            elif args.sileo_install_package is not None:
+                root_arguments = (
+                    APT_GET_PATH,
+                    *SILEO_APT_TRANSACTION_OPTIONS,
+                    "install",
+                    args.sileo_install_package,
+                )
+            elif args.sileo_reinstall_package is not None:
+                root_arguments = (
+                    APT_GET_PATH,
+                    *SILEO_APT_TRANSACTION_OPTIONS,
+                    "install",
+                    "--reinstall",
+                    args.sileo_reinstall_package,
+                )
+            elif args.sileo_update_package is not None:
+                root_arguments = (
+                    APT_GET_PATH,
+                    *SILEO_APT_TRANSACTION_OPTIONS,
+                    "install",
+                    args.sileo_update_package,
+                )
+            elif args.sileo_respring_button:
+                root_arguments = (SBRELOAD_PATH,)
+            elif args.stage_springboard_live_precursor:
                 root_arguments = (
                     INSTALL_PATH,
                     "-m",
@@ -1441,8 +1532,19 @@ async def run(args: argparse.Namespace) -> int:
             # waitpid can be entered for a bounded window and then interrupted.
             # Keep the exact direct broker call for commands that are expected
             # to finish synchronously.
+            package_action = any(
+                value is not None
+                for value in (
+                    args.sileo_remove_package,
+                    args.sileo_install_package,
+                    args.sileo_reinstall_package,
+                    args.sileo_update_package,
+                )
+            )
             direct_mode = not (
-                args.stage_springboard_live_precursor
+                package_action
+                or args.sileo_respring_button
+                or args.stage_springboard_live_precursor
                 or args.stage_candidate_injection_bridge
                 or args.request_runtime_broker_hook
                 or args.export_runtime_broker_log
@@ -1465,7 +1567,7 @@ async def run(args: argparse.Namespace) -> int:
             )
             spawn_arguments = (
                 root_arguments
-                if direct_mode
+                if direct_mode or args.sileo_respring_button
                 else (helper_path, *root_arguments)
             )
             payload, argv_address, envp_address, pid_address = (
@@ -1587,7 +1689,27 @@ async def run(args: argparse.Namespace) -> int:
                     raise ProtocolError(
                         "direct-request code changed during broker call"
                     )
-                if args.export_runtime_carrier_log:
+                if args.sileo_remove_package is not None:
+                    print(
+                        "sileo-package-remove=success "
+                        f"package={args.sileo_remove_package}"
+                    )
+                elif args.sileo_install_package is not None:
+                    print(
+                        "sileo-package-install=success "
+                        f"package={args.sileo_install_package}"
+                    )
+                elif args.sileo_reinstall_package is not None:
+                    print(
+                        "sileo-package-reinstall=success "
+                        f"package={args.sileo_reinstall_package}"
+                    )
+                elif args.sileo_update_package is not None:
+                    print(
+                        "sileo-package-update=success "
+                        f"package={args.sileo_update_package}"
+                    )
+                elif args.export_runtime_carrier_log:
                     print(
                         "runtime-carrier-log-export=success request=direct "
                         f"destination={CARRIER_LOG_EXPORT_PATH}"
@@ -1832,8 +1954,11 @@ async def run(args: argparse.Namespace) -> int:
                     f"target=0x{observed_spawn_target:x}"
                 )
 
-            if (args.launch_runtime_carrier or
-                    args.launch_worker_host_runtime_broker):
+            if (
+                package_action
+                or args.launch_runtime_carrier
+                or args.launch_worker_host_runtime_broker
+            ):
                 # The virtual job's worker must get CPU time after the
                 # interposed spawn returns.  Its root peer intentionally
                 # remains blocked supervising the resident carrier, so a
@@ -1884,11 +2009,12 @@ async def run(args: argparse.Namespace) -> int:
                 state_saved = False
                 await expect_ok(remote, f"_m{scratch:x}")
                 scratch = None
-                launch_name = (
-                    "runtime-carrier"
-                    if args.launch_runtime_carrier
-                    else "worker-host-runtime-broker"
-                )
+                if package_action:
+                    launch_name = "sileo-package"
+                elif args.launch_runtime_carrier:
+                    launch_name = "runtime-carrier"
+                else:
+                    launch_name = "worker-host-runtime-broker"
                 print(
                     f"{launch_name}-request=accepted fake-pid={fake_pid} "
                     f"waited=0 dispatch-window={args.dispatch_window:.1f}"

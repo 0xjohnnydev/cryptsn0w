@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build and verify the pinned iPhone 13/iOS 27 SpringBoard replacement.
+"""Build and verify a pinned iPhone 13/iOS 27 SBInject replacement.
 
 This is deliberately a local-only operation.  It copies the exact extracted
-SpringBoard executable, merges the requested debugging/runtime-code policy
+Apple executable, merges the requested debugging/runtime-code policy
 into its original entitlements, and emits a deterministic ad-hoc signature.
 It does not contact a device, request a ticket, create a Cryptex, or install
 anything.
@@ -33,6 +33,15 @@ EXPECTED_INFO_SHA256 = (
     "ce3bfead94676c8daf111f009211467a9c70f6cbceb73e7a0fcde1f03b320703"
 )
 
+PREFERENCES_SOURCE_SHA256 = (
+    "e59851f14f29409590a6de76ca2fe9b9912341aee526a278692ef0d7a86ee2f3"
+)
+PREFERENCES_IDENTIFIER = "com.apple.Preferences"
+PREFERENCES_UUID = "7D43B81D-DCA7-3CB8-A9CD-684E2C577D81"
+PREFERENCES_INFO_SHA256 = (
+    "9a11c360bc42eeae529e8993c007887b06953d7b990aa12112bc3e61e8d30426"
+)
+
 EXPECTED_INFO_VALUES = {
     "CFBundleExecutable": "SpringBoard",
     "CFBundleIdentifier": "com.apple.springboard",
@@ -47,6 +56,18 @@ EXPECTED_INFO_VALUES = {
     "UIApplicationInitializationContextFactoryClass": "SpringBoard",
 }
 
+PREFERENCES_INFO_VALUES = {
+    "CFBundleExecutable": "Preferences",
+    "CFBundleIdentifier": "com.apple.Preferences",
+    "CFBundlePackageType": "APPL",
+    "CFBundleName": "Preferences",
+    "CFBundleVersion": "2027.0.10.401",
+    "CFBundleShortVersionString": "1.0",
+    "MinimumOSVersion": "27.0",
+    "DTPlatformName": "iphoneos",
+    "DTPlatformVersion": "27.0",
+}
+
 ADDED_ENTITLEMENTS = (
     "get-task-allow",
     "com.apple.private.cs.debugger",
@@ -58,6 +79,32 @@ ADDED_ENTITLEMENTS = (
     "dynamic-codesigning",
 )
 
+PREFERENCES_ADDED_ENTITLEMENTS = ADDED_ENTITLEMENTS + (
+    "com.apple.private.debugger",
+)
+
+TARGET_PROFILES = {
+    "springboard": {
+        "display_name": "SpringBoard",
+        "source_sha256": EXPECTED_SOURCE_SHA256,
+        "identifier": EXPECTED_IDENTIFIER,
+        "architecture": EXPECTED_ARCHITECTURE,
+        "uuid": EXPECTED_UUID,
+        "info_sha256": EXPECTED_INFO_SHA256,
+        "info_values": EXPECTED_INFO_VALUES,
+        "added_entitlements": ADDED_ENTITLEMENTS,
+    },
+    "preferences": {
+        "display_name": "Preferences",
+        "source_sha256": PREFERENCES_SOURCE_SHA256,
+        "identifier": PREFERENCES_IDENTIFIER,
+        "architecture": EXPECTED_ARCHITECTURE,
+        "uuid": PREFERENCES_UUID,
+        "info_sha256": PREFERENCES_INFO_SHA256,
+        "info_values": PREFERENCES_INFO_VALUES,
+        "added_entitlements": PREFERENCES_ADDED_ENTITLEMENTS,
+    },
+}
 
 class BuildError(RuntimeError):
     pass
@@ -125,38 +172,54 @@ def macho_identity(path: pathlib.Path) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
-def validate_info_plist(path: pathlib.Path) -> dict[str, Any]:
+def validate_info_plist(
+    path: pathlib.Path,
+    *,
+    target: str,
+    display_name: str,
+    expected_hash: str,
+    expected_values: dict[str, Any],
+) -> dict[str, Any]:
     observed_hash = sha256(path)
-    if observed_hash != EXPECTED_INFO_SHA256:
+    if observed_hash != expected_hash:
         raise BuildError(
-            "SpringBoard Info.plist hash mismatch: "
-            f"expected {EXPECTED_INFO_SHA256}, got {observed_hash}"
+            f"{display_name} Info.plist hash mismatch: "
+            f"expected {expected_hash}, got {observed_hash}"
         )
     try:
         value = plistlib.loads(path.read_bytes())
     except Exception as error:
-        raise BuildError(f"could not parse SpringBoard Info.plist: {error}") from error
+        raise BuildError(
+            f"could not parse {display_name} Info.plist: {error}"
+        ) from error
     if not isinstance(value, dict):
-        raise BuildError("SpringBoard Info.plist is not a dictionary")
-    for key, expected in EXPECTED_INFO_VALUES.items():
+        raise BuildError(f"{display_name} Info.plist is not a dictionary")
+    for key, expected in expected_values.items():
         if value.get(key) != expected:
             raise BuildError(
-                f"SpringBoard Info.plist {key} mismatch: "
+                f"{display_name} Info.plist {key} mismatch: "
                 f"expected {expected!r}, got {value.get(key)!r}"
             )
     if value.get("CFBundleSupportedPlatforms") != ["iPhoneOS"]:
-        raise BuildError("SpringBoard Info.plist has unexpected platforms")
+        raise BuildError(f"{display_name} Info.plist has unexpected platforms")
     device_family = value.get("UIDeviceFamily")
     if not isinstance(device_family, list) or not {1, 2}.issubset(device_family):
-        raise BuildError("SpringBoard Info.plist lacks iPhone/iPad device families")
-    try:
-        frontboard_mach_name = value["BSServiceDomains"]["com.apple.frontboard"][
-            "MachName"
-        ]
-    except (KeyError, TypeError) as error:
-        raise BuildError("SpringBoard Info.plist lacks its frontboard domain") from error
-    if frontboard_mach_name != "com.apple.frontboard.systemappservices":
-        raise BuildError("SpringBoard Info.plist has an unexpected frontboard Mach name")
+        raise BuildError(
+            f"{display_name} Info.plist lacks iPhone/iPad device families"
+        )
+    if target == "springboard":
+        try:
+            frontboard_mach_name = value["BSServiceDomains"][
+                "com.apple.frontboard"
+            ]["MachName"]
+        except (KeyError, TypeError) as error:
+            raise BuildError(
+                "SpringBoard Info.plist lacks its frontboard domain"
+            ) from error
+        if frontboard_mach_name != "com.apple.frontboard.systemappservices":
+            raise BuildError(
+                "SpringBoard Info.plist has an unexpected frontboard Mach name"
+            )
     return value
 
 
@@ -165,6 +228,7 @@ def sign_candidate(
     destination: pathlib.Path,
     entitlement_path: pathlib.Path,
     *,
+    identifier: str,
     load_dylib: str | None,
     load_dylib_patcher: pathlib.Path | None,
 ) -> None:
@@ -189,7 +253,7 @@ def sign_candidate(
         "4096",
         "--generate-entitlement-der",
         "--identifier",
-        EXPECTED_IDENTIFIER,
+        identifier,
         "--entitlements",
         str(entitlement_path),
         str(destination),
@@ -202,10 +266,16 @@ def main() -> int:
     parser.add_argument("source", type=pathlib.Path)
     parser.add_argument("output_directory", type=pathlib.Path)
     parser.add_argument(
+        "--target",
+        choices=tuple(TARGET_PROFILES),
+        default="springboard",
+        help="pinned target profile (default: springboard)",
+    )
+    parser.add_argument(
         "--info-plist",
         type=pathlib.Path,
         help=(
-            "exact live 24A435 SpringBoard.app Info.plist to validate and "
+            "exact live 24A435 app Info.plist to validate and "
             "write beside the candidate"
         ),
     )
@@ -228,6 +298,20 @@ def main() -> int:
         help="path to the pinned patch_load_dylib.py implementation",
     )
     arguments = parser.parse_args()
+
+    profile = TARGET_PROFILES[arguments.target]
+    display_name = str(profile["display_name"])
+    expected_source_sha256 = str(profile["source_sha256"])
+    expected_identifier = str(profile["identifier"])
+    expected_architecture = str(profile["architecture"])
+    expected_uuid = str(profile["uuid"])
+    expected_info_sha256 = str(profile["info_sha256"])
+    expected_info_values = profile["info_values"]
+    added_entitlements = profile["added_entitlements"]
+    if not isinstance(expected_info_values, dict):
+        raise BuildError(f"invalid {display_name} Info.plist profile")
+    if not isinstance(added_entitlements, tuple):
+        raise BuildError(f"invalid {display_name} entitlement profile")
 
     source = arguments.source.resolve()
     output_directory = arguments.output_directory.resolve()
@@ -257,11 +341,11 @@ def main() -> int:
         if not load_dylib_patcher.is_file():
             raise BuildError(f"load-command patcher is missing: {load_dylib_patcher}")
     if not source.is_file():
-        raise BuildError(f"SpringBoard source is missing: {source}")
-    if sha256(source) != EXPECTED_SOURCE_SHA256:
+        raise BuildError(f"{display_name} source is missing: {source}")
+    if sha256(source) != expected_source_sha256:
         raise BuildError(
-            "SpringBoard source hash mismatch: "
-            f"expected {EXPECTED_SOURCE_SHA256}, got {sha256(source)}"
+            f"{display_name} source hash mismatch: "
+            f"expected {expected_source_sha256}, got {sha256(source)}"
         )
 
     info_source: pathlib.Path | None = None
@@ -269,25 +353,31 @@ def main() -> int:
     if arguments.info_plist is not None:
         info_source = arguments.info_plist.resolve()
         if not info_source.is_file():
-            raise BuildError(f"SpringBoard Info.plist is missing: {info_source}")
-        info_value = validate_info_plist(info_source)
+            raise BuildError(f"{display_name} Info.plist is missing: {info_source}")
+        info_value = validate_info_plist(
+            info_source,
+            target=arguments.target,
+            display_name=display_name,
+            expected_hash=expected_info_sha256,
+            expected_values=expected_info_values,
+        )
 
     source_details = code_signature_details(source)
-    if source_details.get("Identifier") != EXPECTED_IDENTIFIER:
+    if source_details.get("Identifier") != expected_identifier:
         raise BuildError(
-            "SpringBoard source identifier mismatch: "
+            f"{display_name} source identifier mismatch: "
             f"{source_details.get('Identifier', '<missing>')}"
         )
     source_uuid, source_architecture = macho_identity(source)
-    if source_uuid != EXPECTED_UUID or source_architecture != EXPECTED_ARCHITECTURE:
+    if source_uuid != expected_uuid or source_architecture != expected_architecture:
         raise BuildError(
-            "SpringBoard source identity mismatch: "
+            f"{display_name} source identity mismatch: "
             f"uuid={source_uuid} architecture={source_architecture}"
         )
 
     original_entitlements = entitlements(source)
     merged_entitlements = dict(original_entitlements)
-    for key in ADDED_ENTITLEMENTS:
+    for key in added_entitlements:
         prior = merged_entitlements.get(key)
         if prior not in (None, True):
             raise BuildError(f"refusing to replace non-true entitlement {key}: {prior!r}")
@@ -313,6 +403,7 @@ def main() -> int:
             source,
             candidate_path,
             entitlement_path,
+            identifier=expected_identifier,
             load_dylib=arguments.load_dylib,
             load_dylib_patcher=load_dylib_patcher,
         )
@@ -320,12 +411,15 @@ def main() -> int:
             source,
             second_candidate_path,
             entitlement_path,
+            identifier=expected_identifier,
             load_dylib=arguments.load_dylib,
             load_dylib_patcher=load_dylib_patcher,
         )
         deterministic = candidate_path.read_bytes() == second_candidate_path.read_bytes()
         if not deterministic:
-            raise BuildError("the ad-hoc signing recipe produced different binaries")
+            raise BuildError(
+                f"the {display_name} ad-hoc signing recipe produced different binaries"
+            )
 
         candidate_uuid, candidate_architecture = macho_identity(candidate_path)
         if (candidate_uuid, candidate_architecture) != (
@@ -333,12 +427,14 @@ def main() -> int:
             source_architecture,
         ):
             raise BuildError(
-                "candidate changed the Mach-O UUID/architecture: "
+                f"{display_name} candidate changed the Mach-O UUID/architecture: "
                 f"uuid={candidate_uuid} architecture={candidate_architecture}"
             )
         candidate_details = code_signature_details(candidate_path)
-        if candidate_details.get("Identifier") != EXPECTED_IDENTIFIER:
-            raise BuildError("candidate lost the com.apple.springboard identifier")
+        if candidate_details.get("Identifier") != expected_identifier:
+            raise BuildError(
+                f"candidate lost the {expected_identifier} identifier"
+            )
         cdhash = candidate_details.get("CDHash", "")
         if re.fullmatch(r"[0-9a-f]{40}", cdhash) is None:
             raise BuildError(f"candidate has an invalid CDHash: {cdhash!r}")
@@ -364,7 +460,7 @@ def main() -> int:
         final_info = output_directory / "Info.plist"
         manifest_path = output_directory / "build-manifest.json"
         manifest = {
-            "addedEntitlements": list(ADDED_ENTITLEMENTS),
+            "addedEntitlements": list(added_entitlements),
             "architecture": candidate_architecture,
             "candidate": {
                 "cdhash": cdhash,
@@ -382,13 +478,13 @@ def main() -> int:
                     "xmlEntitlementsSlotSha256", ""
                 ),
             },
-            "identifier": EXPECTED_IDENTIFIER,
+            "identifier": expected_identifier,
             "loadDylib": arguments.load_dylib,
             "source": {
                 "cdhash": source_details.get("CDHash", ""),
                 "entitlementCount": len(original_entitlements),
                 "path": str(source),
-                "sha256": EXPECTED_SOURCE_SHA256,
+                "sha256": expected_source_sha256,
             },
             "uuid": candidate_uuid,
         }
@@ -410,7 +506,7 @@ def main() -> int:
                 "path": str(final_info),
                 "sha256": sha256(info_path),
                 "source": str(info_source),
-                "sourceSha256": EXPECTED_INFO_SHA256,
+                "sourceSha256": expected_info_sha256,
             }
         manifest_path_temporary = temporary_directory / "build-manifest.json"
         manifest_path_temporary.write_text(

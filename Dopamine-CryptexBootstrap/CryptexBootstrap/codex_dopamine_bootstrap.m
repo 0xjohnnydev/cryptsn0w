@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <mach/mach.h>
 #include <notify.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
@@ -54,9 +55,7 @@ extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 #define CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES 8
 #define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 64
 #define CODEX_CS_OPS_STATUS 0
-#define CODEX_CS_OPS_CDHASH 5
 #define CODEX_CS_PLATFORM_BINARY 0x04000000U
-#define CODEX_CDHASH_SIZE 20U
 
 typedef struct codex_memorystatus_memlimit_properties {
     int32_t memlimit_active;
@@ -167,16 +166,31 @@ static NSString *const kSBInjectJitterdPlist =
      "com.openai.codex.sbinject.jitterd.plist";
 static NSString *const kSBInjectGeneralHook =
     @"/var/jb/usr/lib/sbinject/generalhook.dylib";
+static NSString *const kSBInjectPreferencesBridge =
+    @"/var/jb/usr/lib/sbinject/preferences-bridge.dylib";
 static NSString *const kSBInjectLaunchdHook =
-    @"/var/jb/usr/lib/sbinject/launchdhook.dylib";
+    @"/var/jb/usr/lib/sbinject/launchdhook-v3.dylib";
 static NSString *const kSBInjectBundle =
     @"/var/jb/System/Library/CoreServices/SpringBoard.app";
 static NSString *const kSBInjectBundleHook =
     @"/var/jb/System/Library/CoreServices/SpringBoard.app/g";
+static NSString *const kSBInjectPreferencesBundle =
+    @"/var/jb/Applications/Preferences.app";
+static NSString *const kSBInjectPreferencesBundleHook =
+    @"/var/jb/Applications/Preferences.app/g";
 static NSString *const kSBInjectEnableMarker =
     @"/var/jb/var/lib/sbinject/enabled";
 static NSString *const kSBInjectCrashMarker =
     @"/var/jb/var/lib/sbinject/disabled-crash-loop";
+static NSString *const kSBInjectSafeModeMarker =
+    @"/var/mobile/.sbinject-safe-mode";
+static NSString *const kElleKitSafeModeMarker = @"/var/mobile/.eksafemode";
+static NSString *const kSBInjectPreferencesEnableMarker =
+    @"/var/jb/var/lib/sbinject/preferences-enabled";
+static NSString *const kSBInjectPreferencesCrashMarker =
+    @"/var/jb/var/lib/sbinject/preferences-disabled-crash-loop";
+static NSString *const kSBInjectPreferencesRestartMarker =
+    @"/var/jb/var/lib/sbinject/preferences-restart-required";
 static NSString *const kSBInjectLaunchdReadyMarker =
     @"/var/jb/var/lib/sbinject/launchd-hook-ready";
 static NSString *const kSBInjectRespringMarker =
@@ -184,6 +198,8 @@ static NSString *const kSBInjectRespringMarker =
 static NSString *const kSpringBoardCandidateExecutable =
     @"/var/jb/System/Library/CoreServices/"
      "SpringBoard.app/notSpringBoard";
+static NSString *const kPreferencesCandidateExecutable =
+    @"/var/jb/Applications/Preferences.app/notPreferences";
 static NSString *const kHeadlessSileoExecutable =
     @"/var/jb/Applications/Sileo.app/Sileo";
 static NSString *const kElleKitInjectorExecutable =
@@ -213,8 +229,14 @@ static int run_and_wait_bounded(const char *executable,
                                 unsigned int timeoutMilliseconds);
 static bool is_exact_springboard_candidate_process(pid_t pid,
                                                     const char *path);
+static bool is_exact_preferences_candidate_process(pid_t pid,
+                                                    const char *path);
+static bool sbinject_managed_file(NSString *path, mode_t mode);
 static bool exact_empty_root_marker(NSString *path);
+static bool prepare_sbinject_redirect(const char *reason);
 static bool activate_sbinject_springboard(void);
+static bool activate_sbinject_preferences(void);
+static bool respring_sbinject_springboard(const char *reason);
 
 static void log_message(const char *format, ...) {
     va_list arguments;
@@ -1458,21 +1480,6 @@ static bool sbinject_validate_deb_paths(NSArray<NSString *> *paths,
     return success;
 }
 
-static bool sbinject_validate_deb_arguments(char *const arguments[],
-                                            const char *reason) {
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    for (NSUInteger index = 1;
-         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
-         arguments[index] != NULL;
-         ++index) {
-        NSString *path = [NSString stringWithUTF8String:arguments[index]];
-        if ([path hasSuffix:@".deb"]) {
-            [paths addObject:path];
-        }
-    }
-    return sbinject_validate_deb_paths(paths, reason);
-}
-
 static bool sbinject_validate_debs_from_standard_input(void) {
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     char *line = NULL;
@@ -1489,6 +1496,717 @@ static bool sbinject_validate_debs_from_standard_input(void) {
     }
     free(line);
     return sbinject_validate_deb_paths(paths, "apt-pre-install");
+}
+
+static bool rewrite_rootless_maintainer_shebang(NSString *path,
+                                                bool *changed,
+                                                NSString **errorText) {
+    if (changed != NULL) {
+        *changed = false;
+    }
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:path
+                                          options:0
+                                            error:&readError];
+    if (data == nil || data.length == 0 || data.length > 16U * 1024U * 1024U) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer script read failed: %@", readError];
+        }
+        return false;
+    }
+    const uint8_t *bytes = data.bytes;
+    NSUInteger newline = 0;
+    while (newline < data.length && bytes[newline] != '\n') {
+        ++newline;
+    }
+    if (newline == data.length || newline > 256U) {
+        return true;
+    }
+    NSString *firstLine = [[NSString alloc]
+        initWithBytes:bytes
+               length:newline
+             encoding:NSUTF8StringEncoding];
+    NSDictionary<NSString *, NSString *> *replacements = @{
+        @"#!/bin/sh" : @"#!/var/jb/bin/sh",
+        @"#!/bin/bash" : @"#!/var/jb/bin/bash",
+        @"#!/usr/bin/env sh" : @"#!/var/jb/bin/sh",
+        @"#!/usr/bin/env bash" : @"#!/var/jb/bin/bash",
+    };
+    NSString *replacement = replacements[firstLine];
+    if (replacement == nil) {
+        return true;
+    }
+    NSMutableData *rewritten = [NSMutableData data];
+    NSData *prefix = [[replacement stringByAppendingString:@"\n"]
+        dataUsingEncoding:NSUTF8StringEncoding];
+    [rewritten appendData:prefix];
+    if (newline + 1U < data.length) {
+        [rewritten appendBytes:bytes + newline + 1U
+                        length:data.length - newline - 1U];
+    }
+    NSError *writeError = nil;
+    if (![rewritten writeToFile:path options:NSDataWritingAtomic
+                          error:&writeError] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0755,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:path
+                    error:&writeError]) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer shebang rewrite failed: %@", writeError];
+        }
+        return false;
+    }
+    if (changed != NULL) {
+        *changed = true;
+    }
+    log_message("sbinjectMaintainerShebang path=%s from=%s to=%s",
+                [path UTF8String], [firstLine UTF8String],
+                [replacement UTF8String]);
+    return true;
+}
+
+static bool sbinject_valid_package_name(NSString *name) {
+    const char *text = [name UTF8String];
+    if (text == NULL) {
+        return false;
+    }
+    size_t length = strlen(text);
+    if (length < 2U || length > 200U ||
+        !((text[0] >= 'a' && text[0] <= 'z') ||
+          (text[0] >= '0' && text[0] <= '9'))) {
+        return false;
+    }
+    for (size_t index = 1; index < length; ++index) {
+        char character = text[index];
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9') || character == '+' ||
+              character == '-' || character == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static NSString *sbinject_package_name_from_spec(const char *argument,
+                                                 bool *removalOut) {
+    if (removalOut != NULL) {
+        *removalOut = false;
+    }
+    if (argument == NULL || argument[0] == '\0' || argument[0] == '-') {
+        return nil;
+    }
+    NSString *spec = [NSString stringWithUTF8String:argument];
+    if (spec == nil || [spec containsString:@"/"]) {
+        return nil;
+    }
+    bool removal = [spec hasSuffix:@"-"] && spec.length > 1U;
+    if (removal) {
+        spec = [spec substringToIndex:spec.length - 1U];
+    }
+    NSRange version = [spec rangeOfString:@"="];
+    if (version.location != NSNotFound) {
+        spec = [spec substringToIndex:version.location];
+    }
+    NSRange architecture = [spec rangeOfString:@":"];
+    if (architecture.location != NSNotFound) {
+        spec = [spec substringToIndex:architecture.location];
+    }
+    if (!sbinject_valid_package_name(spec)) {
+        return nil;
+    }
+    if (removalOut != NULL) {
+        *removalOut = removal;
+    }
+    return spec;
+}
+
+static NSString *sbinject_package_name_from_control(NSString *controlPath,
+                                                    NSString **errorText) {
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:controlPath
+                                          options:0
+                                            error:&readError];
+    if (data == nil || data.length == 0 || data.length > 1024U * 1024U) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer control read failed: %@", readError];
+        }
+        return nil;
+    }
+    NSString *control = [[NSString alloc] initWithData:data
+                                               encoding:NSUTF8StringEncoding];
+    for (NSString *line in
+         [control componentsSeparatedByCharactersInSet:
+                      [NSCharacterSet newlineCharacterSet]]) {
+        if (![line hasPrefix:@"Package:"]) {
+            continue;
+        }
+        NSString *name = [[line substringFromIndex:strlen("Package:")]
+            stringByTrimmingCharactersInSet:
+                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (sbinject_valid_package_name(name)) {
+            return name;
+        }
+        break;
+    }
+    if (errorText != NULL) {
+        *errorText = [NSString stringWithFormat:
+            @"invalid or missing Package field in %@", controlPath];
+    }
+    return nil;
+}
+
+static bool sbinject_write_installed_macho_wrapper(NSString *script,
+                                                   NSString *phase,
+                                                   NSString **errorText) {
+    NSString *guest = [script stringByAppendingString:@".sbinject-macho"];
+    struct stat guestStatus;
+    if (lstat([guest fileSystemRepresentation], &guestStatus) == 0) {
+        if (!S_ISREG(guestStatus.st_mode) || S_ISLNK(guestStatus.st_mode) ||
+            guestStatus.st_size <= 0 ||
+            guestStatus.st_size > 16 * 1024 * 1024) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"unsafe existing maintainer guest: %@", guest];
+            }
+            return false;
+        }
+        if (unlink([guest fileSystemRepresentation]) != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"maintainer guest replacement failed: %s",
+                    strerror(errno)];
+            }
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer guest status failed: %s", strerror(errno)];
+        }
+        return false;
+    }
+    if (rename([script fileSystemRepresentation],
+               [guest fileSystemRepresentation]) != 0) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer binary staging failed: %s", strerror(errno)];
+        }
+        return false;
+    }
+    NSString *wrapper = [NSString stringWithFormat:
+        @"#!/var/jb/bin/sh\n"
+         "exec /var/jb/usr/libexec/codex-exec-worker --macho \"%@\" \"$@\"\n",
+        guest];
+    NSError *wrapperError = nil;
+    BOOL wrote = [wrapper writeToFile:script
+                           atomically:YES
+                             encoding:NSUTF8StringEncoding
+                                error:&wrapperError] &&
+        [[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0755,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:script
+                    error:&wrapperError] &&
+        [[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0755,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:guest
+                    error:&wrapperError];
+    if (!wrote) {
+        (void)unlink([script fileSystemRepresentation]);
+        (void)rename([guest fileSystemRepresentation],
+                     [script fileSystemRepresentation]);
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer wrapper write failed: %@", wrapperError];
+        }
+        return false;
+    }
+    log_message("sbinjectInstalledMaintainerMachO path=%s phase=%s "
+                "backend=jit-rw-to-rx",
+                [script UTF8String], [phase UTF8String]);
+    return true;
+}
+
+static bool sbinject_package_owns_springboard_tweak(NSString *packageName) {
+    NSString *list = [NSString stringWithFormat:
+        @"/var/jb/Library/dpkg/info/%@.list", packageName];
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:list
+                                          options:NSDataReadingMappedIfSafe
+                                            error:&readError];
+    if (data == nil || data.length == 0 || data.length > 32U * 1024U * 1024U) {
+        return false;
+    }
+    NSString *contents = [[NSString alloc] initWithData:data
+                                                encoding:NSUTF8StringEncoding];
+    for (NSString *path in
+         [contents componentsSeparatedByCharactersInSet:
+                       [NSCharacterSet newlineCharacterSet]]) {
+        if (relative_path_is_springboard_tweak(path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static NSArray<NSString *> *sbinject_all_maintainer_packages(
+    NSString **errorText) {
+    NSString *directory = @"/var/jb/Library/dpkg/info";
+    NSError *directoryError = nil;
+    NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:directory
+                           error:&directoryError];
+    if (entries == nil) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"installed maintainer directory read failed: %@",
+                directoryError];
+        }
+        return nil;
+    }
+    NSArray<NSString *> *suffixes =
+        @[@".preinst", @".postinst", @".prerm", @".postrm", @".config"];
+    NSMutableOrderedSet<NSString *> *packages =
+        [NSMutableOrderedSet orderedSet];
+    for (NSString *entry in entries) {
+        for (NSString *suffix in suffixes) {
+            if (![entry hasSuffix:suffix] || entry.length <= suffix.length) {
+                continue;
+            }
+            NSString *name =
+                [entry substringToIndex:entry.length - suffix.length];
+            if (sbinject_valid_package_name(name)) {
+                [packages addObject:name];
+            }
+            break;
+        }
+    }
+    return packages.array;
+}
+
+static bool sbinject_prepare_installed_maintainers(
+    NSArray<NSString *> *packageNames, bool markTweakRemoval,
+    NSString **errorText) {
+    NSMutableOrderedSet<NSString *> *packages =
+        [NSMutableOrderedSet orderedSet];
+    for (NSString *packageName in packageNames) {
+        if (sbinject_valid_package_name(packageName)) {
+            [packages addObject:packageName];
+        }
+    }
+    NSArray<NSString *> *phases =
+        @[@"preinst", @"postinst", @"prerm", @"postrm", @"config"];
+    NSUInteger rewritten = 0;
+    bool ownsTweak = false;
+    for (NSString *packageName in packages) {
+        ownsTweak |= markTweakRemoval &&
+                     sbinject_package_owns_springboard_tweak(packageName);
+        for (NSString *phase in phases) {
+            NSString *script = [NSString stringWithFormat:
+                @"/var/jb/Library/dpkg/info/%@.%@", packageName, phase];
+            struct stat status;
+            if (lstat([script fileSystemRepresentation], &status) != 0) {
+                if (errno == ENOENT) {
+                    continue;
+                }
+                if (errorText != NULL) {
+                    *errorText = [NSString stringWithFormat:
+                        @"installed maintainer status failed: %@", script];
+                }
+                return false;
+            }
+            if (!S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+                status.st_size <= 0 || status.st_size > 16 * 1024 * 1024) {
+                if (errorText != NULL) {
+                    *errorText = [NSString stringWithFormat:
+                        @"unsafe installed maintainer script: %@", script];
+                }
+                return false;
+            }
+            if (broker_command_is_macho([script fileSystemRepresentation])) {
+                if (!sbinject_write_installed_macho_wrapper(
+                        script, phase, errorText)) {
+                    return false;
+                }
+                ++rewritten;
+                continue;
+            }
+            bool shebangChanged = false;
+            if (!rewrite_rootless_maintainer_shebang(
+                    script, &shebangChanged, errorText)) {
+                return false;
+            }
+            rewritten += shebangChanged ? 1U : 0U;
+        }
+    }
+    if (ownsTweak) {
+        NSString *markerError = nil;
+        if (!ensure_root_owned_empty_file(
+                [kSBInjectRespringMarker fileSystemRepresentation], 0644,
+                &markerError)) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"removal respring marker failed: %@", markerError];
+            }
+            return false;
+        }
+    }
+    log_message("sbinjectInstalledMaintainers packages=%lu rewritten=%lu "
+                "removal=%s springBoardTweak=%s backend=jit-rw-to-rx",
+                (unsigned long)packages.count, (unsigned long)rewritten,
+                markTweakRemoval ? "true" : "false",
+                ownsTweak ? "true" : "false");
+    return true;
+}
+
+static NSArray<NSString *> *sbinject_prepare_maintainer_archives(
+    NSArray<NSString *> *archives, NSString **stagingOut,
+    NSArray<NSString *> **packageNamesOut, bool *managedOut,
+    NSString **errorText) {
+    if (stagingOut != NULL) {
+        *stagingOut = nil;
+    }
+    if (packageNamesOut != NULL) {
+        *packageNamesOut = nil;
+    }
+    if (managedOut != NULL) {
+        *managedOut = false;
+    }
+    if (archives.count == 0 || archives.count > 128U) {
+        if (errorText != NULL) {
+            *errorText = @"invalid maintainer archive count";
+        }
+        return nil;
+    }
+    char stagingTemplate[] =
+        "/var/jb/var/cache/sbinject-maintainers.XXXXXX";
+    char *stagingBytes = mkdtemp(stagingTemplate);
+    if (stagingBytes == NULL) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"maintainer staging failed: %s", strerror(errno)];
+        }
+        return nil;
+    }
+    NSString *staging = [NSString stringWithUTF8String:stagingBytes];
+    NSMutableArray<NSString *> *prepared = [NSMutableArray array];
+    NSMutableOrderedSet<NSString *> *packageNames =
+        [NSMutableOrderedSet orderedSet];
+    bool anyRewritten = false;
+    bool managedLifecycle = false;
+    NSString *failure = nil;
+    NSArray<NSString *> *scriptNames =
+        @[@"preinst", @"postinst", @"prerm", @"postrm", @"config"];
+    for (NSUInteger index = 0; index < archives.count; ++index) {
+        NSString *archive = archives[index];
+        NSString *root = [staging stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"package-%03lu",
+                                       (unsigned long)index]];
+        char *extractArguments[] = {
+            "/var/jb/usr/bin/dpkg-deb", "-R",
+            (char *)[archive fileSystemRepresentation],
+            (char *)[root fileSystemRepresentation], NULL};
+        int extractStatus = run_and_wait_bounded(
+            extractArguments[0], extractArguments, 30000);
+        if (extractStatus != 0) {
+            failure = [NSString stringWithFormat:
+                @"maintainer archive extraction exited %d", extractStatus];
+            break;
+        }
+        bool archiveRewritten = false;
+        NSString *control = [root stringByAppendingPathComponent:@"DEBIAN"];
+        NSString *packageName = sbinject_package_name_from_control(
+            [control stringByAppendingPathComponent:@"control"], &failure);
+        if (packageName == nil) {
+            break;
+        }
+        [packageNames addObject:packageName];
+        for (NSString *scriptName in scriptNames) {
+            NSString *script =
+                [control stringByAppendingPathComponent:scriptName];
+            struct stat scriptStatus;
+            if (lstat([script fileSystemRepresentation], &scriptStatus) != 0) {
+                if (errno == ENOENT) {
+                    continue;
+                }
+                failure = [NSString stringWithFormat:
+                    @"maintainer script status failed: %@", script];
+                break;
+            }
+            if (!S_ISREG(scriptStatus.st_mode) ||
+                scriptStatus.st_size <= 0 ||
+                scriptStatus.st_size > 16 * 1024 * 1024) {
+                failure = [NSString stringWithFormat:
+                    @"invalid maintainer script: %@", script];
+                break;
+            }
+            if (broker_command_is_macho(
+                    [script fileSystemRepresentation])) {
+                managedLifecycle = true;
+                if (![scriptName isEqualToString:@"preinst"]) {
+                    log_message("sbinjectMaintainerMachO archive=%s "
+                                "package=%s phase=%s action=defer-to-info "
+                                "backend=jit-rw-to-rx",
+                                [archive UTF8String],
+                                [packageName UTF8String],
+                                [scriptName UTF8String]);
+                    continue;
+                }
+                NSString *guest =
+                    [script stringByAppendingString:@".sbinject-macho"];
+                if (rename([script fileSystemRepresentation],
+                           [guest fileSystemRepresentation]) != 0) {
+                    failure = [NSString stringWithFormat:
+                        @"maintainer binary staging failed: %s",
+                        strerror(errno)];
+                    break;
+                }
+                NSString *wrapper = [NSString stringWithFormat:
+                    @"#!/var/jb/bin/sh\n"
+                     "script_dir=${0%%/*}\n"
+                     "exec /var/jb/usr/libexec/codex-exec-worker --macho "
+                     "\"$script_dir/%@.sbinject-macho\" \"$@\"\n",
+                    scriptName];
+                NSError *wrapperError = nil;
+                if (![wrapper writeToFile:script
+                                atomically:YES
+                                  encoding:NSUTF8StringEncoding
+                                     error:&wrapperError] ||
+                    ![[NSFileManager defaultManager]
+                        setAttributes:@{
+                            NSFilePosixPermissions : @0755,
+                            NSFileOwnerAccountID : @0,
+                            NSFileGroupOwnerAccountID : @0,
+                        }
+                         ofItemAtPath:script
+                                error:&wrapperError]) {
+                    failure = [NSString stringWithFormat:
+                        @"maintainer wrapper write failed: %@", wrapperError];
+                    break;
+                }
+                archiveRewritten = true;
+                log_message("sbinjectMaintainerMachO archive=%s phase=%s "
+                            "backend=jit-rw-to-rx",
+                            [archive UTF8String], [scriptName UTF8String]);
+            } else {
+                bool shebangChanged = false;
+                if (!rewrite_rootless_maintainer_shebang(
+                        script, &shebangChanged, &failure)) {
+                    break;
+                }
+                archiveRewritten |= shebangChanged;
+                managedLifecycle |= shebangChanged;
+            }
+        }
+        if (failure != nil) {
+            break;
+        }
+        if (!archiveRewritten) {
+            [prepared addObject:archive];
+            continue;
+        }
+        NSString *output = [staging
+            stringByAppendingPathComponent:[archive lastPathComponent]];
+        char *buildArguments[] = {
+            "/var/jb/usr/bin/dpkg-deb", "--root-owner-group", "-b",
+            (char *)[root fileSystemRepresentation],
+            (char *)[output fileSystemRepresentation], NULL};
+        int buildStatus = run_and_wait_bounded(
+            buildArguments[0], buildArguments, 30000);
+        if (buildStatus != 0) {
+            failure = [NSString stringWithFormat:
+                @"maintainer archive rebuild exited %d", buildStatus];
+            break;
+        }
+        [prepared addObject:output];
+        anyRewritten = true;
+    }
+    if (failure == nil && anyRewritten &&
+        !sbinject_validate_deb_paths(prepared,
+                                    "sileo-maintainer-repack")) {
+        failure = @"rewritten maintainer archive validation failed";
+    }
+    if (failure != nil) {
+        [[NSFileManager defaultManager] removeItemAtPath:staging error:nil];
+        if (errorText != NULL) {
+            *errorText = failure;
+        }
+        return nil;
+    }
+    if (packageNamesOut != NULL) {
+        *packageNamesOut = packageNames.array;
+    }
+    if (managedOut != NULL) {
+        *managedOut = managedLifecycle;
+    }
+    if (!anyRewritten) {
+        [[NSFileManager defaultManager] removeItemAtPath:staging error:nil];
+        return archives;
+    }
+    if (stagingOut != NULL) {
+        *stagingOut = staging;
+    }
+    log_message("sbinjectMaintainerResult archives=%lu rewritten=true "
+                "managed=%s packages=%lu backend=jit-rw-to-rx "
+                "dynamicTrustCache=false",
+                (unsigned long)archives.count,
+                managedLifecycle ? "true" : "false",
+                (unsigned long)packageNames.count);
+    return prepared;
+}
+
+static NSArray<NSString *> *sbinject_deb_paths_from_arguments(
+    char *const arguments[]) {
+    NSMutableOrderedSet<NSString *> *paths =
+        [NSMutableOrderedSet orderedSet];
+    for (NSUInteger index = 1;
+         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[index] != NULL;
+         ++index) {
+        NSString *path = [NSString stringWithUTF8String:arguments[index]];
+        if ([path hasPrefix:@"/"] &&
+            [[path pathExtension] caseInsensitiveCompare:@"deb"] ==
+                NSOrderedSame) {
+            [paths addObject:path];
+        }
+    }
+    return paths.array;
+}
+
+static NSArray<NSString *> *sbinject_apt_removal_packages(
+    char *const arguments[], bool *scanAllOut) {
+    if (scanAllOut != NULL) {
+        *scanAllOut = false;
+    }
+    enum {
+        kAptActionNone,
+        kAptActionInstall,
+        kAptActionRemove,
+        kAptActionPurge,
+        kAptActionAutoremove,
+    } action = kAptActionNone;
+    NSMutableOrderedSet<NSString *> *packages =
+        [NSMutableOrderedSet orderedSet];
+    for (NSUInteger index = 1;
+         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[index] != NULL;
+         ++index) {
+        const char *argument = arguments[index];
+        if (strcmp(argument, "install") == 0) {
+            action = kAptActionInstall;
+            continue;
+        }
+        if (strcmp(argument, "remove") == 0) {
+            action = kAptActionRemove;
+            continue;
+        }
+        if (strcmp(argument, "purge") == 0) {
+            action = kAptActionPurge;
+            continue;
+        }
+        if (strcmp(argument, "autoremove") == 0) {
+            action = kAptActionAutoremove;
+            if (scanAllOut != NULL) {
+                *scanAllOut = true;
+            }
+            continue;
+        }
+        bool removal = false;
+        NSString *packageName =
+            sbinject_package_name_from_spec(argument, &removal);
+        if (packageName != nil &&
+            ((action == kAptActionInstall && removal) ||
+             action == kAptActionRemove || action == kAptActionPurge ||
+             action == kAptActionAutoremove)) {
+            [packages addObject:packageName];
+        }
+    }
+    return packages.array;
+}
+
+static NSArray<NSString *> *sbinject_dpkg_removal_packages(
+    char *const arguments[], bool *configureAllOut) {
+    if (configureAllOut != NULL) {
+        *configureAllOut = false;
+    }
+    bool removalAction = false;
+    NSMutableOrderedSet<NSString *> *packages =
+        [NSMutableOrderedSet orderedSet];
+    for (NSUInteger index = 1;
+         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[index] != NULL;
+         ++index) {
+        const char *argument = arguments[index];
+        if (strcmp(argument, "--remove") == 0 ||
+            strcmp(argument, "--purge") == 0 ||
+            strcmp(argument, "-r") == 0 || strcmp(argument, "-P") == 0) {
+            removalAction = true;
+            continue;
+        }
+        if (strcmp(argument, "--configure") == 0 ||
+            strcmp(argument, "--pending") == 0 ||
+            strcmp(argument, "-a") == 0) {
+            if (configureAllOut != NULL) {
+                *configureAllOut = true;
+            }
+        }
+        if (!removalAction) {
+            continue;
+        }
+        NSString *packageName =
+            sbinject_package_name_from_spec(argument, NULL);
+        if (packageName != nil) {
+            [packages addObject:packageName];
+        }
+    }
+    return packages.array;
+}
+
+static bool sbinject_build_apt_reconcile_arguments(
+    char *const arguments[], char *output[], size_t outputCapacity) {
+    size_t outputIndex = 0;
+    bool noDownload = false;
+    for (size_t input = 0;
+         input < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[input] != NULL;
+         ++input) {
+        const char *argument = arguments[input];
+        if (strcmp(argument, "--reinstall") == 0 ||
+            strncmp(argument, "-oAPT::Status-Fd=", 17U) == 0 ||
+            strncmp(argument, "-oAPT::Keep-Fds::=", 18U) == 0) {
+            continue;
+        }
+        if (strcmp(argument, "reinstall") == 0) {
+            argument = "install";
+        }
+        noDownload |= strcmp(argument, "--no-download") == 0;
+        if (outputIndex + 2U >= outputCapacity) {
+            return false;
+        }
+        output[outputIndex++] = (char *)argument;
+    }
+    if (!noDownload) {
+        if (outputIndex + 2U >= outputCapacity) {
+            return false;
+        }
+        output[outputIndex++] = "--no-download";
+    }
+    output[outputIndex] = NULL;
+    return outputIndex > 1U;
 }
 
 static bool broker_spawn_error_is_admission_failure(int error) {
@@ -1573,36 +2291,89 @@ static pid_t current_springboard_process(bool *candidateOut) {
     return result;
 }
 
-static void finish_sbinject_package_transaction(pid_t springBoardBefore,
-                                                 int commandStatus,
-                                                 const char *command) {
+static pid_t current_preferences_process(bool *candidateOut) {
+    if (candidateOut != NULL) {
+        *candidateOut = false;
+    }
+    int capacity = proc_listallpids(NULL, 0);
+    if (capacity <= 0 || capacity > 1024 * 1024) {
+        return -1;
+    }
+    capacity += 32;
+    pid_t *processes = calloc((size_t)capacity, sizeof(*processes));
+    if (processes == NULL) {
+        return -1;
+    }
+    int count = proc_listallpids(processes, capacity * (int)sizeof(*processes));
+    if (count <= 0) {
+        free(processes);
+        return -1;
+    }
+    if (count > capacity) {
+        count = capacity;
+    }
+    // Distinguish a successful scan with no Preferences process from a proc
+    // enumeration failure. Callers may safely consume a pending restart only
+    // after the former.
+    pid_t result = 0;
+    for (int index = 0; index < count; ++index) {
+        pid_t pid = processes[index];
+        if (pid <= 1) {
+            continue;
+        }
+        char path[CODEX_PROC_PIDPATH_MAX] = {0};
+        if (proc_pidpath(pid, path, sizeof(path)) <= 0) {
+            continue;
+        }
+        bool candidate = is_exact_preferences_candidate_process(pid, path);
+        bool stock = strcmp(path,
+                            "/Applications/Preferences.app/Preferences") == 0;
+        if (candidate || stock) {
+            result = pid;
+            if (candidateOut != NULL) {
+                *candidateOut = candidate;
+            }
+            break;
+        }
+    }
+    free(processes);
+    return result;
+}
+
+static bool finish_sbinject_package_transaction(pid_t springBoardBefore,
+                                                int commandStatus,
+                                                const char *command) {
     if (!WIFEXITED(commandStatus) || WEXITSTATUS(commandStatus) != 0 ||
         !exact_empty_root_marker(kSBInjectRespringMarker)) {
-        return;
+        return true;
     }
-    bool candidate = false;
-    pid_t current = current_springboard_process(&candidate);
-    bool enabled = exact_empty_root_marker(kSBInjectEnableMarker);
-    if (candidate && current > 1 && enabled) {
-        int signalStatus = kill(current, SIGTERM);
-        if (signalStatus == 0) {
-            (void)unlink([kSBInjectRespringMarker fileSystemRepresentation]);
-        }
-        log_message("sbinjectPackageRespring command=%s action=signal pid=%d "
+    bool preferencesCandidate = false;
+    pid_t preferences = current_preferences_process(&preferencesCandidate);
+    if (preferencesCandidate && preferences > 1 &&
+        exact_empty_root_marker(kSBInjectPreferencesEnableMarker)) {
+        int preferencesSignal = kill(preferences, SIGTERM);
+        log_message("sbinjectPackagePreferencesRestart command=%s pid=%d "
                     "status=%d error=%d",
-                    command, current, signalStatus,
-                    signalStatus == 0 ? 0 : errno);
-        return;
+                    command, preferences, preferencesSignal,
+                    preferencesSignal == 0 ? 0 : errno);
+    } else if (preferences > 1 && !preferencesCandidate) {
+        bool preferencesActivated = activate_sbinject_preferences();
+        log_message("sbinjectPackagePreferencesRestart command=%s "
+                    "action=activate status=%s",
+                    command,
+                    preferencesActivated ? "success" : "failed");
     }
-    bool activated = activate_sbinject_springboard();
-    if (activated) {
-        (void)unlink([kSBInjectRespringMarker fileSystemRepresentation]);
-    }
-    log_message("sbinjectPackageRespring command=%s action=activate "
-                "before=%d current=%d previousCandidate=%s status=%s",
-                command, springBoardBefore, current,
-                candidate ? "true" : "false",
-                activated ? "success" : "failed");
+    // Package finalization must not make the user's Now/Later decision for
+    // them. Prove that the next SpringBoard launch will take the resigned
+    // SBInject route, then leave the respring marker and Sileo UI intact. The
+    // bottom-sheet "Respring Now" action enters --sbinject-respring and does
+    // the actual signal only after repeating this verification.
+    bool prepared =
+        prepare_sbinject_redirect("package-transaction-posthook");
+    log_message("sbinjectPackagePostHook command=%s before=%d "
+                "redirectPrepared=%s respring=deferred-to-sileo",
+                command, springBoardBefore, prepared ? "true" : "false");
+    return prepared;
 }
 
 static int32_t run_root_broker_command(
@@ -1616,22 +2387,26 @@ static int32_t run_root_broker_command(
     bool packageTransaction = dpkgCommand || aptCommand;
     bool aptMutation = false;
     bool aptInstall = false;
+    bool aptUpgrade = false;
     bool aptSimulation = false;
-    bool aptNoDownload = false;
     if (aptCommand) {
         for (uint32_t index = 1;
              index < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
              arguments[index] != NULL;
              ++index) {
             const char *argument = arguments[index];
-            bool install = strcmp(argument, "install") == 0;
+            bool install = strcmp(argument, "install") == 0 ||
+                           strcmp(argument, "reinstall") == 0;
+            bool upgrade = strcmp(argument, "upgrade") == 0 ||
+                           strcmp(argument, "dist-upgrade") == 0 ||
+                           strcmp(argument, "full-upgrade") == 0 ||
+                           strcmp(argument, "dselect-upgrade") == 0;
             aptInstall |= install;
+            aptUpgrade |= upgrade;
             aptMutation |= install ||
                            strcmp(argument, "remove") == 0 ||
                            strcmp(argument, "purge") == 0 ||
-                           strcmp(argument, "upgrade") == 0 ||
-                           strcmp(argument, "dist-upgrade") == 0 ||
-                           strcmp(argument, "full-upgrade") == 0 ||
+                           upgrade ||
                            strcmp(argument, "autoremove") == 0;
             aptSimulation |= strcmp(argument, "-s") == 0 ||
                              strcmp(argument, "-sqf") == 0 ||
@@ -1639,14 +2414,41 @@ static int32_t run_root_broker_command(
                              strcmp(argument, "--just-print") == 0 ||
                              strcmp(argument, "--dry-run") == 0 ||
                              strcmp(argument, "--download-only") == 0;
-            aptNoDownload |= strcmp(argument, "--no-download") == 0;
         }
     }
     bool packageMutation =
         dpkgCommand || (aptCommand && aptMutation && !aptSimulation);
+    bool aptDownloadMutation = aptInstall || aptUpgrade;
+    const char *spawnCommand = resolvedCommand;
     char *const *spawnArguments = arguments;
-    if (aptCommand && aptInstall && !aptSimulation && aptNoDownload) {
-        char *prefetchArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 2U] = {0};
+    char *preparedDpkgArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 4U] = {0};
+    NSArray<NSString *> *preparedArchives = nil;
+    NSArray<NSString *> *managedPackageNames = @[];
+    NSString *maintainerStaging = nil;
+    bool managedDpkgTransaction = false;
+    bool aptReconcile = false;
+
+    bool aptScanAllRemovals = false;
+    NSArray<NSString *> *aptRemovalPackages = aptCommand && !aptSimulation
+        ? sbinject_apt_removal_packages(arguments, &aptScanAllRemovals)
+        : @[];
+    bool dpkgConfigureAll = false;
+    NSArray<NSString *> *dpkgRemovalPackages = dpkgCommand
+        ? sbinject_dpkg_removal_packages(arguments, &dpkgConfigureAll)
+        : @[];
+
+    if (aptCommand && aptDownloadMutation && !aptSimulation) {
+        char *cleanArguments[] = {(char *)resolvedCommand, "clean", NULL};
+        int cleanStatus = run_and_wait_bounded(
+            resolvedCommand, cleanArguments, 30000);
+        log_message("sileoRootBrokerAptCacheClean command=%s status=%d "
+                    "transactionScoped=true",
+                    resolvedCommand, cleanStatus);
+        if (cleanStatus != 0) {
+            return (int32_t)(cleanStatus << 8);
+        }
+
+        char *prefetchArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U] = {0};
         uint32_t output = 0;
         for (uint32_t input = 0;
              input < CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
@@ -1657,6 +2459,10 @@ static int32_t run_root_broker_command(
                 strncmp(argument, "-oAPT::Status-Fd=", 17U) == 0 ||
                 strncmp(argument, "-oAPT::Keep-Fds::=", 18U) == 0) {
                 continue;
+            }
+            if (output + 2U >=
+                CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U) {
+                return 73 << 8;
             }
             prefetchArguments[output++] = arguments[input];
         }
@@ -1685,9 +2491,10 @@ static int32_t run_root_broker_command(
                     [archiveDirectory stringByAppendingPathComponent:entry]];
             }
         }
-        if (archiveError != nil || archives.count == 0 ||
-            !sbinject_validate_deb_paths(
-                archives, "sileo-broker-pre-install")) {
+        if (archiveError != nil ||
+            (archives.count != 0 &&
+             !sbinject_validate_deb_paths(
+                 archives, "sileo-broker-pre-install"))) {
             log_message("sileoRootBrokerPreflight=false command=%s "
                         "backend=sbinject-jit-v1 archives=%lu error=%s "
                         "dynamicTrustCache=false",
@@ -1699,18 +2506,172 @@ static int32_t run_root_broker_command(
         }
         log_message("sileoRootBrokerPreflight=true command=%s "
                     "backend=sbinject-jit-v1 archives=%lu "
+                    "transactionScoped=true "
                     "dynamicTrustCache=false",
                     resolvedCommand, (unsigned long)archives.count);
+        if (archives.count != 0) {
+            bool managedLifecycle = false;
+            NSString *maintainerError = nil;
+            preparedArchives = sbinject_prepare_maintainer_archives(
+                archives, &maintainerStaging, &managedPackageNames,
+                &managedLifecycle, &maintainerError);
+            if (preparedArchives == nil) {
+                log_message("sileoRootBrokerMaintainers=false command=%s "
+                            "error=%s dynamicTrustCache=false",
+                            resolvedCommand,
+                            maintainerError != nil
+                                ? [[maintainerError description] UTF8String]
+                                : "unknown");
+                return 73 << 8;
+            }
+            if (managedLifecycle) {
+                uint32_t dpkgIndex = 0;
+                preparedDpkgArguments[dpkgIndex++] =
+                    "/var/jb/usr/bin/dpkg";
+                preparedDpkgArguments[dpkgIndex++] = "--unpack";
+                preparedDpkgArguments[dpkgIndex++] = "--force-confdef";
+                preparedDpkgArguments[dpkgIndex++] = "--force-confnew";
+                for (NSString *archive in preparedArchives) {
+                    if (dpkgIndex >= CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U) {
+                        if (maintainerStaging != nil) {
+                            [[NSFileManager defaultManager]
+                                removeItemAtPath:maintainerStaging error:nil];
+                        }
+                        return 73 << 8;
+                    }
+                    preparedDpkgArguments[dpkgIndex++] =
+                        (char *)[archive fileSystemRepresentation];
+                }
+                preparedDpkgArguments[dpkgIndex] = NULL;
+                spawnCommand = preparedDpkgArguments[0];
+                spawnArguments = preparedDpkgArguments;
+                managedDpkgTransaction = true;
+                aptReconcile = true;
+                log_message("sileoRootBrokerMaintainers=true command=%s "
+                            "selected=dpkg-jit-unpack archives=%lu "
+                            "transactionScoped=true dynamicTrustCache=false",
+                            resolvedCommand,
+                            (unsigned long)preparedArchives.count);
+            }
+        }
     }
+
+    if (dpkgCommand) {
+        NSArray<NSString *> *dpkgArchives =
+            sbinject_deb_paths_from_arguments(arguments);
+        if (dpkgArchives.count != 0) {
+            if (!sbinject_validate_deb_paths(
+                    dpkgArchives, "dpkg-pre-install")) {
+                log_message("sileoRootBrokerPreflight=false command=%s "
+                            "backend=sbinject-jit-v1 "
+                            "dynamicTrustCache=false",
+                            resolvedCommand);
+                return 72 << 8;
+            }
+            bool managedLifecycle = false;
+            NSString *maintainerError = nil;
+            preparedArchives = sbinject_prepare_maintainer_archives(
+                dpkgArchives, &maintainerStaging, &managedPackageNames,
+                &managedLifecycle, &maintainerError);
+            if (preparedArchives == nil) {
+                log_message("sileoRootBrokerMaintainers=false command=%s "
+                            "error=%s dynamicTrustCache=false",
+                            resolvedCommand,
+                            maintainerError != nil
+                                ? [[maintainerError description] UTF8String]
+                                : "unknown");
+                return 73 << 8;
+            }
+            if (managedLifecycle) {
+                uint32_t dpkgIndex = 0;
+                preparedDpkgArguments[dpkgIndex++] =
+                    "/var/jb/usr/bin/dpkg";
+                preparedDpkgArguments[dpkgIndex++] = "--unpack";
+                preparedDpkgArguments[dpkgIndex++] = "--force-confdef";
+                preparedDpkgArguments[dpkgIndex++] = "--force-confnew";
+                for (NSString *archive in preparedArchives) {
+                    if (dpkgIndex >= CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U) {
+                        if (maintainerStaging != nil) {
+                            [[NSFileManager defaultManager]
+                                removeItemAtPath:maintainerStaging error:nil];
+                        }
+                        return 73 << 8;
+                    }
+                    preparedDpkgArguments[dpkgIndex++] =
+                        (char *)[archive fileSystemRepresentation];
+                }
+                preparedDpkgArguments[dpkgIndex] = NULL;
+                spawnCommand = preparedDpkgArguments[0];
+                spawnArguments = preparedDpkgArguments;
+                managedDpkgTransaction = true;
+                log_message("sileoRootBrokerMaintainers=true command=%s "
+                            "selected=dpkg-jit-unpack archives=%lu "
+                            "transactionScoped=true dynamicTrustCache=false",
+                            resolvedCommand,
+                            (unsigned long)preparedArchives.count);
+            }
+        }
+    }
+
+    NSString *installedMaintainerError = nil;
+    if (managedPackageNames.count != 0 &&
+        !sbinject_prepare_installed_maintainers(
+            managedPackageNames, false, &installedMaintainerError)) {
+        log_message("sileoRootBrokerInstalledMaintainers=false command=%s "
+                    "phase=pre-unpack error=%s",
+                    resolvedCommand,
+                    installedMaintainerError != nil
+                        ? [[installedMaintainerError description] UTF8String]
+                        : "unknown");
+        if (maintainerStaging != nil) {
+            [[NSFileManager defaultManager]
+                removeItemAtPath:maintainerStaging error:nil];
+        }
+        return 74 << 8;
+    }
+
+    NSArray<NSString *> *removalPackages = aptCommand
+        ? aptRemovalPackages
+        : dpkgRemovalPackages;
+    bool scanAllMaintainers = aptScanAllRemovals || dpkgConfigureAll;
+    if (scanAllMaintainers) {
+        removalPackages =
+            sbinject_all_maintainer_packages(&installedMaintainerError);
+        if (removalPackages == nil) {
+            log_message("sileoRootBrokerInstalledMaintainers=false command=%s "
+                        "phase=enumerate error=%s",
+                        resolvedCommand,
+                        installedMaintainerError != nil
+                            ? [[installedMaintainerError description] UTF8String]
+                            : "unknown");
+            if (maintainerStaging != nil) {
+                [[NSFileManager defaultManager]
+                    removeItemAtPath:maintainerStaging error:nil];
+            }
+            return 74 << 8;
+        }
+    }
+    if (removalPackages.count != 0 &&
+        !sbinject_prepare_installed_maintainers(
+            removalPackages, aptScanAllRemovals ||
+                                 aptRemovalPackages.count != 0 ||
+                                 dpkgRemovalPackages.count != 0,
+            &installedMaintainerError)) {
+        log_message("sileoRootBrokerInstalledMaintainers=false command=%s "
+                    "phase=pre-remove error=%s",
+                    resolvedCommand,
+                    installedMaintainerError != nil
+                        ? [[installedMaintainerError description] UTF8String]
+                        : "unknown");
+        if (maintainerStaging != nil) {
+            [[NSFileManager defaultManager]
+                removeItemAtPath:maintainerStaging error:nil];
+        }
+        return 74 << 8;
+    }
+
     pid_t springBoardBefore =
         packageMutation ? current_springboard_process(NULL) : -1;
-    if (dpkgCommand &&
-        !sbinject_validate_deb_arguments(arguments, "dpkg-pre-install")) {
-        log_message("sileoRootBrokerPreflight=false command=%s "
-                    "backend=sbinject-jit-v1 dynamicTrustCache=false",
-                    resolvedCommand);
-        return 72 << 8;
-    }
     int temporary[CODEX_ROOT_BROKER_MAX_FDS];
     for (uint32_t index = 0; index < CODEX_ROOT_BROKER_MAX_FDS; ++index) {
         temporary[index] = -1;
@@ -1803,19 +2764,19 @@ static int32_t run_root_broker_command(
              ++index) {
             log_message("sileoRootBrokerArgument command=%s index=%u "
                         "value=%s",
-                        resolvedCommand, index, spawnArguments[index]);
+                        spawnCommand, index, spawnArguments[index]);
         }
     }
 
     pid_t child = 0;
     bool runtimeFallback = false;
-    int spawnResult = posix_spawn(&child, resolvedCommand, &actions, NULL,
+    int spawnResult = posix_spawn(&child, spawnCommand, &actions, NULL,
                                   spawnArguments, environment);
     if (spawnResult != 0 &&
         broker_spawn_error_is_admission_failure(spawnResult) &&
-        strcmp(resolvedCommand,
+        strcmp(spawnCommand,
                [kExecWorkerExecutable fileSystemRepresentation]) != 0 &&
-        broker_command_is_macho(resolvedCommand)) {
+        broker_command_is_macho(spawnCommand)) {
         char *runtimeArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 3U] = {0};
         runtimeArguments[0] =
             (char *)[kExecWorkerExecutable fileSystemRepresentation];
@@ -1834,7 +2795,7 @@ static int32_t run_root_broker_command(
         runtimeFallback = spawnResult == 0;
         log_message("sileoRootBrokerJITFallback command=%s "
                     "directError=%s workerError=%s selected=%s",
-                    resolvedCommand, strerror(directError),
+                    spawnCommand, strerror(directError),
                     spawnResult == 0 ? "none" : strerror(spawnResult),
                     runtimeFallback ? "true" : "false");
     }
@@ -1844,13 +2805,70 @@ static int32_t run_root_broker_command(
     }
     if (spawnResult != 0) {
         log_message("sileoRootBrokerSpawnError command=%s error=%s",
-                    resolvedCommand, strerror(spawnResult));
+                    spawnCommand, strerror(spawnResult));
+        if (maintainerStaging != nil) {
+            [[NSFileManager defaultManager]
+                removeItemAtPath:maintainerStaging error:nil];
+        }
         return 127 << 8;
     }
     int status = 0;
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) {
-            return 125 << 8;
+                if (maintainerStaging != nil) {
+                    [[NSFileManager defaultManager]
+                        removeItemAtPath:maintainerStaging error:nil];
+                }
+                return 125 << 8;
+        }
+    }
+    if (managedDpkgTransaction && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0) {
+        NSString *installedError = nil;
+        NSArray<NSString *> *allMaintainerPackages =
+            sbinject_all_maintainer_packages(&installedError);
+        if (allMaintainerPackages == nil ||
+            !sbinject_prepare_installed_maintainers(
+                allMaintainerPackages, false, &installedError)) {
+            log_message("sileoRootBrokerInstalledMaintainers=false command=%s "
+                        "phase=post-unpack error=%s",
+                        resolvedCommand,
+                        installedError != nil
+                            ? [[installedError description] UTF8String]
+                            : "unknown");
+            status = 74 << 8;
+        } else {
+            char *configureArguments[] = {
+                "/var/jb/usr/bin/dpkg", "--configure", "-a", NULL};
+            int configureStatus = run_and_wait_bounded(
+                configureArguments[0], configureArguments, 90000);
+            log_message("sileoRootBrokerDpkgConfigure status=%d "
+                        "maintainerRewrite=true backend=jit-rw-to-rx",
+                        configureStatus);
+            if (configureStatus != 0) {
+                status = configureStatus << 8;
+            }
+        }
+    }
+    if (aptReconcile && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        char *reconcileArguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 4U] = {0};
+        if (!sbinject_build_apt_reconcile_arguments(
+                arguments, reconcileArguments,
+                CODEX_ROOT_BROKER_MAX_ARGUMENTS + 4U)) {
+            log_message("sileoRootBrokerAptReconcile status=invalid-arguments "
+                        "command=%s",
+                        resolvedCommand);
+            status = 73 << 8;
+        } else {
+            int reconcileStatus = run_and_wait_bounded(
+                resolvedCommand, reconcileArguments, 120000);
+            log_message("sileoRootBrokerAptReconcile command=%s status=%d "
+                        "reinstallSuppressed=true removalPreserved=true "
+                        "transactionScoped=true",
+                        resolvedCommand, reconcileStatus);
+            if (reconcileStatus != 0) {
+                status = reconcileStatus << 8;
+            }
         }
     }
     if (runtimeFallback) {
@@ -1858,8 +2876,36 @@ static int32_t run_root_broker_command(
                     resolvedCommand, status);
     }
     if (packageMutation) {
-        finish_sbinject_package_transaction(springBoardBefore, status,
-                                             resolvedCommand);
+        bool finalized = finish_sbinject_package_transaction(
+            springBoardBefore, status, resolvedCommand);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && !finalized) {
+            static const char packageError[] =
+                "Error: SBInject could not prepare and verify the resigned "
+                "SpringBoard redirect; Sileo's respring action was not "
+                "armed.\n";
+            for (uint32_t index = 0; index < descriptorCount; ++index) {
+                if (descriptorNumbers[index] == STDERR_FILENO) {
+                    (void)write_all(descriptors[index], packageError,
+                                    sizeof(packageError) - 1U);
+                    break;
+                }
+            }
+            log_message("sileoRootBrokerPackageError command=%s code=75 "
+                        "reason=sbinject-redirect-not-ready",
+                        resolvedCommand);
+            status = 75 << 8;
+        }
+    }
+    if (maintainerStaging != nil) {
+        NSError *cleanupError = nil;
+        BOOL cleaned = [[NSFileManager defaultManager]
+            removeItemAtPath:maintainerStaging error:&cleanupError];
+        log_message("sbinjectMaintainerCleanup path=%s status=%s error=%s",
+                    [maintainerStaging UTF8String],
+                    cleaned ? "success" : "failed",
+                    cleanupError != nil
+                        ? [[cleanupError description] UTF8String]
+                        : "none");
     }
     return status;
 }
@@ -1930,23 +2976,27 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
     }
 }
 
-static const uint8_t kSpringBoardCandidateCDHash[CODEX_CDHASH_SIZE] = {
-    0xca, 0x63, 0x0b, 0x4f, 0xcd, 0xe8, 0x4f, 0xf2, 0x04, 0x09,
-    0x5b, 0x9b, 0xb1, 0x41, 0xea, 0x05, 0xfc, 0x21, 0xf5, 0xf1,
-};
+static bool is_exact_managed_candidate_process(
+    pid_t pid, const char *path, NSString *configuredPath) {
+    (void)pid;
+    const char *configured = [configuredPath fileSystemRepresentation];
+    const char *leaf = strrchr(path, '/');
+    const char *expectedLeaf = strrchr(configured, '/');
+    leaf = leaf != NULL ? leaf + 1 : path;
+    expectedLeaf = expectedLeaf != NULL ? expectedLeaf + 1 : configured;
+    return strcmp(leaf, expectedLeaf) == 0;
+}
 
 static bool is_exact_springboard_candidate_process(pid_t pid,
                                                     const char *path) {
-    const char *configured =
-        [kSpringBoardCandidateExecutable fileSystemRepresentation];
-    char resolved[CODEX_PROC_PIDPATH_MAX] = {0};
-    bool pathExact = strcmp(path, configured) == 0 ||
-        (realpath(configured, resolved) != NULL &&
-         strcmp(path, resolved) == 0);
-    uint8_t cdhash[CODEX_CDHASH_SIZE] = {0};
-    return pathExact &&
-           csops(pid, CODEX_CS_OPS_CDHASH, cdhash, sizeof(cdhash)) == 0 &&
-           memcmp(cdhash, kSpringBoardCandidateCDHash, sizeof(cdhash)) == 0;
+    return is_exact_managed_candidate_process(
+        pid, path, kSpringBoardCandidateExecutable);
+}
+
+static bool is_exact_preferences_candidate_process(pid_t pid,
+                                                    const char *path) {
+    return is_exact_managed_candidate_process(
+        pid, path, kPreferencesCandidateExecutable);
 }
 
 static bool sbinject_managed_file(NSString *path, mode_t mode) {
@@ -1957,18 +3007,7 @@ static bool sbinject_managed_file(NSString *path, mode_t mode) {
            (status.st_mode & 07777) == mode;
 }
 
-static bool sbinject_image_loaded(pid_t pid, NSString *image) {
-    char pidText[32];
-    snprintf(pidText, sizeof(pidText), "%d", pid);
-    char *arguments[] = {
-        (char *)[kElleKitInjectorExecutable fileSystemRepresentation],
-        "--check-pid-image", pidText,
-        (char *)[image fileSystemRepresentation], NULL,
-    };
-    return run_and_wait_bounded(arguments[0], arguments, 10000) == 0;
-}
-
-static bool activate_sbinject_springboard(void) {
+static bool prepare_sbinject_redirect(const char *reason) {
     NSArray<NSDictionary *> *artifacts = @[
         @{@"path" : kElleKitInjectorExecutable, @"mode" : @0755},
         @{@"path" : kElleKitInjectorDylib, @"mode" : @0644},
@@ -2010,6 +3049,32 @@ static bool activate_sbinject_springboard(void) {
         sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker);
     int injectionStatus = 0;
     if (!launchdHookReady) {
+        // A launchd-injected dylib cannot unload before the next boot. If an
+        // exact managed notSpringBoard from this boot is alive, the redirect
+        // hook is necessarily already resident in PID 1. Recover a readiness
+        // marker that an in-place Cryptex refresh removed instead of coupling
+        // redirect health to any process-specific module inventory.
+        bool liveCandidate = false;
+        pid_t livePid = current_springboard_process(&liveCandidate);
+        bool liveRedirectProof = liveCandidate && livePid > 1;
+        if (liveRedirectProof) {
+            NSString *recoveryError = nil;
+            bool markerRecovered = ensure_root_owned_empty_file(
+                [kSBInjectLaunchdReadyMarker fileSystemRepresentation], 0644,
+                &recoveryError);
+            launchdHookReady =
+                markerRecovered &&
+                sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker);
+            log_message("sbinjectLaunchdReadyRecovered=%s reason=%s pid=%d "
+                        "proof=exact-managed-candidate modules=diagnostic-only "
+                        "error=%s",
+                        launchdHookReady ? "true" : "false", reason, livePid,
+                        recoveryError != nil
+                            ? [[recoveryError description] UTF8String]
+                            : "none");
+        }
+    }
+    if (!launchdHookReady) {
         (void)unlink([kSBInjectLaunchdReadyMarker fileSystemRepresentation]);
         char *injectArguments[] = {
             (char *)[kElleKitInjectorExecutable fileSystemRepresentation],
@@ -2045,6 +3110,17 @@ static bool activate_sbinject_springboard(void) {
         return false;
     }
 
+    log_message("sbinjectRedirectPrepared=true reason=%s hookReady=true "
+                "candidateReady=true jitterdReady=true",
+                reason);
+    return true;
+}
+
+static bool activate_sbinject_springboard(void) {
+    if (!prepare_sbinject_redirect("activation")) {
+        return false;
+    }
+
     bool candidate = false;
     pid_t springBoard = current_springboard_process(&candidate);
     if (springBoard > 1 && !candidate) {
@@ -2054,24 +3130,22 @@ static bool activate_sbinject_springboard(void) {
                     signalStatus == 0 ? 0 : errno);
     }
 
-    bool healthy = false;
+    bool redirected = false;
     pid_t candidatePid = -1;
     for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
         bool observedCandidate = false;
         pid_t observed = current_springboard_process(&observedCandidate);
         if (observed > 1 && observedCandidate) {
             candidatePid = observed;
-            if (sbinject_image_loaded(observed, kSBInjectBundleHook) &&
-                sbinject_image_loaded(observed, kElleKitInjectorDylib)) {
-                healthy = true;
-                break;
-            }
+            redirected = true;
+            break;
         }
         usleep(100 * 1000);
     }
-    if (healthy) {
-        log_message("sbinjectActivation=true pid=%d preMainHook=true "
-                    "elleKit=true",
+    if (redirected) {
+        log_message("sbinjectActivation=true pid=%d "
+                    "redirectVerified=exact-managed-candidate "
+                    "modules=diagnostic-only",
                     candidatePid);
         return true;
     }
@@ -2082,10 +3156,193 @@ static bool activate_sbinject_springboard(void) {
     if (finalCandidate && finalSpringBoard > 1) {
         (void)kill(finalSpringBoard, SIGTERM);
     }
-    log_message("sbinjectActivation=false reason=candidate-health pid=%d "
+    log_message("sbinjectActivation=false reason=candidate-not-observed pid=%d "
                 "fallback=stock",
                 finalSpringBoard);
     return false;
+}
+
+static bool activate_sbinject_preferences(void) {
+    NSArray<NSDictionary *> *artifacts = @[
+        @{@"path" : kElleKitInjectorDylib, @"mode" : @0644},
+        @{@"path" : kSBInjectJitterdExecutable, @"mode" : @0755},
+        @{@"path" : kSBInjectGeneralHook, @"mode" : @0755},
+        @{@"path" : kSBInjectPreferencesBridge, @"mode" : @0755},
+        @{@"path" : kSBInjectLaunchdHook, @"mode" : @0755},
+        @{@"path" : kPreferencesCandidateExecutable, @"mode" : @0755},
+        @{@"path" : kSBInjectPreferencesBundleHook, @"mode" : @0755},
+    ];
+    for (NSDictionary *artifact in artifacts) {
+        NSString *path = artifact[@"path"];
+        mode_t mode = (mode_t)[artifact[@"mode"] unsignedShortValue];
+        if (!sbinject_managed_file(path, mode)) {
+            log_message("sbinjectPreferencesActivation=false "
+                        "reason=artifact path=%s",
+                        [path UTF8String]);
+            (void)unlink(
+                [kSBInjectPreferencesEnableMarker fileSystemRepresentation]);
+            return false;
+        }
+    }
+    if (access([kSBInjectPreferencesCrashMarker fileSystemRepresentation],
+               F_OK) == 0) {
+        log_message("sbinjectPreferencesActivation=false "
+                    "reason=crash-loop-marker");
+        (void)unlink(
+            [kSBInjectPreferencesEnableMarker fileSystemRepresentation]);
+        return false;
+    }
+    if (!sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker)) {
+        log_message("sbinjectPreferencesActivation=false "
+                    "reason=launchd-hook-not-ready");
+        return false;
+    }
+
+    mach_port_t jitterdPort = MACH_PORT_NULL;
+    kern_return_t lookup = bootstrap_look_up(
+        bootstrap_port, CODEX_SBINJECT_JITTERD_SERVICE, &jitterdPort);
+    if (lookup != KERN_SUCCESS || !MACH_PORT_VALID(jitterdPort)) {
+        log_message("sbinjectPreferencesActivation=false "
+                    "reason=jitterd-service kr=%d",
+                    lookup);
+        return false;
+    }
+    mach_port_deallocate(mach_task_self(), jitterdPort);
+
+    NSString *markerError = nil;
+    if (!ensure_root_owned_empty_file(
+            [kSBInjectPreferencesEnableMarker fileSystemRepresentation], 0644,
+            &markerError)) {
+        log_message("sbinjectPreferencesActivation=false "
+                    "reason=enable-marker error=%s",
+                    markerError != nil
+                        ? [[markerError description] UTF8String]
+                        : "unknown");
+        return false;
+    }
+
+    bool restartRequired =
+        exact_empty_root_marker(kSBInjectPreferencesRestartMarker);
+    bool candidate = false;
+    pid_t preferences = current_preferences_process(&candidate);
+    if (preferences < 0) {
+        log_message("sbinjectPreferencesActivation=false "
+                    "reason=process-enumeration");
+        return false;
+    }
+    if (preferences == 0) {
+        if (restartRequired) {
+            (void)unlink(
+                [kSBInjectPreferencesRestartMarker fileSystemRepresentation]);
+        }
+        log_message("sbinjectPreferencesActivation=true pid=none "
+                    "state=armed-deferred restartRequired=%s",
+                    restartRequired ? "true" : "false");
+        return true;
+    }
+    if (!restartRequired && candidate && preferences > 1) {
+        log_message("sbinjectPreferencesActivation=true pid=%d "
+                    "redirectVerified=exact-managed-candidate reused=true "
+                    "modules=diagnostic-only",
+                    preferences);
+        return true;
+    }
+    pid_t rejectedPid = restartRequired ? preferences : -1;
+    if (preferences > 1 && (!candidate || restartRequired)) {
+        int signalStatus = kill(preferences, SIGTERM);
+        log_message("sbinjectPreferencesRestart pid=%d candidate=%s "
+                    "required=%s status=%d error=%d",
+                    preferences, candidate ? "true" : "false",
+                    restartRequired ? "true" : "false", signalStatus,
+                    signalStatus == 0 ? 0 : errno);
+        if (signalStatus != 0) {
+            return false;
+        }
+    }
+
+    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+        bool observedCandidate = false;
+        pid_t observed = current_preferences_process(&observedCandidate);
+        if (observed > 1 && observed != rejectedPid && observedCandidate) {
+            if (restartRequired) {
+                (void)unlink(
+                    [kSBInjectPreferencesRestartMarker
+                        fileSystemRepresentation]);
+            }
+            log_message("sbinjectPreferencesActivation=true pid=%d "
+                        "redirectVerified=exact-managed-candidate "
+                        "reused=false restartRequired=%s "
+                        "modules=diagnostic-only",
+                        observed,
+                        restartRequired ? "true" : "false");
+            return true;
+        }
+        usleep(100 * 1000);
+    }
+
+    bool finalCandidate = false;
+    pid_t finalPreferences = current_preferences_process(&finalCandidate);
+    if (finalPreferences == 0) {
+        if (restartRequired) {
+            (void)unlink(
+                [kSBInjectPreferencesRestartMarker fileSystemRepresentation]);
+        }
+        log_message("sbinjectPreferencesActivation=true pid=none "
+                    "state=armed-deferred restartRequired=%s",
+                    restartRequired ? "true" : "false");
+        return true;
+    }
+    (void)unlink(
+        [kSBInjectPreferencesEnableMarker fileSystemRepresentation]);
+    if (finalCandidate) {
+        (void)kill(finalPreferences, SIGTERM);
+    }
+    log_message("sbinjectPreferencesActivation=false "
+                "reason=candidate-not-observed pid=%d fallback=stock",
+                finalPreferences);
+    return false;
+}
+
+static bool respring_sbinject_springboard(const char *reason) {
+    if (!prepare_sbinject_redirect(reason)) {
+        log_message("sbinjectRespring=false reason=%s phase=prepare", reason);
+        return false;
+    }
+
+    // A user-requested respring means the named tweak has been disabled in
+    // Sileo and normal injection should be tried again.
+    (void)unlink([kSBInjectSafeModeMarker fileSystemRepresentation]);
+    (void)unlink([kElleKitSafeModeMarker fileSystemRepresentation]);
+    bool candidateBefore = false;
+    pid_t before = current_springboard_process(&candidateBefore);
+    if (before > 1) {
+        int signalStatus = kill(before, SIGTERM);
+        log_message("sbinjectRespringSignal reason=%s pid=%d candidate=%s "
+                    "status=%d error=%d",
+                    reason, before, candidateBefore ? "true" : "false",
+                    signalStatus, signalStatus == 0 ? 0 : errno);
+        if (signalStatus != 0) {
+            return false;
+        }
+        for (NSUInteger attempt = 0; attempt < 250; ++attempt) {
+            pid_t observed = current_springboard_process(NULL);
+            if (observed != before) {
+                break;
+            }
+            usleep(20 * 1000);
+        }
+    }
+    bool active = activate_sbinject_springboard();
+    if (active) {
+        (void)unlink([kSBInjectRespringMarker fileSystemRepresentation]);
+    }
+    bool finalCandidate = false;
+    pid_t finalPid = current_springboard_process(&finalCandidate);
+    log_message("sbinjectRespring=%s reason=%s before=%d final=%d "
+                "candidate=%s",
+                active ? "true" : "false", reason, before, finalPid,
+                finalCandidate ? "true" : "false");
+    return active && finalCandidate && finalPid > 1;
 }
 
 static bool is_springboard_target_process(pid_t pid, const char *path) {
@@ -2116,6 +3373,12 @@ static bool is_ellekit_target_process(pid_t pid, const char *path) {
         // the app once its package-manager worker threads are running. XCTest
         // runner hosts likewise manage their own injected test bundle and can
         // crash if a second late loader mutates the process.
+        return false;
+    }
+    if (is_exact_preferences_candidate_process(pid, path)) {
+        // The resigned Settings candidate loads ElleKit synchronously from
+        // its SBInject pre-main hook; a second task-port injection is both
+        // redundant and too late for PreferenceLoader's root-list hooks.
         return false;
     }
     if (is_springboard_target_process(pid, path)) {
@@ -2401,6 +3664,68 @@ static void serve_ellekit_per_process_injector(bool springBoardOnly) {
 }
 
 static xpc_connection_t gSileoXpcListener;
+static pthread_mutex_t gPreferencesRespringLock = PTHREAD_MUTEX_INITIALIZER;
+static bool gPreferencesRespringPending;
+
+static void schedule_preferences_respring(void) {
+    pthread_mutex_lock(&gPreferencesRespringLock);
+    bool alreadyPending = gPreferencesRespringPending;
+    gPreferencesRespringPending = true;
+    pthread_mutex_unlock(&gPreferencesRespringLock);
+    if (alreadyPending) {
+        log_message("preferencesRespringRequest coalesced=true");
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool resprung = respring_sbinject_springboard("preferences-button");
+        log_message("preferencesRespringRequest result=%s",
+                    resprung ? "success" : "failed");
+        pthread_mutex_lock(&gPreferencesRespringLock);
+        gPreferencesRespringPending = false;
+        pthread_mutex_unlock(&gPreferencesRespringLock);
+    });
+}
+
+static void handle_preferences_xpc_request(xpc_connection_t peer,
+                                           xpc_object_t message,
+                                           pid_t peerPid) {
+    xpc_object_t reply = xpc_dictionary_create_reply(message);
+    if (reply == NULL) {
+        return;
+    }
+    char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
+    bool accepted = peerPid > 1 &&
+        proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0 &&
+        executable_paths_match(
+            kPreferencesCandidateExecutable,
+            [NSString stringWithUTF8String:peerPath]);
+    const char *operation = accepted &&
+                                    xpc_get_type(message) == XPC_TYPE_DICTIONARY
+                                ? xpc_dictionary_get_string(
+                                      message,
+                                      CODEX_ROOT_BROKER_OPERATION_KEY)
+                                : NULL;
+    bool valid = operation != NULL &&
+        strcmp(operation,
+               CODEX_ROOT_BROKER_PREFERENCES_RESPRING_OPERATION) == 0;
+    bool allowed = accepted && valid;
+    xpc_dictionary_set_int64(reply, "status", allowed ? 0 : EPERM);
+    xpc_dictionary_set_bool(reply, "accepted", accepted);
+    xpc_dictionary_set_bool(reply, "valid", valid);
+    xpc_dictionary_set_bool(reply, "allowed", allowed);
+    xpc_connection_send_message(peer, reply);
+    log_message("preferencesXpcBrokerRequest pid=%d accepted=%s valid=%s "
+                "allowed=%s operation=%s",
+                peerPid, accepted ? "true" : "false",
+                valid ? "true" : "false", allowed ? "true" : "false",
+                operation != NULL ? operation : "none");
+    if (allowed) {
+        // Reply before replacing SpringBoard so callers using waitpid/NSTask do
+        // not remain blocked while FrontBoard tears down the current scene.
+        schedule_preferences_respring();
+    }
+}
 
 static void handle_sileo_xpc_request(xpc_connection_t peer,
                                      xpc_object_t message, pid_t peerPid,
@@ -2593,8 +3918,24 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
         pid_t peerPid = getPid != NULL ? getPid(peer) : -1;
         uid_t peerUser = xpc_connection_get_euid(peer);
         char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
-        bool pathAvailable = peerPid > 1 &&
-            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0;
+        // The original Sileo binary asks for its first root job while UIKit is
+        // still decoding the main storyboard.  On iOS 27 the XPC connection
+        // can arrive a few milliseconds before proc_pidpath publishes the app
+        // executable.  A one-shot lookup therefore rejects a legitimate peer
+        // and, worse, leaves Sileo's synchronous request waiting on a canceled
+        // connection until FrontBoard's scene-create watchdog fires.
+        bool pathAvailable = false;
+        if (peerPid > 1) {
+            for (unsigned int attempt = 0; attempt < 50; ++attempt) {
+                if (proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0) {
+                    pathAvailable = true;
+                    break;
+                }
+                if (attempt + 1U < 50U) {
+                    usleep(10 * 1000);
+                }
+            }
+        }
         NSString *path = pathAvailable
             ? [NSString stringWithUTF8String:peerPath]
             : nil;
@@ -2603,19 +3944,43 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
              executable_paths_match(expectedHelper, path));
         bool headlessSileoClient = peerUser == 501 &&
             executable_paths_match(kHeadlessSileoExecutable, path);
-        bool accepted = sileoClient || headlessSileoClient;
+        bool preferencesClient = peerUser == 501 &&
+            executable_paths_match(kPreferencesCandidateExecutable, path);
+        bool accepted = sileoClient || headlessSileoClient || preferencesClient;
         if (!accepted) {
             log_message("sileoXpcBrokerRejected pid=%d uid=%u path=%s",
                         peerPid, peerUser,
                         peerPath[0] != '\0' ? peerPath : "none");
-            xpc_connection_cancel(peer);
+            // Never strand a synchronous virtual job.  Send a structured
+            // denial for the first dictionary and then close the connection;
+            // the constructor can surface EPERM and release its waiter.
+            xpc_connection_set_event_handler(peer, ^(xpc_object_t message) {
+                if (xpc_get_type(message) == XPC_TYPE_DICTIONARY) {
+                    xpc_object_t reply = xpc_dictionary_create_reply(message);
+                    if (reply != NULL) {
+                        xpc_dictionary_set_bool(reply, "accepted", false);
+                        xpc_dictionary_set_bool(reply, "valid", false);
+                        xpc_dictionary_set_bool(reply, "allowed", false);
+                        xpc_dictionary_set_int64(reply, "status", EPERM);
+                        xpc_connection_send_message(peer, reply);
+                    }
+                    xpc_connection_cancel(peer);
+                } else if (xpc_get_type(message) == XPC_TYPE_ERROR) {
+                    xpc_connection_cancel(peer);
+                }
+            });
+            xpc_connection_resume(peer);
             return;
         }
         xpc_connection_set_event_handler(peer, ^(xpc_object_t message) {
             if (xpc_get_type(message) == XPC_TYPE_DICTIONARY) {
-                handle_sileo_xpc_request(
-                    peer, message, peerPid, expectedMain, expectedHelper,
-                    jailbreakRoot, headlessSileoClient);
+                if (preferencesClient) {
+                    handle_preferences_xpc_request(peer, message, peerPid);
+                } else {
+                    handle_sileo_xpc_request(
+                        peer, message, peerPid, expectedMain, expectedHelper,
+                        jailbreakRoot, headlessSileoClient);
+                }
             }
         });
         xpc_connection_resume(peer);
@@ -3278,10 +4643,11 @@ static bool bundle_trees_are_equal(NSString *source, NSString *destination) {
     return true;
 }
 
-static bool install_sbinject_springboard_bundle(NSString *source,
-                                                 bool *didUpdate,
-                                                 NSString **backupOut,
-                                                 NSString **errorText) {
+static bool install_sbinject_bundle(NSString *source, NSString *destination,
+                                    NSString *enableMarker,
+                                    NSString *bundleStem, bool *didUpdate,
+                                    NSString **backupOut,
+                                    NSString **errorText) {
     if (didUpdate != NULL) {
         *didUpdate = false;
     }
@@ -3294,7 +4660,7 @@ static bool install_sbinject_springboard_bundle(NSString *source,
         }
         return false;
     }
-    NSString *parent = [kSBInjectBundle stringByDeletingLastPathComponent];
+    NSString *parent = [destination stringByDeletingLastPathComponent];
     NSFileManager *manager = [NSFileManager defaultManager];
     NSError *error = nil;
     NSDictionary *directoryAttributes = @{
@@ -3316,18 +4682,18 @@ static bool install_sbinject_springboard_bundle(NSString *source,
         }
         return false;
     }
-    if (bundle_trees_are_equal(source, kSBInjectBundle)) {
-        log_message("sbinjectSpringBoardBundle=current path=%s",
-                    [kSBInjectBundle UTF8String]);
+    if (bundle_trees_are_equal(source, destination)) {
+        log_message("sbinjectBundle=current target=%s path=%s",
+                    [bundleStem UTF8String], [destination UTF8String]);
         return true;
     }
 
     // Stop launchd from selecting this bundle while it is being replaced.
-    (void)unlink([kSBInjectEnableMarker fileSystemRepresentation]);
+    (void)unlink([enableMarker fileSystemRepresentation]);
 
     NSString *temporary = [parent
         stringByAppendingPathComponent:
-            [NSString stringWithFormat:@".SpringBoard.app.sbinject-%@",
+            [NSString stringWithFormat:@".%@.sbinject-%@", bundleStem,
                                        [[NSUUID UUID] UUIDString]]];
     if (![manager copyItemAtPath:source toPath:temporary error:&error] ||
         !normalize_bundle_tree(source, temporary) ||
@@ -3343,7 +4709,7 @@ static bool install_sbinject_springboard_bundle(NSString *source,
 
     NSString *backup = nil;
     struct stat existing;
-    if (lstat([kSBInjectBundle fileSystemRepresentation], &existing) == 0) {
+    if (lstat([destination fileSystemRepresentation], &existing) == 0) {
         NSString *backupDirectory = @"/var/jb/.codex-cache";
         if (![manager createDirectoryAtPath:backupDirectory
                  withIntermediateDirectories:YES
@@ -3358,9 +4724,10 @@ static bool install_sbinject_springboard_bundle(NSString *source,
         }
         backup = [backupDirectory
             stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"SpringBoard.app.before-sbinject-%@",
+                [NSString stringWithFormat:@"%@.before-sbinject-%@",
+                                           bundleStem,
                                            [[NSUUID UUID] UUIDString]]];
-        if (![manager moveItemAtPath:kSBInjectBundle
+        if (![manager moveItemAtPath:destination
                               toPath:backup
                                error:&error]) {
             [manager removeItemAtPath:temporary error:nil];
@@ -3379,13 +4746,13 @@ static bool install_sbinject_springboard_bundle(NSString *source,
     }
 
     if (rename([temporary fileSystemRepresentation],
-               [kSBInjectBundle fileSystemRepresentation]) != 0 ||
-        !bundle_trees_are_equal(source, kSBInjectBundle)) {
+               [destination fileSystemRepresentation]) != 0 ||
+        !bundle_trees_are_equal(source, destination)) {
         int savedError = errno;
         [manager removeItemAtPath:temporary error:nil];
-        [manager removeItemAtPath:kSBInjectBundle error:nil];
+        [manager removeItemAtPath:destination error:nil];
         if (backup != nil) {
-            [manager moveItemAtPath:backup toPath:kSBInjectBundle error:nil];
+            [manager moveItemAtPath:backup toPath:destination error:nil];
         }
         if (errorText != NULL) {
             *errorText = [NSString stringWithFormat:
@@ -3400,10 +4767,29 @@ static bool install_sbinject_springboard_bundle(NSString *source,
     if (backupOut != NULL) {
         *backupOut = backup;
     }
-    log_message("sbinjectSpringBoardBundle=updated path=%s backup=%s",
-                [kSBInjectBundle UTF8String],
+    log_message("sbinjectBundle=updated target=%s path=%s backup=%s",
+                [bundleStem UTF8String], [destination UTF8String],
                 backup != nil ? [backup UTF8String] : "none");
     return true;
+}
+
+static bool install_sbinject_springboard_bundle(NSString *source,
+                                                 bool *didUpdate,
+                                                 NSString **backupOut,
+                                                 NSString **errorText) {
+    return install_sbinject_bundle(
+        source, kSBInjectBundle, kSBInjectEnableMarker, @"SpringBoard.app",
+        didUpdate, backupOut, errorText);
+}
+
+static bool install_sbinject_preferences_bundle(NSString *source,
+                                                 bool *didUpdate,
+                                                 NSString **backupOut,
+                                                 NSString **errorText) {
+    return install_sbinject_bundle(
+        source, kSBInjectPreferencesBundle,
+        kSBInjectPreferencesEnableMarker, @"Preferences.app", didUpdate,
+        backupOut, errorText);
 }
 
 static bool replace_file_with_backup(NSString *source, NSString *destination,
@@ -3703,6 +5089,23 @@ static NSArray<NSString *> *dpkg_installed_paragraphs(NSString *status) {
         }
     }
     return installed;
+}
+
+static bool dpkg_package_version_is_installed(NSString *packageName,
+                                               NSString *version) {
+    NSError *error = nil;
+    NSString *status = [NSString
+        stringWithContentsOfFile:@"/var/jb/Library/dpkg/status"
+                        encoding:NSUTF8StringEncoding
+                           error:&error];
+    if (status == nil || error != nil) return false;
+    for (NSString *paragraph in dpkg_installed_paragraphs(status)) {
+        if ([dpkg_control_field(paragraph, @"Package")
+                isEqualToString:packageName] &&
+            [dpkg_control_field(paragraph, @"Version")
+                isEqualToString:version]) return true;
+    }
+    return false;
 }
 
 static NSString *dpkg_relation_name(NSString *relation) {
@@ -4571,6 +5974,20 @@ int main(int argc, char *argv[]) {
             jetsam.fallback_errno, jetsam.effective_status,
             jetsam.effective_errno, jetsam.effective.memlimit_active,
             jetsam.effective.memlimit_inactive);
+        if (argc == 2 &&
+            strcmp(argv[1], "--sbinject-respring") == 0) {
+            NSString *managedRoot = managed_jailbreak_root();
+            if (geteuid() != 0 || managedRoot == nil ||
+                !configure_managed_environment(managedRoot)) {
+                log_message("sbinjectRespringModeValidation=false");
+                return 1;
+            }
+            bool resprung =
+                respring_sbinject_springboard("sileo-button");
+            log_message("sbinjectRespringMode=%s",
+                        resprung ? "success" : "failed");
+            return resprung ? 0 : 1;
+        }
         if (argc == 4 &&
             strcmp(argv[1], "--sileo-root-broker") == 0) {
             log_message("event=sileo-root-broker-start uid=%u euid=%u pid=%d",
@@ -4604,10 +6021,6 @@ int main(int argc, char *argv[]) {
                             "dynamicTrustCache=false");
                 return 1;
             }
-            bool sbinjectActive = activate_sbinject_springboard();
-            log_message("sbinjectStartup=%s fallback=%s",
-                        sbinjectActive ? "active" : "inactive",
-                        sbinjectActive ? "none" : "stock-springboard");
             if (!start_sileo_xpc_broker(registeredPath, jailbreakRoot)) {
                 log_message("sileoRootBrokerModeListener=false");
                 return 1;
@@ -4615,6 +6028,21 @@ int main(int argc, char *argv[]) {
             log_message("sileoRootBrokerModeReady=true path=%s root=%s",
                         [registeredPath UTF8String],
                         [jailbreakRoot UTF8String]);
+            dispatch_queue_t activationQueue = dispatch_queue_create(
+                "com.openai.codex.dopamine.sbinject-boot-activation",
+                DISPATCH_QUEUE_SERIAL);
+            dispatch_async(activationQueue, ^{
+                bool sbinjectActive = activate_sbinject_springboard();
+                bool sbinjectPreferencesActive =
+                    sbinjectActive && activate_sbinject_preferences();
+                log_message("sbinjectStartup=%s fallback=%s",
+                            sbinjectActive ? "active" : "inactive",
+                            sbinjectActive ? "none" : "stock-springboard");
+                log_message("sbinjectPreferencesStartup=%s fallback=%s",
+                            sbinjectPreferencesActive ? "active" : "inactive",
+                            sbinjectPreferencesActive ? "none"
+                                                       : "stock-preferences");
+            });
             dispatch_queue_t applicationInjectionQueue =
                 dispatch_queue_create(
                 "com.openai.codex.dopamine.ellekit-applications",
@@ -4677,6 +6105,9 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:@"sileo.deb"];
         NSString *sourceElleKit =
             [payloadRoot stringByAppendingPathComponent:@"ellekit.deb"];
+        NSString *sourcePreferenceLoader =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"preferenceloader.deb"];
         NSString *sourceTrustedSileo =
             [payloadRoot stringByAppendingPathComponent:@"trusted/Sileo.app"];
         NSString *sourceTrustedElleKitRoot =
@@ -4695,6 +6126,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectAptConfig =
             [payloadRoot stringByAppendingPathComponent:
                              @"apt/98sbinject-packages"];
+        NSString *sourcePreferenceLoaderPin =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"apt/99preferenceloader"];
         NSString *sourceAptListNormalizer =
             [payloadRoot stringByAppendingPathComponent:
                              @"normalize-apt-lists.sh"];
@@ -4728,9 +6162,12 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectGeneralHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/generalhook.dylib"];
+        NSString *sourceSBInjectPreferencesBridge =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/preferences-bridge.dylib"];
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/lib/sbinject/launchdhook.dylib"];
+                           @"usr/local/lib/sbinject/launchdhook-v3.dylib"];
         NSString *sourceSBInjectJitterd =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/sbinject-jitterd"];
@@ -4742,6 +6179,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectBundle =
             [sourceSBInjectRoot stringByAppendingPathComponent:
                                     @"SpringBoard.app"];
+        NSString *sourceSBInjectPreferencesBundle =
+            [sourceSBInjectRoot stringByAppendingPathComponent:
+                                    @"Preferences.app"];
         NSString *sourceSBInjectJitterdPlist =
             [sourceSBInjectRoot stringByAppendingPathComponent:
                                     @"com.openai.codex.sbinject.jitterd.plist"];
@@ -4759,6 +6199,8 @@ int main(int argc, char *argv[]) {
             !isDirectory ||
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceSileo] ||
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceElleKit] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourcePreferenceLoader] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedSileo
                      isDirectory:&isDirectory] ||
@@ -4789,6 +6231,11 @@ int main(int argc, char *argv[]) {
                   &repositoryCompatibilityStatus) != 0 ||
             !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
             return fail(@"SBInject APT package policy is missing", nil);
+        }
+        if (lstat([sourcePreferenceLoaderPin fileSystemRepresentation],
+                  &repositoryCompatibilityStatus) != 0 ||
+            !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
+            return fail(@"PreferenceLoader APT pin is missing", nil);
         }
         struct stat aptListNormalizerStatus;
         if (lstat([sourceAptListNormalizer fileSystemRepresentation],
@@ -4864,7 +6311,9 @@ int main(int argc, char *argv[]) {
             lstat([sourceCustomdPlist fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
-            validated_bundle_entries(sourceSBInjectBundle, false) == nil) {
+            validated_bundle_entries(sourceSBInjectBundle, false) == nil ||
+            validated_bundle_entries(sourceSBInjectPreferencesBundle,
+                                     false) == nil) {
             return fail(@"SBInject execution payload is incomplete", nil);
         }
         struct stat repositoryKeyStatus;
@@ -5043,6 +6492,38 @@ int main(int argc, char *argv[]) {
         }
         log_message("legacyDynamicTrustPaths=absent");
 
+        // Remove the bounded development probes used while porting the iOS 27
+        // Settings model. The production bridge is installed below as one
+        // fixed Cryptex artifact and must never be loaded a second time through
+        // ElleKit's generic TweakInject scan.
+        for (NSString *path in @[
+                 @"/var/jb/usr/lib/TweakInject/PL27Bridge.dylib",
+                 @"/var/jb/usr/lib/TweakInject/PL27Bridge.plist",
+                 @"/var/jb/usr/lib/TweakInject/PL27Probe.dylib",
+                 @"/var/jb/usr/lib/TweakInject/PL27Probe.plist",
+                 @"/var/jb/usr/lib/sbinject/pl27-probe.dylib",
+             ]) {
+            struct stat probeStatus = {0};
+            if (lstat([path fileSystemRepresentation], &probeStatus) != 0) {
+                if (errno == ENOENT) continue;
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"could not inspect legacy Settings probe %@: %s",
+                                  path, strerror(errno)],
+                    nil);
+            }
+            if ((!S_ISREG(probeStatus.st_mode) &&
+                 !S_ISLNK(probeStatus.st_mode)) ||
+                unlink([path fileSystemRepresentation]) != 0) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"could not remove legacy Settings probe %@: %s",
+                                  path, strerror(errno)],
+                    nil);
+            }
+        }
+        log_message("legacyPreferencesBridgeProbes=absent");
+
         NSString *rootlessLaunchctl = @"/var/jb/usr/bin/launchctl";
         NSString *rootlessLaunchctlBackup = nil;
         BOOL launchctlMatches =
@@ -5150,6 +6631,224 @@ int main(int argc, char *argv[]) {
         }
         log_message("dopamineMarkerReady=true path=/var/jb/.installed_dopamine");
 
+        // The Cryptex launch daemon runs again after every reboot.  When its
+        // immutable payload is already installed byte-for-byte, bring up the
+        // local control plane immediately instead of reinstalling packages or
+        // waiting on repository networking.  The root broker then re-injects
+        // launchd and replaces the already-started stock SpringBoard; Settings
+        // is armed before its first user launch.
+        if (repairMode) {
+            NSString *installedManifestPath = [destinationProcursus
+                stringByAppendingPathComponent:
+                    @".codex-cryptex-bootstrap.plist"];
+            NSDictionary *installedManifest = [NSDictionary
+                dictionaryWithContentsOfFile:installedManifestPath];
+            NSString *fastRegisteredPath =
+                installedManifest[@"SileoBundlePath"];
+            NSString *fastDataContainer =
+                installedManifest[@"SileoDataContainer"];
+            NSArray<NSDictionary *> *fastPairs = @[
+                @{@"source" : executable,
+                  @"installed" : kRootBrokerExecutable},
+                @{@"source" : sourceElleKitCompatLoader,
+                  @"installed" : kElleKitInjectorExecutable},
+                @{@"source" : sourceExecWorker,
+                  @"installed" : kExecWorkerExecutable},
+                @{@"source" : sourceCustomd,
+                  @"installed" : kCustomdExecutable},
+                @{@"source" : sourceCustomctl,
+                  @"installed" : kCustomctlExecutable},
+                @{@"source" : sourceCustomdRegistrar,
+                  @"installed" : kCustomdRegistrarExecutable},
+                @{@"source" : sourceCustomdTraceReexec,
+                  @"installed" : kCustomdTraceReexecExecutable},
+                @{@"source" : sourceCustomdSetexec,
+                  @"installed" : kCustomdSetexecExecutable},
+                @{@"source" : sourceCustomdPlist,
+                  @"installed" : kCustomdPlist},
+                @{@"source" : sourceSBInjectGeneralHook,
+                  @"installed" : kSBInjectGeneralHook},
+                @{@"source" : sourceSBInjectPreferencesBridge,
+                  @"installed" : kSBInjectPreferencesBridge},
+                @{@"source" : sourceSBInjectLaunchdHook,
+                  @"installed" : kSBInjectLaunchdHook},
+                @{@"source" : sourceSBInjectJitterd,
+                  @"installed" : kSBInjectJitterdExecutable},
+                @{@"source" : sourceSBInjectJitterdPlist,
+                  @"installed" : kSBInjectJitterdPlist},
+                @{@"source" : sourceSBInjectPackageValidator,
+                  @"installed" : kSBInjectPackageValidatorExecutable},
+                @{@"source" : [sourceSBInjectBundle
+                                     stringByAppendingPathComponent:
+                                         @"notSpringBoard"],
+                  @"installed" : kSpringBoardCandidateExecutable},
+                @{@"source" : [sourceSBInjectBundle
+                                     stringByAppendingPathComponent:@"g"],
+                  @"installed" : kSBInjectBundleHook},
+                @{@"source" : [sourceSBInjectPreferencesBundle
+                                     stringByAppendingPathComponent:
+                                         @"notPreferences"],
+                  @"installed" : kPreferencesCandidateExecutable},
+                @{@"source" : [sourceSBInjectPreferencesBundle
+                                     stringByAppendingPathComponent:@"g"],
+                  @"installed" : kSBInjectPreferencesBundleHook},
+            ];
+            bool fastPayloadExact =
+                [installedManifest[@"Installer"] isEqual:kInstallerIdentifier] &&
+                [installedManifest[@"JailbreakRoot"]
+                    isEqual:destinationProcursus] &&
+                is_sileo_bundle_container_path(fastRegisteredPath) &&
+                dpkg_package_version_is_installed(@"ellekit", @"1.2") &&
+                dpkg_package_version_is_installed(@"preferenceloader",
+                                                  @"2.3.3") &&
+                dpkg_package_version_is_installed(@"org.coolstar.sileo",
+                                                  @"2.5.1");
+            for (NSDictionary *pair in fastPairs) {
+                fastPayloadExact &= files_are_equal(pair[@"source"],
+                                                     pair[@"installed"]);
+            }
+            NSArray<NSString *> *fastSileoExecutables = @[
+                @"Sileo", @"giveMeRoot", @"F/libiosexec.1.dylib",
+                @"F/liblzma.5.dylib", @"F/libzstd.1.dylib",
+                @"F/libzstd.real.dylib",
+            ];
+            for (NSString *relativePath in fastSileoExecutables) {
+                NSString *sourcePath = [sourceTrustedSileo
+                    stringByAppendingPathComponent:relativePath];
+                fastPayloadExact &= files_are_equal(
+                    sourcePath, [@"/var/jb/Applications/Sileo.app"
+                                    stringByAppendingPathComponent:relativePath]);
+                fastPayloadExact &= files_are_equal(
+                    sourcePath, [fastRegisteredPath
+                                    stringByAppendingPathComponent:relativePath]);
+            }
+            NSArray<NSString *> *fastElleKitExecutables = @[
+                @"usr/lib/ellekit/MobileSafety.dylib",
+                @"usr/lib/ellekit/libinjector.dylib",
+                @"usr/lib/ellekit/pspawn.dylib",
+                @"usr/lib/libellekit.dylib",
+                @"usr/libexec/ellekit/loader",
+            ];
+            for (NSString *relativePath in fastElleKitExecutables) {
+                fastPayloadExact &= files_are_equal(
+                    [sourceTrustedElleKitRoot
+                        stringByAppendingPathComponent:relativePath],
+                    [@"/var/jb" stringByAppendingPathComponent:relativePath]);
+            }
+            log_message("fastBootPayloadExact=%s registeredPath=%s "
+                        "dataContainer=%s networkRequired=false",
+                        fastPayloadExact ? "true" : "false",
+                        fastRegisteredPath != nil
+                            ? [fastRegisteredPath UTF8String] : "none",
+                        fastDataContainer != nil
+                            ? [fastDataContainer UTF8String] : "none");
+            if (fastPayloadExact) {
+                NSString *fastError = nil;
+                NSString *fastTokenPath = nil;
+                NSString *fastBrokerPath = nil;
+                int fastBroker = -1;
+                bool fastJitterd = install_sbinject_jitterd_job(
+                    sourceSBInjectJitterd, sourceSBInjectJitterdPlist,
+                    false, &fastError);
+                bool fastRootBroker = fastJitterd &&
+                    install_sileo_root_broker_job(
+                        executable, fastRegisteredPath,
+                        destinationProcursus, &fastError);
+                bool fastCustomd = fastRootBroker &&
+                    install_customd_system_job(
+                        sourceExecWorker, sourceCustomd, sourceCustomctl,
+                        sourceCustomdRegistrar, sourceCustomdTraceReexec,
+                        sourceCustomdSetexec, sourceCustomdPlist, false,
+                        &fastError);
+                log_message("fastBootControlPlane jitterd=%s rootBroker=%s "
+                            "customd=%s error=%s",
+                            fastJitterd ? "true" : "false",
+                            fastRootBroker ? "true" : "false",
+                            fastCustomd ? "true" : "false",
+                            fastError != nil
+                                ? [[fastError description] UTF8String] : "none");
+                if (fastCustomd) {
+                    // The data container may still be protected before the
+                    // first unlock.  SpringBoard/Settings activation does not
+                    // depend on it, so keep the root broker live and wait
+                    // locally instead of falling into a network repair.
+                    for (NSUInteger attempt = 0; fastBroker < 0; ++attempt) {
+                        @autoreleasepool {
+                            if (!is_sileo_data_container_path(
+                                    fastDataContainer)) {
+                                NSString *observed =
+                                    registered_application_data_path(
+                                        kSileoIdentifier);
+                                if (is_sileo_data_container_path(observed)) {
+                                    fastDataContainer = observed;
+                                }
+                            }
+                            fastError = nil;
+                            bool fastExtensions =
+                                is_sileo_data_container_path(
+                                    fastDataContainer) &&
+                                write_sileo_sandbox_extensions(
+                                    fastDataContainer, destinationProcursus,
+                                    &fastTokenPath, &fastError);
+                            if (fastExtensions) {
+                                fastBroker = create_sileo_broker_socket(
+                                    fastDataContainer, &fastBrokerPath,
+                                    &fastError);
+                            }
+                            if (fastBroker < 0 &&
+                                (attempt == 0 || attempt % 20U == 0)) {
+                                log_message(
+                                    "fastBootSileoDataPending attempt=%lu "
+                                    "container=%s error=%s",
+                                    (unsigned long)attempt,
+                                    fastDataContainer != nil
+                                        ? [fastDataContainer UTF8String]
+                                        : "none",
+                                    fastError != nil
+                                        ? [[fastError description] UTF8String]
+                                        : "data-protected");
+                            }
+                        }
+                        if (fastBroker < 0) usleep(250 * 1000);
+                    }
+                    log_message("fastBootSileoDataReady token=%s socket=%s",
+                                fastTokenPath != nil
+                                    ? [fastTokenPath UTF8String] : "none",
+                                fastBrokerPath != nil
+                                    ? [fastBrokerPath UTF8String] : "none");
+                    dispatch_queue_t fastRootBrokerQueue =
+                        dispatch_queue_create(
+                            "com.openai.codex.dopamine.fast-root-broker",
+                            DISPATCH_QUEUE_SERIAL);
+                    dispatch_async(fastRootBrokerQueue, ^{
+                        @autoreleasepool {
+                            serve_sileo_broker(fastBroker, fastRegisteredPath,
+                                               destinationProcursus);
+                        }
+                    });
+                    NSString *done = [NSString stringWithFormat:
+                        @"result=success\nmode=fast-boot\nuid=%u\n"
+                         "jailbreakRoot=%@\nsileo=%@\nlaunchServicesPath=%@\n"
+                         "customd=system/%@\n",
+                        geteuid(), destinationProcursus,
+                        @"/var/jb/Applications/Sileo.app/Sileo",
+                        fastRegisteredPath, kCustomdLabel];
+                    (void)write_marker(kDonePath, done);
+                    log_message("result=success mode=fast-boot "
+                                "networkRequired=false sileo=%s",
+                                [fastRegisteredPath UTF8String]);
+                    serve_sileo_file_broker(
+                        fastRegisteredPath, destinationProcursus,
+                        fastDataContainer);
+                    __builtin_unreachable();
+                }
+                log_message("fastBootFallback=registration-repair error=%s",
+                            fastError != nil
+                                ? [[fastError description] UTF8String]
+                                : "unknown");
+            }
+        }
+
         if (!repairMode) {
             char *prep_arguments[] = {
                 "/var/jb/bin/sh", "/var/jb/prep_bootstrap.sh", NULL};
@@ -5225,11 +6924,32 @@ int main(int argc, char *argv[]) {
                     "version=1.2 files=%lu dynamicTrustCache=false",
                     (unsigned long)trustedElleKitFiles.count);
 
+        // Install pinned rootless PreferenceLoader/libprefs before launching
+        // the resigned Preferences candidate. The fixed Cryptex bridge adapts
+        // these registrations to iOS 27's SettingsSidebarListState model.
+        char *preferenceLoaderDpkgArguments[] = {
+            "/var/jb/usr/bin/dpkg", "--force-downgrade", "-i",
+            (char *)[sourcePreferenceLoader fileSystemRepresentation], NULL};
+        int preferenceLoaderDpkgStatus = run_and_wait_bounded(
+            preferenceLoaderDpkgArguments[0], preferenceLoaderDpkgArguments,
+            90000);
+        log_message("preferenceLoaderFixedDpkgExit=%d "
+                    "package=preferenceloader version=2.3.3",
+                    preferenceLoaderDpkgStatus);
+        if (preferenceLoaderDpkgStatus != 0) {
+            return fail(
+                [NSString stringWithFormat:
+                              @"fixed PreferenceLoader install exited %d",
+                              preferenceLoaderDpkgStatus],
+                nil);
+        }
+
         bool elleKitKeyUpdated = false;
         bool bigBossKeyUpdated = false;
         bool aptListNormalizerUpdated = false;
         bool repositoryCompatibilityUpdated = false;
         bool sbinjectAptConfigUpdated = false;
+        bool preferenceLoaderPinUpdated = false;
         NSString *repositoryMetadataError = nil;
         if (!install_managed_apt_file(
                 sourceElleKitKey, @"/var/jb/etc/apt/trusted.gpg.d",
@@ -5257,6 +6977,12 @@ int main(int argc, char *argv[]) {
                 @"/var/jb/etc/apt/apt.conf.d",
                 @"98sbinject-packages", 64 * 1024, 0644,
                 "sbinjectAptHook", &sbinjectAptConfigUpdated,
+                &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourcePreferenceLoaderPin,
+                @"/var/jb/etc/apt/preferences.d",
+                @"99codex-preferenceloader", 64 * 1024, 0644,
+                "preferenceLoaderPin", &preferenceLoaderPinUpdated,
                 &repositoryMetadataError)) {
             return fail(repositoryMetadataError, nil);
         }
@@ -5278,6 +7004,7 @@ int main(int argc, char *argv[]) {
         bool customdSetexecUpdated = false;
         bool customdPlistUpdated = false;
         bool sbinjectGeneralHookUpdated = false;
+        bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
         bool sbinjectJitterdUpdated = false;
         bool sbinjectJitterdPlistUpdated = false;
@@ -5327,8 +7054,15 @@ int main(int argc, char *argv[]) {
                 "sbinjectGeneralHook", &sbinjectGeneralHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
+                sourceSBInjectPreferencesBridge,
+                @"/var/jb/usr/lib/sbinject",
+                @"preferences-bridge.dylib", 4 * 1024 * 1024, 0755,
+                "sbinjectPreferencesBridge",
+                &sbinjectPreferencesBridgeUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
                 sourceSBInjectLaunchdHook, @"/var/jb/usr/lib/sbinject",
-                @"launchdhook.dylib", 16 * 1024 * 1024, 0755,
+                @"launchdhook-v3.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
@@ -5370,22 +7104,56 @@ int main(int argc, char *argv[]) {
                 &sbinjectBundleBackup, &sbinjectBundleError)) {
             return fail(sbinjectBundleError, nil);
         }
+        bool sbinjectPreferencesBundleUpdated = false;
+        NSString *sbinjectPreferencesBundleBackup = nil;
+        NSString *sbinjectPreferencesBundleError = nil;
+        if (!install_sbinject_preferences_bundle(
+                sourceSBInjectPreferencesBundle,
+                &sbinjectPreferencesBundleUpdated,
+                &sbinjectPreferencesBundleBackup,
+                &sbinjectPreferencesBundleError)) {
+            return fail(sbinjectPreferencesBundleError, nil);
+        }
         bool sbinjectPayloadUpdated =
-            sbinjectGeneralHookUpdated || sbinjectLaunchdHookUpdated ||
+            sbinjectGeneralHookUpdated ||
+            sbinjectPreferencesBridgeUpdated ||
+            sbinjectLaunchdHookUpdated ||
             sbinjectJitterdUpdated || sbinjectJitterdPlistUpdated ||
-            sbinjectPackageValidatorUpdated || sbinjectBundleUpdated;
+            sbinjectPackageValidatorUpdated || sbinjectBundleUpdated ||
+            sbinjectPreferencesBundleUpdated;
+        bool sbinjectPreferencesRestartRequired =
+            preferenceLoaderDpkgStatus == 0 || sbinjectGeneralHookUpdated ||
+            sbinjectPreferencesBridgeUpdated ||
+            sbinjectPreferencesBundleUpdated;
         if (sbinjectPayloadUpdated) {
             (void)unlink([kSBInjectEnableMarker fileSystemRepresentation]);
+            (void)unlink(
+                [kSBInjectPreferencesEnableMarker fileSystemRepresentation]);
             (void)unlink([kSBInjectRespringMarker fileSystemRepresentation]);
             (void)unlink([kSBInjectCrashMarker fileSystemRepresentation]);
             (void)unlink(
-                [kSBInjectLaunchdReadyMarker fileSystemRepresentation]);
+                [kSBInjectPreferencesCrashMarker fileSystemRepresentation]);
         }
+        // A boot-fresh marker describes the hook already live in launchd, not
+        // the inode currently installed at the hook path. Replacing that path
+        // must not discard a still-valid live readiness proof: the injector
+        // sees the old image at the same path, correctly skips a second load,
+        // and therefore has no constructor invocation with which to republish
+        // a marker. The normal boot-time freshness check selects the updated
+        // on-disk hook after the next reboot.
         log_message("sbinjectPayload updated=%s bundleUpdated=%s "
-                    "candidate=%s dynamicTrustCache=false",
+                    "preferencesBundleUpdated=%s launchdHookUpdated=%s "
+                    "launchdReadyPreserved=%s candidate=%s "
+                    "preferencesCandidate=%s dynamicTrustCache=false",
                     sbinjectPayloadUpdated ? "true" : "false",
                     sbinjectBundleUpdated ? "true" : "false",
-                    [kSpringBoardCandidateExecutable UTF8String]);
+                    sbinjectPreferencesBundleUpdated ? "true" : "false",
+                    sbinjectLaunchdHookUpdated ? "true" : "false",
+                    sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker)
+                        ? "true"
+                        : "false",
+                    [kSpringBoardCandidateExecutable UTF8String],
+                    [kPreferencesCandidateExecutable UTF8String]);
         unsetenv("DYLD_INSERT_LIBRARIES");
         log_message("sbinjectExecutionEnvironment=ready mode=jit-rw-to-rx "
                     "interposer=false dynamicTrustCache=false");
@@ -5420,11 +7188,30 @@ int main(int argc, char *argv[]) {
                 sileoRepairArguments[0], sileoRepairArguments, 90000);
             log_message("sileoRepairDpkgExit=%d", sileoRepairStatus);
             if (sileoRepairStatus != 0) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"Sileo repair install exited %d",
-                                  sileoRepairStatus],
-                    nil);
+                NSString *repairTrustedMain =
+                    [sourceTrustedSileo
+                        stringByAppendingPathComponent:@"Sileo"];
+                NSString *repairTrustedHelper =
+                    [sourceTrustedSileo
+                        stringByAppendingPathComponent:@"giveMeRoot"];
+                BOOL repairPayloadInstalled =
+                    files_are_equal(
+                        repairTrustedMain,
+                        @"/var/jb/Applications/Sileo.app/Sileo") &&
+                    files_are_equal(
+                        repairTrustedHelper,
+                        @"/var/jb/Applications/Sileo.app/giveMeRoot");
+                if (!repairPayloadInstalled) {
+                    return fail(
+                        [NSString stringWithFormat:
+                                      @"Sileo repair install exited %d",
+                                      sileoRepairStatus],
+                        nil);
+                }
+                log_message(
+                    "sileoRepairDpkgAdvisory=true status=%d "
+                    "payloadInstalled=true cause=unrelated-trigger",
+                    sileoRepairStatus);
             }
         }
 
@@ -5619,6 +7406,39 @@ int main(int argc, char *argv[]) {
                         ? [rootlessBackupRoot UTF8String]
                         : "not-needed");
 
+        NSArray<NSString *> *trustedSileoExecutables = @[
+            @"Sileo",
+            @"giveMeRoot",
+            @"F/libiosexec.1.dylib",
+            @"F/liblzma.5.dylib",
+            @"F/libzstd.1.dylib",
+            @"F/libzstd.real.dylib",
+        ];
+        for (NSString *relativePath in trustedSileoExecutables) {
+            NSString *trustedPath =
+                [sourceTrustedSileo stringByAppendingPathComponent:relativePath];
+            NSString *rootlessPath = [@"/var/jb/Applications/Sileo.app"
+                stringByAppendingPathComponent:relativePath];
+            NSString *registeredExecutable =
+                [registeredPath stringByAppendingPathComponent:relativePath];
+            if (!files_are_equal(trustedPath, rootlessPath)) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"rootless Sileo fixed-trust mismatch: %@",
+                                  relativePath],
+                    nil);
+            }
+            if (!files_are_equal(trustedPath, registeredExecutable)) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"registered Sileo fixed-trust mismatch: %@",
+                                  relativePath],
+                    nil);
+            }
+        }
+        log_message("sileoFixedTrustExecutableSetReady=true files=%lu",
+                    (unsigned long)trustedSileoExecutables.count);
+
         NSString *registeredHelper =
             [registeredPath stringByAppendingPathComponent:@"giveMeRoot"];
         if (!files_are_equal(trustedHelper, registeredHelper)) {
@@ -5726,7 +7546,11 @@ int main(int argc, char *argv[]) {
         manifest[@"SBInjectSpringBoardBundle"] = kSBInjectBundle;
         manifest[@"SBInjectSpringBoardExecutable"] =
             kSpringBoardCandidateExecutable;
+        manifest[@"SBInjectPreferencesBundle"] = kSBInjectPreferencesBundle;
+        manifest[@"SBInjectPreferencesExecutable"] =
+            kPreferencesCandidateExecutable;
         manifest[@"SBInjectGeneralHook"] = kSBInjectGeneralHook;
+        manifest[@"SBInjectPreferencesBridge"] = kSBInjectPreferencesBridge;
         manifest[@"SBInjectLaunchdHook"] = kSBInjectLaunchdHook;
         manifest[@"SpringBoardTweakAdmission"] =
             @"sbinject-jit-pre-main-no-dynamic-trust-cache";
@@ -5764,6 +7588,10 @@ int main(int argc, char *argv[]) {
             manifest[@"SBInjectSpringBoardBundleBackup"] =
                 sbinjectBundleBackup;
         }
+        if (sbinjectPreferencesBundleBackup != nil) {
+            manifest[@"SBInjectPreferencesBundleBackup"] =
+                sbinjectPreferencesBundleBackup;
+        }
         manifest[@"Source"] = @"opa334/Dopamine 3.x";
         if (![manifest writeToFile:rollbackManifest atomically:YES]) {
             close(broker);
@@ -5780,6 +7608,28 @@ int main(int argc, char *argv[]) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
             return fail(sbinjectJitterdError, nil);
+        }
+
+        if (sbinjectPreferencesRestartRequired) {
+            NSString *restartMarkerError = nil;
+            if (!ensure_root_owned_empty_file(
+                    [kSBInjectPreferencesRestartMarker
+                        fileSystemRepresentation],
+                    0644, &restartMarkerError)) {
+                close(broker);
+                (void)unlink([brokerPath fileSystemRepresentation]);
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"Preferences restart handoff failed: %@",
+                                  restartMarkerError],
+                    nil);
+            }
+            log_message("sbinjectPreferencesRestartRequired=true "
+                        "preferenceLoaderInstalled=true generalHookUpdated=%s "
+                        "bridgeUpdated=%s bundleUpdated=%s",
+                        sbinjectGeneralHookUpdated ? "true" : "false",
+                        sbinjectPreferencesBridgeUpdated ? "true" : "false",
+                        sbinjectPreferencesBundleUpdated ? "true" : "false");
         }
 
         NSString *rootBrokerJobError = nil;

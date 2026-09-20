@@ -4,6 +4,7 @@ cache/
 /out/
 /:-
 /Dopamine-upstream/
+/vendor/SileoBuild/
 __pycache__/
 *.pyc
 .DS_Store

@@ -1,6 +1,8 @@
 // Derived from the supplied SBInject launchdhook and opa334/litehook.
 #include "litehook_rebind.h"
 
+#include <dlfcn.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach/vm_prot.h>
 #include <mach-o/getsect.h>
@@ -8,6 +10,7 @@
 #include <ptrauth.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define COMM_PAGE_START_ADDRESS (0x0000000FFFFFC000ULL)
@@ -71,9 +74,28 @@ static void remember_error(litehook_rebind_result_t *result,
     }
 }
 
+static bool pointer_belongs_to_image(void *pointer,
+                                     const char *expected_image) {
+    if (pointer == NULL || expected_image == NULL) {
+        return false;
+    }
+    Dl_info information = {0};
+    if (dladdr(pointer, &information) == 0 || information.dli_fname == NULL) {
+        return false;
+    }
+    if (strcmp(information.dli_fname, expected_image) == 0) {
+        return true;
+    }
+    char observed[PATH_MAX] = {0};
+    char expected[PATH_MAX] = {0};
+    return realpath(information.dli_fname, observed) != NULL &&
+           realpath(expected_image, expected) != NULL &&
+           strcmp(observed, expected) == 0;
+}
+
 static void rebind_section(const struct mach_header_64 *target_header,
                            const struct section_64 *section, void *replacee,
-                           void *replacement,
+                           void *replacement, const char *previous_image,
                            litehook_rebind_result_t *result) {
     char segment_name[sizeof(section->segname) + 1] = {0};
     char section_name[sizeof(section->sectname) + 1] = {0};
@@ -109,7 +131,8 @@ static void rebind_section(const struct mach_header_64 *target_header,
         } else {
             current = ptrauth_strip(current, ptrauth_key_function_pointer);
         }
-        if (current != unsigned_replacee) {
+        if (current != unsigned_replacee &&
+            !pointer_belongs_to_image(current, previous_image)) {
             continue;
         }
 
@@ -151,9 +174,9 @@ static void rebind_section(const struct mach_header_64 *target_header,
     }
 }
 
-litehook_rebind_result_t litehook_rebind_symbol(
+litehook_rebind_result_t litehook_rebind_symbol_with_previous_image(
     const struct mach_header_64 *target_header, void *replacee,
-    void *replacement) {
+    void *replacement, const char *previous_image) {
     litehook_rebind_result_t result = {0, 0, 0, 0, KERN_SUCCESS};
     if (target_header == NULL || replacee == NULL || replacement == NULL ||
         target_header->magic != MH_MAGIC_64) {
@@ -183,7 +206,8 @@ litehook_rebind_result_t litehook_rebind_symbol(
                     if (type == S_LAZY_SYMBOL_POINTERS ||
                         type == S_NON_LAZY_SYMBOL_POINTERS) {
                         rebind_section(target_header, &section[section_index],
-                                       replacee, replacement, &result);
+                                       replacee, replacement, previous_image,
+                                       &result);
                     }
                 }
             }
@@ -194,3 +218,9 @@ litehook_rebind_result_t litehook_rebind_symbol(
     return result;
 }
 
+litehook_rebind_result_t litehook_rebind_symbol(
+    const struct mach_header_64 *target_header, void *replacee,
+    void *replacement) {
+    return litehook_rebind_symbol_with_previous_image(
+        target_header, replacee, replacement, NULL);
+}

@@ -34,7 +34,7 @@ Usage: ./Dopamine-CryptexBootstrap/setup.sh [options]
 
 Prepare a pinned opa334/Dopamine tree and the local Python/signing environment.
 The build is host-only. Install additionally writes the provisioned app and
-nonpersistent Cryptex to one connected device.
+persistent, nonce-bound Cryptex to one connected device.
 
 Options:
   --prepare                 Prepare and preflight only (default)

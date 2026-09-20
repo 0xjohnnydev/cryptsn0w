@@ -16,6 +16,8 @@ typedef struct {
 litehook_rebind_result_t litehook_rebind_symbol(
     const struct mach_header_64 *target_header, void *replacee,
     void *replacement);
+litehook_rebind_result_t litehook_rebind_symbol_with_previous_image(
+    const struct mach_header_64 *target_header, void *replacee,
+    void *replacement, const char *previous_image);
 
 #endif
-

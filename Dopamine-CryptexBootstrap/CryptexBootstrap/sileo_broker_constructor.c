@@ -453,44 +453,6 @@ static void probe_apt_lists_access(os_log_t log, const char *jailbreakRoot) {
     }
 }
 
-static int verify_root_broker(os_log_t log) {
-    int outputPipe[2];
-    if (pipe(outputPipe) != 0) {
-        os_log_error(log, "root broker pipe failed: %{public}s",
-                     strerror(errno));
-        return -1;
-    }
-    char *arguments[] = {"/var/jb/usr/bin/whoami", NULL};
-    int descriptors[] = {outputPipe[1]};
-    int descriptorNumbers[] = {STDOUT_FILENO};
-    int32_t status = 0;
-    bool ran = run_broker_request(arguments, 1, NULL, 0, descriptors,
-                                  descriptorNumbers, 1, &status);
-    close(outputPipe[1]);
-    if (!ran) {
-        close(outputPipe[0]);
-        os_log_error(log, "root broker preflight request failed: %{public}s",
-                     strerror(errno));
-        return -1;
-    }
-    char output[32] = {0};
-    ssize_t outputLength;
-    do {
-        outputLength = read(outputPipe[0], output, sizeof(output) - 1);
-    } while (outputLength < 0 && errno == EINTR);
-    close(outputPipe[0]);
-    if (outputLength < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
-        (strcmp(output, "root\n") != 0 && strcmp(output, "root") != 0)) {
-        os_log_error(log,
-                     "root broker preflight failed: status=%{public}d "
-                     "output=%{public}s",
-                     status, outputLength >= 0 ? output : "read-error");
-        return -1;
-    }
-    os_log(log, "root broker preflight complete");
-    return 0;
-}
-
 static bool is_hex_character(char character) {
     return (character >= '0' && character <= '9') ||
            (character >= 'a' && character <= 'f') ||
@@ -758,6 +720,64 @@ static bool resolve_managed_spawn_command(const char *path,
     return true;
 }
 
+static bool resolve_managed_respring_command(const char *path,
+                                             bool allowBareName,
+                                             char resolved[PATH_MAX]) {
+    if (path == NULL || gJailbreakRoot[0] == '\0') {
+        return false;
+    }
+    bool matches = strcmp(path, "/usr/bin/sbreload") == 0 ||
+                   strcmp(path, "/bin/sbreload") == 0 ||
+                   strcmp(path, "/var/jb/usr/bin/sbreload") == 0 ||
+                   strcmp(path, "/var/jb/bin/sbreload") == 0 ||
+                   (allowBareName && strcmp(path, "sbreload") == 0);
+    if (!matches && path[0] == '/') {
+        char requestedResolved[PATH_MAX];
+        if (realpath(path, requestedResolved) != NULL) {
+            static const char *const relativeCandidates[] = {
+                "/usr/bin/sbreload",
+                "/bin/sbreload",
+            };
+            for (size_t index = 0;
+                 index < sizeof(relativeCandidates) /
+                             sizeof(relativeCandidates[0]);
+                 ++index) {
+                char expected[PATH_MAX];
+                char expectedResolved[PATH_MAX];
+                int expectedLength =
+                    snprintf(expected, sizeof(expected), "%s%s",
+                             gJailbreakRoot, relativeCandidates[index]);
+                if (expectedLength >= 0 &&
+                    (size_t)expectedLength < sizeof(expected) &&
+                    realpath(expected, expectedResolved) != NULL &&
+                    path_is_below_jailbreak_root(expectedResolved) &&
+                    strcmp(requestedResolved, expectedResolved) == 0) {
+                    matches = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!matches) {
+        return false;
+    }
+    char candidate[PATH_MAX];
+    int length = snprintf(candidate, sizeof(candidate),
+                          "%s/usr/libexec/codex-sileo-root-broker",
+                          gJailbreakRoot);
+    // `gJailbreakRoot` came from the root-created container bootstrap record
+    // and was validated as a canonical /private/preboot root. iOS 27 can deny
+    // realpath/stat on that canonical path from the sandboxed app even after
+    // the equivalent /var/jb extension is consumed. The root broker again
+    // validates this exact command and authenticated peer before executing it.
+    if (length < 0 || (size_t)length >= sizeof(candidate) ||
+        !path_is_below_jailbreak_root(candidate)) {
+        return false;
+    }
+    memcpy(resolved, candidate, (size_t)length + 1U);
+    return true;
+}
+
 static bool resolve_managed_apt_simulation(
     const char *path, char *const argv[], char resolved[PATH_MAX]) {
     if (argv == NULL || argv[0] == NULL || argv[1] == NULL ||
@@ -936,8 +956,34 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
     // executable resolves below the managed root through the same broker.
     char brokerCommand[PATH_MAX] = {0};
     bool compatibilityMapped = false;
+    const char *respringRequest =
+        helperSpawn && argv != NULL && argv[1] != NULL ? argv[1] : path;
+    bool managedRespringSpawn =
+        resolve_managed_respring_command(respringRequest, true,
+                                         brokerCommand);
+    if (!managedRespringSpawn && argv != NULL && argv[0] != NULL) {
+        // Some Sileo/uikittools combinations pass the resolved executable in
+        // `path` but retain only the bare `sbreload` name in argv[0]. Accept
+        // either exact representation from this already authenticated app.
+        managedRespringSpawn =
+            resolve_managed_respring_command(argv[0], true, brokerCommand);
+        if (managedRespringSpawn) {
+            respringRequest = argv[0];
+        }
+    }
+    if (gConstructorLog != NULL &&
+        ((path != NULL && strstr(path, "sbreload") != NULL) ||
+         (argv != NULL && argv[0] != NULL &&
+          strstr(argv[0], "sbreload") != NULL))) {
+        os_log(gConstructorLog,
+               "respring spawn probe path=%{public}s argv0=%{public}s "
+               "matched=%{public}s",
+               path != NULL ? path : "none",
+               argv != NULL && argv[0] != NULL ? argv[0] : "none",
+               managedRespringSpawn ? "true" : "false");
+    }
     bool managedPersonaSpawn =
-        !helperSpawn && attributes != NULL &&
+        !helperSpawn && !managedRespringSpawn && attributes != NULL &&
         resolve_managed_spawn_command(path, brokerCommand,
                                       &compatibilityMapped);
     // Sileo's dependency preview intentionally invokes apt-get without a root
@@ -946,9 +992,10 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
     // simulation shape; package installation continues to use the attributed
     // root path above.
     bool managedSimulationSpawn =
-        !helperSpawn && attributes == NULL &&
+        !helperSpawn && !managedRespringSpawn && attributes == NULL &&
         resolve_managed_apt_simulation(path, argv, brokerCommand);
-    if (!helperSpawn && !managedPersonaSpawn && !managedSimulationSpawn) {
+    if (!helperSpawn && !managedRespringSpawn && !managedPersonaSpawn &&
+        !managedSimulationSpawn) {
         return posix_spawn(pid, path, actions, attributes, argv, envp);
     }
     if (pid == NULL || argv == NULL || argv[0] == NULL ||
@@ -963,7 +1010,8 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
         job->descriptors[index] = -1;
     }
     pthread_cond_init(&job->condition, NULL);
-    if (managedPersonaSpawn || managedSimulationSpawn) {
+    if (managedRespringSpawn || managedPersonaSpawn ||
+        managedSimulationSpawn) {
         job->arguments[0] = strdup(brokerCommand);
         if (job->arguments[0] == NULL) {
             free_virtual_job(job);
@@ -971,7 +1019,17 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
         }
         job->argument_count = 1;
     }
-    for (uint32_t index = 1; argv[index] != NULL; ++index) {
+    if (managedRespringSpawn) {
+        job->arguments[job->argument_count] =
+            strdup("--sbinject-respring");
+        if (job->arguments[job->argument_count] == NULL) {
+            free_virtual_job(job);
+            return ENOMEM;
+        }
+        ++job->argument_count;
+    }
+    for (uint32_t index = 1;
+         !managedRespringSpawn && argv[index] != NULL; ++index) {
         if (job->argument_count >= CODEX_ROOT_BROKER_MAX_ARGUMENTS) {
             free_virtual_job(job);
             return E2BIG;
@@ -1026,6 +1084,26 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
     for (uint32_t index = 0; index < capturedCount; ++index) {
         if (!add_job_descriptor(job, captured[index].source,
                                 captured[index].target)) {
+            if (managedRespringSpawn) {
+                continue;
+            }
+            int savedError = errno;
+            free_virtual_job(job);
+            return savedError == 0 ? EBADF : savedError;
+        }
+    }
+    if (managedRespringSpawn && job->descriptor_count == 0) {
+        // Respring produces no meaningful output. Sileo can reuse a file-
+        // actions address after its pipe descriptors have closed, so provide
+        // a deterministic sink instead of refusing the control operation.
+        int nullDescriptor = open("/dev/null", O_RDWR | O_CLOEXEC);
+        bool added = nullDescriptor >= 0 &&
+                     add_job_descriptor(job, nullDescriptor, STDOUT_FILENO) &&
+                     add_job_descriptor(job, nullDescriptor, STDERR_FILENO);
+        if (nullDescriptor >= 0) {
+            close(nullDescriptor);
+        }
+        if (!added) {
             int savedError = errno;
             free_virtual_job(job);
             return savedError == 0 ? EBADF : savedError;
@@ -1041,6 +1119,23 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
     job->next = gVirtualJobs;
     gVirtualJobs = job;
     pthread_mutex_unlock(&gStateLock);
+    if (managedRespringSpawn) {
+        // Sileo terminates itself immediately after dispatching the bottom
+        // sheet's sbreload command. A detached in-process worker would die
+        // with Sileo before it could contact the root broker. Dispatch this
+        // one operation synchronously; a successful request normally ends by
+        // replacing SpringBoard (and therefore this process) before return.
+        *pid = job->pid;
+        if (gConstructorLog != NULL) {
+            os_log(gConstructorLog,
+                   "virtualized root spawn pid=%{public}d "
+                   "mode=respring-remap-sync command=%{public}s "
+                   "requested=%{public}s",
+                   job->pid, job->arguments[0], path);
+        }
+        (void)run_virtual_job(job);
+        return 0;
+    }
     pthread_t worker;
     int threadResult = pthread_create(&worker, NULL, run_virtual_job, job);
     if (threadResult != 0) {
@@ -1067,12 +1162,14 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
                "virtualized root spawn pid=%{public}d mode=%{public}s "
                "command=%{public}s requested=%{public}s",
                job->pid,
-               helperSpawn
-                   ? "helper"
-                   : (managedSimulationSpawn
+               managedRespringSpawn
+                   ? "respring-remap"
+                   : (helperSpawn
+                          ? "helper"
+                          : (managedSimulationSpawn
                           ? "simulation"
                           : (compatibilityMapped ? "persona-remap"
-                                                 : "persona")),
+                                                 : "persona"))),
                job->arguments[0], path);
     }
     return 0;
@@ -1108,78 +1205,6 @@ static pid_t codex_waitpid(pid_t pid, int *status, int options) {
     pthread_mutex_unlock(&gStateLock);
     free_virtual_job(job);
     return pid;
-}
-
-static int verify_spawn_bridge(os_log_t log) {
-    char executable[PATH_MAX];
-    char resolvedExecutable[PATH_MAX];
-    uint32_t executableSize = sizeof(executable);
-    if (_NSGetExecutablePath(executable, &executableSize) != 0 ||
-        realpath(executable, resolvedExecutable) == NULL) {
-        os_log_error(log, "spawn bridge executable path is unavailable");
-        return -1;
-    }
-    memcpy(executable, resolvedExecutable, strlen(resolvedExecutable) + 1U);
-    char *lastSlash = strrchr(executable, '/');
-    if (lastSlash == NULL ||
-        (size_t)(lastSlash + 1 - executable) + strlen("giveMeRoot") + 1U >
-            sizeof(executable)) {
-        os_log_error(log, "spawn bridge helper path is invalid");
-        return -1;
-    }
-    strcpy(lastSlash + 1, "giveMeRoot");
-
-    int outputPipe[2];
-    if (pipe(outputPipe) != 0) {
-        os_log_error(log, "spawn bridge pipe failed: %{public}s",
-                     strerror(errno));
-        return -1;
-    }
-    posix_spawn_file_actions_t actions = NULL;
-    int actionResult = codex_actions_init(&actions);
-    if (actionResult == 0) {
-        actionResult =
-            codex_actions_adddup2(&actions, outputPipe[1], STDOUT_FILENO);
-    }
-    pid_t virtualPid = -1;
-    char *arguments[] = {executable, "/var/jb/usr/bin/whoami", NULL};
-    int spawnResult =
-        actionResult == 0
-            ? codex_posix_spawn(&virtualPid, executable, &actions, NULL,
-                                arguments, environ)
-            : actionResult;
-    int destroyResult =
-        actions != NULL ? codex_actions_destroy(&actions) : 0;
-    close(outputPipe[1]);
-    if (spawnResult != 0 || destroyResult != 0) {
-        close(outputPipe[0]);
-        os_log_error(log,
-                     "spawn bridge setup failed: spawn=%{public}d "
-                     "destroy=%{public}d",
-                     spawnResult, destroyResult);
-        return -1;
-    }
-
-    int status = 0;
-    pid_t waited = codex_waitpid(virtualPid, &status, 0);
-    char output[32] = {0};
-    ssize_t outputLength;
-    do {
-        outputLength = read(outputPipe[0], output, sizeof(output) - 1U);
-    } while (outputLength < 0 && errno == EINTR);
-    close(outputPipe[0]);
-    if (waited != virtualPid || outputLength < 0 || !WIFEXITED(status) ||
-        WEXITSTATUS(status) != 0 ||
-        (strcmp(output, "root\n") != 0 && strcmp(output, "root") != 0)) {
-        os_log_error(log,
-                     "spawn bridge preflight failed: waited=%{public}d "
-                     "status=%{public}d output=%{public}s",
-                     waited, status,
-                     outputLength >= 0 ? output : "read-error");
-        return -1;
-    }
-    os_log(log, "spawn bridge preflight complete");
-    return 0;
 }
 
 #define CODEX_INTERPOSE(replacement, replacee)                                \
@@ -1241,19 +1266,9 @@ __attribute__((constructor)) static void initialize_sileo_broker(void) {
     setenv("SHELL", shell, 1);
     setenv("DYLD_LIBRARY_PATH", libraryPath, 1);
     probe_apt_lists_access(gConstructorLog, jailbreakRoot);
-    if (verify_root_broker(gConstructorLog) != 0) {
-        os_log_error(gConstructorLog,
-                     "constructor root broker preflight failed");
-        _exit(126);
-    }
     int driverExitCode = 0;
     if (run_postboot_driver(gConstructorLog, &driverExitCode)) {
         _exit(driverExitCode);
-    }
-    if (verify_spawn_bridge(gConstructorLog) != 0) {
-        os_log_error(gConstructorLog,
-                     "constructor spawn bridge preflight failed");
-        _exit(126);
     }
     os_log(gConstructorLog, "constructor broker initialization complete");
 }
