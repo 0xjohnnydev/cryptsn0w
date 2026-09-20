@@ -305,6 +305,10 @@ def require_layout() -> None:
         )
 
 
+def transport_priority(transport: str) -> int:
+    return 0 if transport.casefold() == "usb" else 1
+
+
 def connected_devices() -> list[dict[str, str]]:
     completed = subprocess.run(
         [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"],
@@ -316,7 +320,7 @@ def connected_devices() -> list[dict[str, str]]:
     payload = json.loads(completed.stdout)
     if not isinstance(payload, list):
         raise DeployError("usbmux returned an invalid device list")
-    devices = []
+    devices: dict[str, dict[str, str]] = {}
     for raw in payload:
         if not isinstance(raw, dict):
             continue
@@ -324,7 +328,7 @@ def connected_devices() -> list[dict[str, str]]:
         product = raw.get("ProductType")
         if not isinstance(udid, str) or not isinstance(product, str):
             continue
-        devices.append({
+        record = {
             "udid": udid,
             "name": str(raw.get("DeviceName") or product),
             "model": product,
@@ -332,8 +336,15 @@ def connected_devices() -> list[dict[str, str]]:
             "version": str(raw.get("ProductVersion") or "unknown"),
             "build": str(raw.get("BuildVersion") or "unknown"),
             "transport": str(raw.get("ConnectionType") or "usbmux"),
-        })
-    return devices
+        }
+        existing = devices.get(udid)
+        if existing is not None and (
+            transport_priority(existing["transport"])
+            <= transport_priority(record["transport"])
+        ):
+            continue
+        devices[udid] = record
+    return list(devices.values())
 
 
 def configure_target_build_environment(device: dict[str, str]) -> None:
@@ -356,7 +367,10 @@ def choose_device(requested: str | None) -> dict[str, str]:
     if not devices:
         raise DeployError("no connected, paired physical Apple device found")
     if len(devices) != 1:
-        raise DeployError("multiple eligible devices found; pass --device UDID")
+        connected = "\n  ".join(f'{d["udid"]}  {d["name"]}' for d in devices)
+        raise DeployError(
+            "multiple eligible devices found; pass --device UDID:\n  " + connected
+        )
     return devices[0]
 
 
