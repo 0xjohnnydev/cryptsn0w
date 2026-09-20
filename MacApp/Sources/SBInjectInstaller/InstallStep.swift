@@ -18,4 +18,15 @@ enum InstallStep: Int, CaseIterable, Identifiable, Sendable {
         case .verify: "Verify Sileo & tweaks"
         }
     }
+
+    var progress: Double {
+        switch self {
+        case .connect: 0.08
+        case .transferStage: 0.24
+        case .copySystemApps: 0.43
+        case .buildFinal: 0.64
+        case .installFinal: 0.82
+        case .verify: 0.95
+        }
+    }
 }

@@ -3,7 +3,7 @@ import SwiftUI
 struct TitleStripView: View {
     var body: some View {
         HStack {
-            Text("CryptexSn0w")
+            Text("CryptexSn0w for iOS")
                 .font(.headline)
                 .bold()
             Spacer()
@@ -12,9 +12,9 @@ struct TitleStripView: View {
                 .foregroundStyle(AppTheme.mutedInk)
         }
         .padding(.leading, 78)
-        .padding(.trailing, 14)
-        .frame(height: 36)
-        .background(.white.opacity(0.48))
+        .padding(.trailing, 16)
+        .frame(height: 38)
+        .background(AppTheme.surface)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(AppTheme.divider)
