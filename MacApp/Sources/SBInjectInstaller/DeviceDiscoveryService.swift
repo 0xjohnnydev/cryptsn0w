@@ -31,23 +31,36 @@ actor DeviceDiscoveryService {
             throw DeviceDiscoveryFailure.invalidResponse
         }
 
-        let devices = records.compactMap { record -> ConnectedDevice? in
+        var devices: [String: ConnectedDevice] = [:]
+        for record in records {
             guard let id = record.uniqueDeviceID ?? record.identifier,
                   let model = record.productType else {
-                return nil
+                continue
             }
-            return ConnectedDevice(
+            let candidate = ConnectedDevice(
                 id: id,
                 name: record.deviceName ?? model,
                 model: model,
                 systemVersion: record.productVersion ?? "unknown",
                 transport: record.connectionType ?? "usbmux"
             )
+            if let existing = devices[id],
+               Self.transportPriority(existing.transport)
+                <= Self.transportPriority(candidate.transport) {
+                continue
+            }
+            devices[id] = candidate
         }
         guard !devices.isEmpty else {
             throw DeviceDiscoveryFailure.noDevices
         }
-        return devices.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return devices.values.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private static func transportPriority(_ transport: String) -> Int {
+        transport.lowercased() == "usb" ? 0 : 1
     }
 
     private func invocation(repositoryURL: URL?) throws -> (URL, [String]) {
