@@ -10,13 +10,6 @@ UPSTREAM_URL=https://github.com/opa334/Dopamine.git
 UPSTREAM_COMMIT=939a3a21400f0dc6d6163b2b5999ba2ace0d2732
 MANAGED_MARKER="$UPSTREAM_DIR/.codex-cryptex-bootstrap-managed"
 CRYPTEXCTL=/System/Library/SecurityResearch/usr/bin/cryptexctl.research
-IPHONE_17_PRO_MAX_UDID=00008150-0018252C1130C01C
-IPHONE_12_MINI_UDID=00008101-001C39641A9B001E
-IPHONE_13_UDID=00008110-000C542E0EA8201E
-DEFAULT_SILEO_BUNDLE_IDENTIFIER=org.coolstar.SileoStore
-IPHONE_13_SILEO_BUNDLE_IDENTIFIER=com.lilycohl.sileo27b8
-IPHONE_12_MINI_SILEO_BUNDLE_IDENTIFIER=com.johnnyfranks.codex.profilebootstrap12mini
-
 ACTION=prepare
 DEVICE=
 ALLOW_UNVERIFIED=0
@@ -33,8 +26,8 @@ usage() {
 Usage: ./Dopamine-CryptexBootstrap/setup.sh [options]
 
 Prepare a pinned opa334/Dopamine tree and the local Python/signing environment.
-The build is host-only. Install additionally writes the provisioned app and
-persistent, nonce-bound Cryptex to one connected device.
+The build is host-only. Install writes one persistent, nonce-bound Cryptex
+containing fixed-trust system Sileo to the selected device.
 
 Options:
   --prepare                 Prepare and preflight only (default)
@@ -46,11 +39,6 @@ Options:
   --no-brew                 Report missing Homebrew tools without installing
   -h, --help                Show this help
 
-Optional signing overrides:
-  CODEX_SILEO_DEVELOPMENT_IDENTITY
-  CODEX_SILEO_PROVISIONING_PROFILE
-  CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS
-  CODEX_SILEO_BUNDLE_IDENTIFIER
 EOF
 }
 
@@ -95,23 +83,6 @@ if [[ -n "${CODEX_TARGET_UDID:-}" && -n "$DEVICE" && \
     "$CODEX_TARGET_UDID" != "$DEVICE" ]]; then
     die "--device and CODEX_TARGET_UDID select different devices"
 fi
-if [[ -z "${CODEX_SILEO_BUNDLE_IDENTIFIER:-}" ]]; then
-    case "$TARGET_UDID" in
-        "$IPHONE_12_MINI_UDID")
-            CODEX_SILEO_BUNDLE_IDENTIFIER=$IPHONE_12_MINI_SILEO_BUNDLE_IDENTIFIER
-            ;;
-        "$IPHONE_13_UDID")
-            CODEX_SILEO_BUNDLE_IDENTIFIER=$IPHONE_13_SILEO_BUNDLE_IDENTIFIER
-            ;;
-        "$IPHONE_17_PRO_MAX_UDID"|"")
-            CODEX_SILEO_BUNDLE_IDENTIFIER=$DEFAULT_SILEO_BUNDLE_IDENTIFIER
-            ;;
-        *)
-            CODEX_SILEO_BUNDLE_IDENTIFIER=$DEFAULT_SILEO_BUNDLE_IDENTIFIER
-            ;;
-    esac
-fi
-export CODEX_SILEO_BUNDLE_IDENTIFIER
 if [[ -n "$TARGET_UDID" ]]; then
     export CODEX_TARGET_UDID=$TARGET_UDID
 fi
@@ -156,7 +127,7 @@ fi
 
 HOST_TOOLS=(
     awk codesign curl ditto dpkg-deb file git gpg install_name_tool ldid lipo make nm
-    otool plutil python3 rsync security shasum tar xcrun zstd rg
+    otool plutil python3 rsync security shasum sips tar xcrun zstd rg
 )
 for tool in "${HOST_TOOLS[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required host tool: $tool"
@@ -222,24 +193,6 @@ print -- "Preparing pinned Python environment..."
 make -C "$PROJECT_ROOT" python
 "$PROJECT_ROOT/.venv/bin/python" \
     "$PROJECT_ROOT/tools/patch_pymobiledevice3_remotexpc.py"
-
-SIGNING_DIR="$UPSTREAM_DIR/CryptexBootstrap/work/signing"
-mkdir -p "$SIGNING_DIR"
-SIGNING_ARGS=(
-    --bundle-id "$CODEX_SILEO_BUNDLE_IDENTIFIER"
-    --output-json "$SIGNING_DIR/setup-check.json"
-    --output-entitlements "$SIGNING_DIR/sileo-development-entitlements.plist"
-)
-[[ -z "$TARGET_UDID" ]] || SIGNING_ARGS+=(--device "$TARGET_UDID")
-[[ -z "${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}" ]] || \
-    SIGNING_ARGS+=(--identity "$CODEX_SILEO_DEVELOPMENT_IDENTITY")
-[[ -z "${CODEX_SILEO_PROVISIONING_PROFILE:-}" ]] || \
-    SIGNING_ARGS+=(--profile "$CODEX_SILEO_PROVISIONING_PROFILE")
-[[ -z "${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}" ]] || \
-    SIGNING_ARGS+=(--entitlements "$CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS")
-"$PROJECT_ROOT/.venv/bin/python" \
-    "$UPSTREAM_DIR/CryptexBootstrap/configure_signing.py" \
-    "${SIGNING_ARGS[@]}"
 
 if [[ "$ACTION" == prepare ]]; then
     print -- ""

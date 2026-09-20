@@ -16,16 +16,15 @@ ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
 VERSION=${CODEX_CRYPTEX_VERSION:-1.0.$(date -u +%Y%m%d%H%M%S)}
-SILEO_BUNDLE_IDENTIFIER=${CODEX_SILEO_BUNDLE_IDENTIFIER:-org.coolstar.SileoStore}
-TARGET_UDID=${CODEX_TARGET_UDID:-}
-SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
-SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
-SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}
+SILEO_BUNDLE_IDENTIFIER=org.coolstar.SileoStore
+SILEO_UPSTREAM_PACKAGE_VERSION=2.5.1
+SILEO_PACKAGE_VERSION=2.5.1+codex1
 FORCE_CLEAN_INSTALL=${CODEX_FORCE_CLEAN_INSTALL:-0}
 MAX_CRYPTEX_IMAGE_BYTES=$((128 * 1024 * 1024))
 MAX_PREFERENCES_BRIDGE_BYTES=$((1024 * 1024))
 
 CACHE_DIR="$SCRIPT_DIR/cache"
+GPG_HOME="$CACHE_DIR/gnupg"
 WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
 BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
@@ -36,6 +35,7 @@ DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
 SBINJECT_APT_CONFIG="$SCRIPT_DIR/sbinject-package.conf"
 PREFERENCELOADER_PIN="$SCRIPT_DIR/preferenceloader.pref"
+SILEO_PIN="$SCRIPT_DIR/sileo.pref"
 APT_LIST_NORMALIZER="$SCRIPT_DIR/normalize_apt_lists.sh"
 ELLEKIT_KEY="$SCRIPT_DIR/keyrings/ellekit.asc"
 BIGBOSS_KEY="$SCRIPT_DIR/keyrings/bigboss.asc"
@@ -46,6 +46,7 @@ EMBEDDED_APT_CONFIG_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/apt"
 EMBEDDED_REPOSITORY_COMPAT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/99dopamine-repository-compat"
 EMBEDDED_SBINJECT_APT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/98sbinject-packages"
 EMBEDDED_PREFERENCELOADER_PIN="$EMBEDDED_APT_CONFIG_DIR/99preferenceloader"
+EMBEDDED_SILEO_PIN="$EMBEDDED_APT_CONFIG_DIR/99codex-system-sileo"
 EMBEDDED_APT_LIST_NORMALIZER="$IMAGE_ROOT/usr/local/share/codex-bootstrap/normalize-apt-lists.sh"
 EMBEDDED_CLEAN_INSTALL_TOKEN="$IMAGE_ROOT/usr/local/share/codex-bootstrap/clean-install-token.txt"
 EMBEDDED_KEYRING_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/keyrings"
@@ -54,6 +55,10 @@ EMBEDDED_BIGBOSS_KEY="$EMBEDDED_KEYRING_DIR/bigboss.gpg"
 EMBEDDED_ELLEKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ellekit.deb"
 EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/preferenceloader.deb"
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
+SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
+SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
+SILEO_ASSET_INFO="$WORK_DIR/sileo-asset-info.json"
+SILEO_NORMALIZED_ICON="$WORK_DIR/AppIcon60x60@2x.png"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
@@ -79,6 +84,7 @@ SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
 SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v3.dylib"
+SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
 SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
 PREFERENCES_BRIDGE_SUPPORT_DIR="$SBINJECT_SOURCE_DIR/PreferenceBridgeSupport"
 PREFERENCES_BRIDGE_BUILD_DIRECTORY="$WORK_DIR/preferences-bridge-build"
@@ -116,9 +122,6 @@ ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
 REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
-SIGNING_DIR="$WORK_DIR/signing"
-SIGNING_CONFIG="$SIGNING_DIR/config.json"
-GENERATED_ENTITLEMENTS="$SIGNING_DIR/sileo-development-entitlements.plist"
 
 die() {
     print -u2 -- "error: $*"
@@ -158,19 +161,6 @@ verify_keyring() {
         die "unexpected primary fingerprint in ${keyring:t}: $fingerprint"
 }
 
-json_field() {
-    python3 - "$1" "$2" <<'PY'
-import json
-import pathlib
-import sys
-
-value = json.loads(pathlib.Path(sys.argv[1]).read_text())[sys.argv[2]]
-if not isinstance(value, str) or not value:
-    raise SystemExit(f"missing string field {sys.argv[2]}")
-print(value)
-PY
-}
-
 require_true_entitlement() {
     local plist=$1
     local key_path=$2
@@ -182,7 +172,7 @@ require_true_entitlement() {
         die "required entitlement $display_name is not true in ${plist:t}"
 }
 
-for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg security shasum stat tar xcrun zstd; do
+for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg shasum sips stat tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 for plist in "$ELLEKIT_COMPAT_ENTITLEMENTS" "$EXEC_WORKER_ENTITLEMENTS"; do
@@ -235,18 +225,29 @@ plutil -lint "$CUSTOMD_JOB_PLIST_SOURCE" >/dev/null || \
 sh -n "$APT_LIST_NORMALIZER"
 [[ -f "$ELLEKIT_KEY" ]] || die "missing ElleKit repository keyring"
 [[ -f "$BIGBOSS_KEY" ]] || die "missing BigBoss repository keyring"
+mkdir -p "$GPG_HOME"
+chmod 0700 "$GPG_HOME"
+export GNUPGHOME="$GPG_HOME"
 verify_keyring "$ELLEKIT_KEY" "$ELLEKIT_KEY_FINGERPRINT"
 verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
 [[ -f "$SCRIPT_DIR/patch_sileo_postinst.py" ]] || \
     die "missing Sileo maintainer-script compatibility patch"
+[[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
+    die "missing deterministic Mach-O load-command patcher"
+[[ -f "$SCRIPT_DIR/sileo_broker_constructor.c" ]] || \
+    die "missing Sileo root-broker constructor"
+[[ -f "$SCRIPT_DIR/sileo_zstd_reexport.c" ]] || \
+    die "missing Sileo zstd re-export source"
 [[ -f "$SCRIPT_DIR/sbinject_package_validator.c" ]] || \
     die "missing SBInject package validator source"
 [[ -f "$PREFERENCELOADER_PIN" ]] || \
     die "missing PreferenceLoader version pin"
+[[ -f "$SILEO_PIN" ]] || die "missing fixed system Sileo version pin"
 for source in \
     sbinject_protocol.h \
     litehook_rebind.h litehook_rebind.c \
     sbinject_launchdhook.c \
+    sbinject_lsd_registration_hook.m \
     sbinject_dyld_bypass.h sbinject_dyld_bypass.c \
     sbinject_generalhook.c sbinject_jitterd.m \
     sbinject_preferences_bridge.m sbinject_preferences_bridge.swift; do
@@ -270,33 +271,7 @@ for source in dyld.m rop_inject.m thread_utils.m task_utils.m arm64.m; do
         die "missing pinned opa334/opainject source: $source"
 done
 
-mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR" "$SIGNING_DIR"
-SIGNING_ARGS=(
-    --bundle-id "$SILEO_BUNDLE_IDENTIFIER"
-    --output-json "$SIGNING_CONFIG"
-    --output-entitlements "$GENERATED_ENTITLEMENTS"
-)
-[[ -z "$TARGET_UDID" ]] || SIGNING_ARGS+=(--device "$TARGET_UDID")
-[[ -z "$SILEO_DEVELOPMENT_IDENTITY" ]] || \
-    SIGNING_ARGS+=(--identity "$SILEO_DEVELOPMENT_IDENTITY")
-[[ -z "$SILEO_PROVISIONING_PROFILE" ]] || \
-    SIGNING_ARGS+=(--profile "$SILEO_PROVISIONING_PROFILE")
-[[ -z "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
-    SIGNING_ARGS+=(--entitlements "$SILEO_DEVELOPMENT_ENTITLEMENTS")
-python3 "$SCRIPT_DIR/configure_signing.py" "${SIGNING_ARGS[@]}"
-SILEO_DEVELOPMENT_IDENTITY=$(json_field "$SIGNING_CONFIG" identitySha1)
-SILEO_PROVISIONING_PROFILE=$(json_field "$SIGNING_CONFIG" profile)
-SILEO_DEVELOPMENT_ENTITLEMENTS=$(json_field "$SIGNING_CONFIG" entitlements)
-SILEO_APPLICATION_IDENTIFIER=$(plutil -extract application-identifier raw -o - \
-    "$SILEO_DEVELOPMENT_ENTITLEMENTS")
-
-[[ -f "$SILEO_PROVISIONING_PROFILE" ]] || \
-    die "missing Sileo provisioning profile: $SILEO_PROVISIONING_PROFILE"
-[[ -f "$SILEO_DEVELOPMENT_ENTITLEMENTS" ]] || \
-    die "missing Sileo development entitlements: $SILEO_DEVELOPMENT_ENTITLEMENTS"
-security find-identity -v -p codesigning | \
-    rg -q "$SILEO_DEVELOPMENT_IDENTITY" || \
-    die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
+mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
@@ -308,8 +283,11 @@ zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
     "$CUSTOMD_BUILD_DIRECTORY" "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
-    "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES"
+    "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES" \
+    "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_ASSET_INFO" \
+    "$SILEO_NORMALIZED_ICON"
 mkdir -p \
+    "$IMAGE_ROOT/Applications" \
     "$IMAGE_ROOT/Library/LaunchDaemons" \
     "$IMAGE_ROOT/usr/local/bin" \
     "$IMAGE_ROOT/usr/local/lib" \
@@ -410,6 +388,20 @@ xcrun --sdk iphoneos clang \
     -o "$SBINJECT_GENERALHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_GENERALHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fobjc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
+    "$SBINJECT_SOURCE_DIR/sbinject_lsd_registration_hook.m" \
+    -framework Foundation \
+    -install_name /var/jb/usr/lib/sbinject/lsd-registration-hook.dylib \
+    -o "$SBINJECT_LSD_REGISTRATION_HOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_LSD_REGISTRATION_HOOK"
 
 # Build the iOS 27 SwiftUI Settings bridge as a small, fixed arm64e control
 # plane dylib. PreferenceLoader 2.3.3 still supplies libprefs and constructs the
@@ -602,19 +594,81 @@ ldid -e "$LAUNCHCTL" | \
     die "launchctl lost its launchd-control entitlement"
 
 dpkg-deb -R "$SILEO_DEB" "$PACKAGE_ROOT"
+[[ "$(dpkg-deb -f "$SILEO_DEB" Version)" == \
+    "$SILEO_UPSTREAM_PACKAGE_VERSION" ]] || \
+    die "upstream Sileo package version changed"
+python3 - "$PACKAGE_ROOT/DEBIAN/control" "$SILEO_UPSTREAM_PACKAGE_VERSION" \
+    "$SILEO_PACKAGE_VERSION" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+upstream = sys.argv[2]
+replacement = sys.argv[3]
+text = path.read_text()
+text, count = re.subn(
+    rf"(?m)^Version: {re.escape(upstream)}$",
+    f"Version: {replacement}",
+    text,
+)
+if count != 1:
+    raise SystemExit("Sileo control file has an unexpected Version field")
+path.write_text(text)
+PY
 python3 "$SCRIPT_DIR/patch_sileo_postinst.py" \
     "$PACKAGE_ROOT/DEBIAN/postinst"
 APP_DIR="$PACKAGE_ROOT/var/jb/Applications/Sileo.app"
 [[ -x "$APP_DIR/Sileo" && -x "$APP_DIR/giveMeRoot" ]] || \
     die "Sileo package is missing expected executables"
-plutil -replace CFBundleIdentifier -string "$SILEO_BUNDLE_IDENTIFIER" \
+[[ "$(plutil -extract CFBundleIdentifier raw -o - \
+        "$APP_DIR/Info.plist")" == "$SILEO_BUNDLE_IDENTIFIER" ]] || \
+    die "upstream Sileo bundle identifier changed"
+plutil -replace CFBundleVersion -string "$VERSION" "$APP_DIR/Info.plist"
+[[ -f "$APP_DIR/Assets.car" ]] || die "upstream Sileo asset catalog is missing"
+xcrun assetutil --info "$APP_DIR/Assets.car" >"$SILEO_ASSET_INFO"
+rg -q '"RenditionName" : "AppIcon60x60@3x.png"' "$SILEO_ASSET_INFO" || \
+    die "upstream Sileo asset catalog lacks its iPhone 13 icon"
+[[ -f "$APP_DIR/AppIcon60x60@2x.png" ]] || \
+    die "upstream Sileo standalone primary icon is missing"
+# IconServices returns the generic grid when this nonstandard system-app mount
+# advertises only the compiled AppIcon catalog. Publish explicit standalone
+# phone renditions and remove CFBundleIconName so CFBundleIconFiles is the
+# authoritative primary-icon route.
+sips -s format png "$APP_DIR/AppIcon60x60@2x.png" \
+    --out "$SILEO_NORMALIZED_ICON" >/dev/null
+mv -f "$SILEO_NORMALIZED_ICON" "$APP_DIR/AppIcon60x60@2x.png"
+sips -z 180 180 "$APP_DIR/AppIcon60x60@2x.png" \
+    --out "$APP_DIR/AppIcon60x60@3x.png" >/dev/null
+plutil -remove \
+    'CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName' \
     "$APP_DIR/Info.plist"
+plutil -replace 'CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconFiles' \
+    -json '["AppIcon60x60"]' "$APP_DIR/Info.plist"
+plutil -replace CFBundleIconFiles -json '["AppIcon60x60"]' \
+    "$APP_DIR/Info.plist"
+[[ "$(sips -g pixelWidth "$APP_DIR/AppIcon60x60@3x.png" | \
+        awk '/pixelWidth:/ { print $2 }')" == 180 ]] || \
+    die "normalized Sileo iPhone 13 icon has the wrong width"
+ldid -e "$APP_DIR/Sileo" >"$SILEO_SYSTEM_ENTITLEMENTS"
+plutil -lint "$SILEO_SYSTEM_ENTITLEMENTS" >/dev/null || \
+    die "upstream Sileo entitlements are invalid"
+for entitlement in platform-application \
+                   'com\.apple\.private\.security\.no-sandbox' \
+                   'com\.apple\.private\.security\.no-container'; do
+    require_true_entitlement "$SILEO_SYSTEM_ENTITLEMENTS" "$entitlement" \
+        "$entitlement"
+done
+cp "$SILEO_SYSTEM_ENTITLEMENTS" \
+    "$APP_DIR/CodexSystemEntitlements.plist"
+chmod 0644 "$APP_DIR/CodexSystemEntitlements.plist"
 
-# Prepare the exact provisioned Sileo payload before constructing the Cryptex
-# trust cache.  The IPA packager recognizes this finalized layout and copies it
-# byte-for-byte, so fixed trust covers the code that MobileInstallation runs,
-# not the pre-rpath package binary.
+# Preserve Sileo's upstream system-app identity and privileged no-sandbox
+# entitlement set, then make the entire immutable bundle a direct Cryptex
+# payload.  Every Mach-O receives an ad-hoc CodeDirectory and the generated
+# Cryptex trust cache admits those exact bytes without a provisioning profile.
 FRAMEWORKS_DIR="$APP_DIR/F"
+SILEO_BROKER_DYLIB="$FRAMEWORKS_DIR/libcodex-sileo-broker.dylib"
 PROCURSUS_LIB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib"
 for library in libiosexec.1.dylib liblzma.5.dylib libzstd.1.5.5.dylib; do
     [[ -f "$PROCURSUS_LIB/$library" ]] || \
@@ -640,10 +694,23 @@ xcrun --sdk iphoneos clang \
     -lsandbox \
     -Wl,-install_name,@rpath/libzstd.1.dylib \
     -Wl,-reexport_library,"$FRAMEWORKS_DIR/libzstd.real.dylib" \
-    "$SCRIPT_DIR/sileo_broker_constructor.c" \
+    "$SCRIPT_DIR/sileo_zstd_reexport.c" \
     -o "$FRAMEWORKS_DIR/libzstd.1.dylib"
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fblocks \
+    -Wall -Wextra -Werror \
+    -lsandbox \
+    -Wl,-install_name,@loader_path/F/libcodex-sileo-broker.dylib \
+    "$SCRIPT_DIR/sileo_broker_constructor.c" \
+    -o "$SILEO_BROKER_DYLIB"
+python3 "$SCRIPT_DIR/patch_load_dylib.py" "$APP_DIR/Sileo" \
+    @loader_path/F/libcodex-sileo-broker.dylib
 for library in "$FRAMEWORKS_DIR"/*.dylib; do
-    codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
+    codesign --force --sign - --timestamp=none \
         --pagesize 4096 "$library"
 done
 
@@ -654,51 +721,71 @@ xcrun --sdk iphoneos clang \
     -Wall -Wextra -Werror \
     "$SCRIPT_DIR/sileo_root_helper.c" \
     -o "$APP_DIR/giveMeRoot"
-codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
+codesign --force --sign - --timestamp=none \
     --pagesize 4096 "$APP_DIR/giveMeRoot"
 chmod 0755 "$APP_DIR/giveMeRoot"
-cp "$SILEO_PROVISIONING_PROFILE" "$APP_DIR/embedded.mobileprovision"
-codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
-    --pagesize 4096 --entitlements "$SILEO_DEVELOPMENT_ENTITLEMENTS" \
+rm -f "$APP_DIR/embedded.mobileprovision"
+rm -rf "$APP_DIR/_CodeSignature"
+codesign --force --sign - --timestamp=none \
+    --pagesize 4096 --entitlements "$SILEO_SYSTEM_ENTITLEMENTS" \
     "$APP_DIR"
-if ldid -e "$APP_DIR/Sileo" | rg -q \
-    'platform-application|no-sandbox|task_for_pid-allow'; then
-    die "Sileo retains privileged runtime entitlements"
-fi
-ldid -e "$APP_DIR/Sileo" | rg -q \
-    -F -- "<string>$SILEO_APPLICATION_IDENTIFIER</string>" || \
-    die "Sileo development application identifier is missing"
+[[ ! -e "$APP_DIR/embedded.mobileprovision" ]] || \
+    die "system Sileo unexpectedly contains a provisioning profile"
+for entitlement in platform-application \
+                   'com\.apple\.private\.security\.no-sandbox' \
+                   'com\.apple\.private\.security\.no-container'; do
+    ldid -e "$APP_DIR/Sileo" | rg -q "$entitlement" || \
+        die "system Sileo lost required entitlement $entitlement"
+done
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 otool -l "$APP_DIR/Sileo" | rg -q 'path @loader_path/F' || \
     die "final Sileo app is missing its bundled-library rpath"
 otool -L "$FRAMEWORKS_DIR/libzstd.1.dylib" | \
     rg -q '@rpath/libzstd.real.dylib' || \
-    die "final Sileo constructor does not re-export bundled zstd"
+    die "final Sileo zstd shim does not re-export bundled zstd"
+otool -L "$APP_DIR/Sileo" | \
+    rg -q '@loader_path/F/libcodex-sileo-broker.dylib' || \
+    die "final Sileo app does not load its unique broker constructor"
+otool -D "$SILEO_BROKER_DYLIB" | \
+    rg -q '@loader_path/F/libcodex-sileo-broker.dylib' || \
+    die "Sileo broker constructor has the wrong install name"
+ditto --noqtn "$APP_DIR" "$SYSTEM_SILEO_APP"
+chmod 0755 "$SYSTEM_SILEO_APP" "$SYSTEM_SILEO_APP/Sileo" \
+    "$SYSTEM_SILEO_APP/giveMeRoot"
+[[ "$(plutil -extract CFBundleIdentifier raw -o - \
+        "$SYSTEM_SILEO_APP/Info.plist")" == "$SILEO_BUNDLE_IDENTIFIER" ]] || \
+    die "Cryptex Sileo bundle identifier changed while copying"
+[[ ! -e "$SYSTEM_SILEO_APP/embedded.mobileprovision" ]] || \
+    die "Cryptex Sileo contains a provisioning profile"
+[[ -f "$SYSTEM_SILEO_APP/Assets.car" ]] || \
+    die "Cryptex Sileo lost its asset catalog"
+[[ -f "$SYSTEM_SILEO_APP/AppIcon60x60@3x.png" ]] || \
+    die "Cryptex Sileo lost its explicit iPhone 13 icon"
+[[ -f "$SYSTEM_SILEO_APP/CodexSystemEntitlements.plist" ]] || \
+    die "Cryptex Sileo lost its registration entitlements"
+
+# Keep dpkg's package/dependency state without installing a mutable app under
+# /var/jb. The Cryptex is the authoritative signed source; the boot daemon
+# maintains one byte-verified, root-owned copy in the standard app container.
+rm -rf "$APP_DIR"
 dpkg-deb -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null
+[[ "$(dpkg-deb -f "$REPACKED_SILEO" Version)" == \
+    "$SILEO_PACKAGE_VERSION" ]] || \
+    die "fixed system Sileo metadata package version mismatch"
 cp "$REPACKED_SILEO" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/sileo.deb"
-# cryptexctl does not recurse into a Debian archive when it constructs the
-# trust cache. Keep the exact finalized executable subset that the provisioned
-# app will install, including the constructor and its bundled runtime.
-TRUSTED_SILEO_APP="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/Sileo.app"
-mkdir -p "$TRUSTED_SILEO_APP/F"
-cp -p "$APP_DIR/Sileo" "$APP_DIR/giveMeRoot" "$TRUSTED_SILEO_APP/"
-cp -p "$FRAMEWORKS_DIR"/*.dylib "$TRUSTED_SILEO_APP/F/"
+TRUSTED_SILEO_APP="$SYSTEM_SILEO_APP"
 typeset -a prepared_sileo_machos=(
-    "$APP_DIR/Sileo"
-    "$APP_DIR/giveMeRoot"
-    "$FRAMEWORKS_DIR/libiosexec.1.dylib"
-    "$FRAMEWORKS_DIR/liblzma.5.dylib"
-    "$FRAMEWORKS_DIR/libzstd.1.dylib"
-    "$FRAMEWORKS_DIR/libzstd.real.dylib"
+    "$SYSTEM_SILEO_APP/Sileo"
+    "$SYSTEM_SILEO_APP/giveMeRoot"
+    "$SYSTEM_SILEO_APP/F/libiosexec.1.dylib"
+    "$SYSTEM_SILEO_APP/F/liblzma.5.dylib"
+    "$SYSTEM_SILEO_APP/F/libcodex-sileo-broker.dylib"
+    "$SYSTEM_SILEO_APP/F/libzstd.1.dylib"
+    "$SYSTEM_SILEO_APP/F/libzstd.real.dylib"
 )
 typeset -a trusted_sileo_machos=(
-    "$TRUSTED_SILEO_APP/Sileo"
-    "$TRUSTED_SILEO_APP/giveMeRoot"
-    "$TRUSTED_SILEO_APP/F/libiosexec.1.dylib"
-    "$TRUSTED_SILEO_APP/F/liblzma.5.dylib"
-    "$TRUSTED_SILEO_APP/F/libzstd.1.dylib"
-    "$TRUSTED_SILEO_APP/F/libzstd.real.dylib"
+    "${prepared_sileo_machos[@]}"
 )
 for (( index = 1; index <= ${#prepared_sileo_machos}; ++index )); do
     [[ "$(sha256_of "${prepared_sileo_machos[$index]}")" == \
@@ -842,6 +929,7 @@ for candidate in \
     "$CUSTOMD_SETEXEC_EXECUTABLE" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_LSD_REGISTRATION_HOOK" \
     "$SBINJECT_PREFERENCES_BRIDGE" \
     "$SBINJECT_LAUNCHDHOOK" \
     "$SBINJECT_JITTERD" \
@@ -884,11 +972,13 @@ cp "$REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG"
 cp "$SBINJECT_APT_CONFIG" "$EMBEDDED_SBINJECT_APT_CONFIG"
 cp "$PREFERENCELOADER_PIN" "$EMBEDDED_PREFERENCELOADER_PIN"
+cp "$SILEO_PIN" "$EMBEDDED_SILEO_PIN"
 cp "$APT_LIST_NORMALIZER" "$EMBEDDED_APT_LIST_NORMALIZER"
 chmod 0644 "$EMBEDDED_DEFAULT_SOURCES" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_SBINJECT_APT_CONFIG" \
     "$EMBEDDED_PREFERENCELOADER_PIN" \
+    "$EMBEDDED_SILEO_PIN" \
     "$EMBEDDED_APT_LIST_NORMALIZER"
 if [[ "$FORCE_CLEAN_INSTALL" == 1 ]]; then
     print -r -- "$VERSION" >"$EMBEDDED_CLEAN_INSTALL_TOKEN"

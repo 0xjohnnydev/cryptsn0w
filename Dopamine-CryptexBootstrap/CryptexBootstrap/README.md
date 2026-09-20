@@ -6,200 +6,163 @@ for educational reference.
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-## Working layout
+## Architecture
 
-The device has two deliberately separate pieces:
+The installed environment has three parts:
 
-1. `/var/jb` is a managed symlink to a randomized Procursus tree below the
-   active preboot UUID. `prep_bootstrap.sh` and opa334's bundled Sileo package
-   are installed there once. A later Cryptex version enters repair mode only
-   when the symlink target and rollback manifest exactly match this installer.
-2. Sileo is a normal Apple Development-provisioned app whose complete runtime
-   executable set is also admitted by the fixed Cryptex trust cache. The build
-   requires byte-identical copies of the main executable, root helper,
-   constructor shim, and three bundled libraries in the app, IPA, and trusted
-   Cryptex payload, then proves every resulting CDHash is present in the cache.
-   The attached iPhone 13 target uses `com.lilycohl.sileo27b8`, matching its
-   installed profile; other targets retain their configured bundle identifier.
-   Its three non-system pre-main dependencies (`liblzma`, `libzstd`, and
-   `libiosexec`) are signed by the same team and bundled under `Sileo.app/F`.
-   The app's `/opt/procursus/lib` rpath is changed to `@loader_path/F`.
+1. `/var/jb` is a managed symlink to a randomized Procursus tree under the
+   active preboot UUID. Repair mode accepts it only when the symlink, manifest,
+   ownership, and active preboot parent match this installer.
+2. `Applications/Sileo.app` in the read-only Cryptex is the authoritative signed
+   source. The boot daemon maintains a byte-identical, root-owned copy at
+   `/var/containers/Bundle/Application/D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app`,
+   which LaunchServices registers as the non-removable system app
+   `org.coolstar.SileoStore`. The standard path is needed for IconServices;
+   trust still comes from the identical Cryptex CodeDirectories. There is no
+   provisioning profile, team-specific identifier, IPA, periodic re-sign, or
+   profile expiration.
+3. SpringBoard and Settings use only the SBInject pre-main JIT path. No package
+   operation adds code to a runtime trust cache.
 
-The bundled `libzstd.1.dylib` is a small re-export shim. Its constructor asks
-the root Cryptex job for process-bound sandbox extensions before Sileo's own
-initializers execute, then re-exports the unmodified Procursus zstd library.
-The broker accepts a request only when `proc_pidpath` identifies the live PID
-as the exact Sileo executable currently registered by LaunchServices. It
-grants access only to the managed Procursus root and the required mobile data
-paths. Root process requests are separately validated and limited to the
-known Procursus commands used by Sileo.
+The Cryptex system app contains seven fixed-trust Mach-Os: Sileo, `giveMeRoot`,
+`libiosexec`, `liblzma`, the zstd shim and real zstd library, and the unique
+`libcodex-sileo-broker.dylib`. Sileo has an explicit
+`LC_LOAD_DYLIB @loader_path/F/libcodex-sileo-broker.dylib`; this prevents dyld
+from substituting an existing shared-cache zstd image for the constructor.
 
+The constructor consumes process-bound extensions before Sileo initializes,
+then interposes the narrow spawn/wait surface used by package operations and
+respring. The root broker authenticates the calling PID, uid, executable path,
+and current LaunchServices registration before running a bounded command below
+the managed jailbreak root.
+
+## Build and install
+
+Run the top-level wrapper from the repository root:
+
+```sh
 [REDACTED: Related request, payload, or installation details omitted.]
-
-This constructor path is necessary because iOS rejects an `execve` transition
-from a provisioned launcher into a second Sileo image, even when the target is
-Apple Development-signed, trust-cached, and inside the same app bundle.
-
-## One-command setup
-
-Run this from the root of the private workspace, not from a manually copied
-overlay:
-
-```sh
-./Dopamine-CryptexBootstrap/setup.sh --install
 ```
 
-The setup script checks the SRD `cryptexctl.research` installation and full
-iPhoneOS SDK, installs missing build utilities through an existing Homebrew,
-creates the pinned Python virtual environment, fetches the pinned
-opa334/Dopamine tree, and discovers an unexpired Apple Development profile
-whose certificate and application identifier match Sileo. It then performs
-the required order automatically:
+Requirements are macOS, a full Xcode/iPhoneOS 27 SDK, the Security Research
+Device host tools, and the command-line dependencies checked by `setup.sh`.
+Installation additionally needs the paired phone unlocked and in Developer
+Mode. An Apple Development certificate or mobile provisioning profile is not a
+requirement.
 
-[REDACTED: Related request, payload, or installation details omitted.]
-
-The default device guard permits paired physical iPhone18,2 and iPhone14,5 /
-iOS 27.0 (24A435), plus iPhone13,1 / iOS 27.0 (24A437), targets. Pass `--device
-UDID` when more than one eligible device is attached. The explicit
-`--allow-unverified-device` escape hatch is available for reviewed porting work.
-
-The host-only forms are:
-
-```sh
-./Dopamine-CryptexBootstrap/setup.sh          # prepare and signing preflight
-./Dopamine-CryptexBootstrap/setup.sh --build  # host-only build
-```
-
-The install path uses pymobiledevice3's in-process userspace RemoteXPC
-transport.
-
-## Signing
-
-Signing is automatic when Xcode has installed a valid development certificate
-and profile compatible with the target's configured Sileo bundle identifier.
-The selector verifies
-the profile is unexpired, includes `get-task-allow`, contains the installed
-certificate, and covers the bundle identifier. It derives the minimal app
-entitlements from that profile rather than checking in machine-specific team
-values.
-
-On a host with multiple identities, these optional overrides narrow selection:
-
-```sh
-export CODEX_SILEO_DEVELOPMENT_IDENTITY=<certificate-SHA1-or-unique-name>
-export CODEX_SILEO_PROVISIONING_PROFILE=/absolute/path/profile.mobileprovision
-export CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS=/absolute/path/entitlements.plist
-```
-
-The custom entitlement file is still checked against the selected profile's
-application identifier, team, and `get-task-allow` fields.
-
-## Advanced manual build
-
-After `setup.sh` has prepared `Dopamine-upstream`, the lower-level driver is:
+The lower-level host-only driver, after setup has populated
+`Dopamine-upstream`, is:
 
 ```sh
 .venv/bin/python Dopamine-upstream/CryptexBootstrap/deploy.py build
 ```
 
-It invokes `build_cryptex.sh` before `build_sileo_launcher.sh`, generates a
-fresh numeric Cryptex version, and gives the IPA and its JSON summary matching
-versioned names. The driver enforces that build order.
+The lower-level install form is:
 
-`build_sileo_launcher.sh` emits the direct Sileo main executable with the
-constructor broker. Set `CODEX_SILEO_LAUNCHER_IPA` and
-`CODEX_SILEO_LAUNCHER_SUMMARY` to fresh paths for additional builds.
+```sh
+.venv/bin/python Dopamine-upstream/CryptexBootstrap/deploy.py install \
+  --device 00008110-000C542E0EA8201E
+```
 
-[REDACTED: Related request, payload, or installation details omitted.]
+Every normal run creates a fresh numeric Cryptex version. `--no-replace`
+refuses an older managed copy. `--allow-unverified-device` bypasses the exact
+target guard and is intended only for reviewed porting work.
 
-The build derives the SBInject SpringBoard replacement from the pinned 24A435
-iPhone 13 arm64e executable. `Scripts/build_springboard_candidate.py`
-checks its SHA-256, UUID, and `com.apple.springboard` identifier; preserves its
-original entitlement dictionary; adds the explicitly configured debugger/JIT
-policy; regenerates XML and DER entitlement slots; and proves the ad-hoc output
-is deterministic. Its otherwise-unused `LC_RPATH` is converted to
-`LC_LOAD_DYLIB @loader_path/g`, allowing the fixed pre-main general hook to run
-before SpringBoard initializes. The installer places the preserved bundle at
-`/var/jb/System/Library/CoreServices/SpringBoard.app` with executable
-`notSpringBoard`. Alternate source paths can be supplied with the
-`CODEX_SPRINGBOARD_CANDIDATE_*` variables, but the executable must still match
-the pinned exact-build identity.
+The install driver records any pre-existing bootstrap PID before replacement.
+If that exact process survives the Cryptex swap, it sends only that stale PID a
+SIGTERM so launchd starts the new mounted executable. It then waits for the
+original Sileo ID and build-unique bundle version to become a non-removable
+system registration, launches the exact fixed container path, checks that the
+process stays alive, verifies the real 60pt @3x icon, and only
+then removes the legacy `com.lilycohl.sileo27b8` app.
 
-The root installer refreshes the complete signed APT source set and performs a
-non-mutating `apt-get check` before launching Sileo. Treat
-`aptUpdateExit=0`, `aptDependencyCheckExit=0`,
-`sileoSystemRootBrokerReady=true`,
-`root broker preflight complete`, and `result=success` as the acceptance
-gates for the complete package-index and broker path.
+## Package model
 
-The stock Procursus archive includes the chain
-`shshd -> libdimentio0 -> libkrw0 -> libkrw0-plugin`. This compatibility lane
-detects that dormant package chain and removes it only after checking that no
-package outside the exact removal set depends on it.
+The embedded `org.coolstar.sileo` Debian package contains dependency and
+maintainer metadata but no mutable app bundle. Its local version is
+`2.5.1+codex1`. APT gives that exact installed version priority 1001 and rejects
+all repository versions of the same package, so a normal update cannot create a
+conflicting `/var/jb/Applications/Sileo.app`. Update Sileo by installing a new
+Cryptex build.
 
-The bootstrap pins PreferenceLoader 2.3.3 from the maintained
-`Yves000/preferenceloader` release for libprefs, filtering, and legacy pane
-construction. Build 24A435 replaced its older `PrimarySettingsListModel` with
-`SettingsSidebarListState`, so the Cryptex also carries a fixed arm64e bridge
-for that exact iOS 27 model. SBInject loads PreferenceLoader and then the bridge
-synchronously before the resigned Settings executable enters `main`. The
-bridge inserts all valid registrations into the Swift section array and both
-identifier lookup dictionaries, and resolves selections back through libprefs.
-The canonical rootless MobileSubstrate path is preferred; the TweakInject path
-is retained only as a compatibility fallback.
+Sileo's fixed root broker prevalidates archives with
+`sbinject-package-validator` before invoking APT's no-download transaction. The
+validator recognizes standard rootless tweak layouts and permits SpringBoard
+tweaks only through the SBInject route. A successful install, remove, reinstall,
+or update leaves the respring decision to Sileo's own bottom sheet; the post
+hook prepares the next replacement state but does not respring by itself.
 
-The bridge is built directly with Xcode from the local Objective-C/Swift files
-under `SBInject/`; its five small metadata helpers are pinned in
-`SBInject/PreferenceBridgeSupport` with their upstream commit and LGPL license.
-No Theos checkout or network source fetch is part of the build.
+ElleKit 1.2 is the sole package-level fixed-trust exception. The build pins its
+archive, preserves required entitlements while ad-hoc signing its Mach-Os,
+installs the same bytes under `/var/jb`, and admits their CDHashes in the static
+Cryptex trust cache. Third-party tweak packages are not embedded, re-signed, or
+added to a dynamic trust cache.
 
-For a live Settings acceptance check, the pre-main stage log at
-`/var/mobile/.sbinject-generalhook.log` must contain, in order,
+Sileo itself runs as `mobile`. The broker remains root and accepts only its
+declared command shapes. The original bottom-sheet respring command is mapped
+to the same SBInject prepare/redirect path used by package state changes.
+
+## SpringBoard and Settings
+
+The fixed launchd hook redirects only stock SpringBoard to
+`/var/jb/System/Library/CoreServices/SpringBoard.app/notSpringBoard`. The
+general hook asks `sbinject-jitterd` to grant the exact process debugged/JIT
+state, verifies pinned dyld signatures, performs the bounded RW-to-RX
+transition, installs the supplied mmap/fcntl bypass, and loads ElleKit before
+`main`. PID 1 is never a general injection target.
+
+Settings follows the same pre-main route with its own replacement bundle. The
+candidate preserves the original entitlements and adds the required debugger,
+JIT, and task-port keys; arm64e PAC bits are stripped before attribution and
+address comparisons.
+
+PreferenceLoader 2.3.3 supplies libprefs and the legacy controllers. The local
+arm64e bridge publishes valid registrations into iOS 27's
+`SettingsSidebarListState` arrays and identifier maps, then routes selections
+back to those controllers. Pane respring calls are limited to recognized
+`sbreload` and `killall SpringBoard` shapes and forwarded to the authenticated
+broker.
+
+For a Settings acceptance check,
+`/var/mobile/.sbinject-generalhook.log` should report, in order,
 `jitterd-ready`, `dyld-bypass-ready`, `ellekit-ready`,
-`preferenceloader-ready`, and `preferences-bridge-ready`. The bounded bridge
-log at `/var/mobile/.sbinject-preferences-bridge.log` then reports the number of
-published rows. A bridge failure remains isolated behind the existing
-Preferences crash-loop fallback and does not disable SpringBoard injection.
+`preferenceloader-ready`, and `preferences-bridge-ready`. The bridge count is
+written to `/var/mobile/.sbinject-preferences-bridge.log`.
 
-## Runtime model
+## Reboot and safe mode
 
-The SpringBoard path is entirely SBInject. A fixed launchd hook redirects only
-the stock SpringBoard spawn to `notSpringBoard`. Its pre-main hook synchronously
-asks the root `sbinject-jitterd` Mach service to attach/detach the exact calling
-PID, which grants the debugged/JIT state. The hook then verifies the pinned dyld
-signatures, changes only the target pages from `RW|COPY` back to `RX`, installs
-the supplied mmap/fcntl validation bypass, and loads ElleKit before SpringBoard
-main. No writable-and-executable mapping is requested.
+On each reboot the Cryptex daemon starts locally, verifies or atomically refreshes
+the fixed Sileo copy, injects the fixed registration predicate hook into the
+exact `/usr/libexec/lsd` process, registers the stable application path, starts
+the brokers, and re-arms SpringBoard and Settings.
+The `lsd` readiness marker contains the current PID and must be fresh for the
+current boot; a restarted daemon cannot reuse stale readiness state.
 
-Sileo's fixed root broker prefetches the resolved archives, invokes the same
-`sbinject-package-validator` logic directly, and only then launches APT with
-Sileo's original no-download transaction. This broker-native step is required
-because rootless APT hardcodes the nonexistent `/bin/sh` when launching a
-`DPkg::Pre-Install-Pkgs` command and otherwise exits with its own code 100
-before the validator starts. The broker extracts each incoming archive into a
-bounded temporary directory, classifies standard rootless tweak dylibs,
-recognizes ElleKit's injector in the same dependency transaction, and creates
-a root-owned respring marker. After a successful `apt`, `apt-get`, or `dpkg`
-transaction, the broker activates the SBInject replacement if SpringBoard is
-still stock, or restarts the active replacement once, so ElleKit discovers the
-new tweak. ElleKit 1.2 is the sole fixed-trust package exception: the build
-pins its upstream archive, ad-hoc signs every arm64/arm64e Mach-O while
-preserving the loader entitlements, embeds the repacked `.deb`, and places the
-same cdhashes in the Cryptex trust cache. The bootstrap installs that exact
-package before activating SBInject, so Sileo sees the dependency as satisfied
-and the pre-main hook always has `libinjector.dylib` available. No third-party
-tweak package is embedded or re-signed. Mixed tweak packages may also carry
-preference bundles or helper Mach-Os, but those extra executables receive no
-implied fixed-trust admission.
+When the installed manifest and fixed bytes match, startup takes a network-free
+fast path and does not reinstall packages or refresh repositories. Package and
+redirect behavior does not require a Mac after the initial Cryptex install.
+
+Safe mode never renames, removes, or disables tweak files. Fatal PC/LR values
+are PAC-stripped and matched against loaded tweak text ranges; Objective-C
+exceptions also inspect tweak frames and hooked method implementations. The
+alert uses SpringBoard's existing foreground presenter and identifies the tweak
+when attribution is available.
+
+## Outputs and acceptance checks
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-For an explicitly destructive replacement of this installer's managed root,
-set `CODEX_FORCE_CLEAN_INSTALL=1` for the build/install run. The installer
-validates the `/var/jb` symlink, rollback manifest, active preboot parent, and
-root ownership before atomically staging and deleting only its own old root.
-It then creates a fresh randomized root containing the new SBInject bootstrap.
+Useful successful bootstrap log gates are:
 
-Sileo's Featured cards can reference optional repositories in addition to the
-standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's
-repository when a featured package comes from another source.
+- `sileoSystemRegistration ... registered=true ... type=System`;
+- `fastBootPayloadExact=true` on an unchanged install;
+- `sileoSystemRootBrokerReady=true`;
+- `fastBootControlPlane ... rootBroker=true`;
+- `result=success mode=fast-boot`; and
+- the Sileo constructor messages `constructor consumed 6 sandbox extensions`
+  and `constructor broker initialization complete`.
+
+For an explicitly destructive replacement of only this installer's managed
+root, set `CODEX_FORCE_CLEAN_INSTALL=1`. The installer verifies the `/var/jb`
+symlink, manifest, root ownership, and active preboot parent before deleting its
+own old tree.

@@ -8,12 +8,13 @@ import datetime as dt
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shlex
 import subprocess
 import sys
+import time
 import uuid
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,6 @@ WORKSPACE = UPSTREAM_ROOT.parent
 HELPER_DIR = WORKSPACE / "tools" / "cryptexd-static"
 
 BUILD_SCRIPT = SCRIPT_DIR / "build_cryptex.sh"
-APP_SCRIPT = SCRIPT_DIR / "build_sileo_launcher.sh"
 CAPTURE_SCRIPT = SCRIPT_DIR / "capture_device_context.py"
 INSTALL_SCRIPT = SCRIPT_DIR / "install_cryptex_bootstrap.py"
 PERSONALIZE_SCRIPT = HELPER_DIR / "personalize_generic_cryptex1.py"
@@ -36,21 +36,18 @@ SUPPORTED_TARGETS = (
         "product": "iPhone14,5",
         "version": "27.0",
         "build": "24A435",
-        "sileoBundleIdentifier": "com.lilycohl.sileo27b8",
     },
     {
         "udid": "00008150-0018252C1130C01C",
         "product": "iPhone18,2",
         "version": "27.0",
         "build": "24A435",
-        "sileoBundleIdentifier": "org.coolstar.SileoStore",
     },
     {
         "udid": "00008101-001C39641A9B001E",
         "product": "iPhone13,1",
         "version": "27.0",
         "build": "24A437",
-        "sileoBundleIdentifier": "com.johnnyfranks.codex.profilebootstrap12mini",
     },
 )
 SILEO_TRUSTED_EXECUTABLES = (
@@ -58,8 +55,18 @@ SILEO_TRUSTED_EXECUTABLES = (
     "giveMeRoot",
     "F/libiosexec.1.dylib",
     "F/liblzma.5.dylib",
+    "F/libcodex-sileo-broker.dylib",
     "F/libzstd.1.dylib",
     "F/libzstd.real.dylib",
+)
+SYSTEM_SILEO_IDENTIFIER = "org.coolstar.SileoStore"
+SYSTEM_SILEO_URL = (
+    "file:///private/var/containers/Bundle/Application/"
+    "D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app/"
+)
+LEGACY_SILEO_IDENTIFIERS = ("com.lilycohl.sileo27b8",)
+GENERIC_IOS_APP_ICON_SHA256 = (
+    "666ac286068bbddb0c83b828ec86f8fd0978cec4f7a4b0cfcc8800182197eb09"
 )
 
 
@@ -69,10 +76,6 @@ class DeployError(RuntimeError):
 
 def note(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
 
 
 def sha256_file(path: Path) -> str:
@@ -97,10 +100,296 @@ def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, check=True, env=env)
 
 
+def capture_json(command: list[str], *, timeout: float) -> dict[str, Any]:
+    note(f"+ {shlex.join(command)}")
+    completed = subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise DeployError(
+            f"command exited {completed.returncode}: {shlex.join(command)}"
+            + (f"\n{detail}" if detail else "")
+        )
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise DeployError(
+            f"command returned invalid JSON: {shlex.join(command)}"
+        ) from error
+    if not isinstance(value, dict):
+        raise DeployError(f"command did not return a JSON object: {shlex.join(command)}")
+    return value
+
+
+def process_snapshot(device: dict[str, str]) -> dict[int, str]:
+    payload = capture_json(
+        [
+            sys.executable,
+            "-m",
+            "pymobiledevice3",
+            "processes",
+            "ps",
+            "--udid",
+            device["udid"],
+        ],
+        timeout=20,
+    )
+    result: dict[int, str] = {}
+    for raw_pid, information in payload.items():
+        if not isinstance(information, dict):
+            continue
+        name = information.get("ProcessName")
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if pid > 1 and isinstance(name, str):
+            result[pid] = name
+    return result
+
+
+def application_record(device: dict[str, str], identifier: str) -> dict[str, Any] | None:
+    payload = capture_json(
+        [
+            "xcrun",
+            "devicectl",
+            "device",
+            "info",
+            "apps",
+            "--device",
+            device["udid"],
+            "--include-all-apps",
+            "--bundle-id",
+            identifier,
+            "--timeout",
+            "20",
+            "--json-output",
+            "-",
+            "--omit-deprecated-fields-in-json",
+        ],
+        timeout=25,
+    )
+    apps = payload.get("result", {}).get("apps", [])
+    matches = [
+        app
+        for app in apps
+        if isinstance(app, dict) and app.get("bundleIdentifier") == identifier
+    ]
+    if len(matches) > 1:
+        raise DeployError(f"LaunchServices returned duplicate records for {identifier}")
+    return matches[0] if matches else None
+
+
+def system_sileo_record_is_valid(
+    record: dict[str, Any] | None, expected_version: str
+) -> bool:
+    if record is None:
+        return False
+    url = record.get("url")
+    return (
+        record.get("bundleIdentifier") == SYSTEM_SILEO_IDENTIFIER
+        and record.get("bundleVersion") == expected_version
+        and record.get("builtByDeveloper") is False
+        and record.get("removable") is False
+        and isinstance(url, str)
+        and url == SYSTEM_SILEO_URL
+    )
+
+
+def signal_stale_bootstrap(
+    device: dict[str, str], preinstall_pids: set[int]
+) -> list[int]:
+    if not preinstall_pids:
+        return []
+    current = process_snapshot(device)
+    signaled: list[int] = []
+    for pid in sorted(preinstall_pids):
+        if current.get(pid) != "codex-dopamine-bootstrap":
+            continue
+        command = [
+            "xcrun",
+            "devicectl",
+            "device",
+            "process",
+            "signal",
+            "--device",
+            device["udid"],
+            "--pid",
+            str(pid),
+            "--signal",
+            "15",
+            "--timeout",
+            "20",
+            "--json-output",
+            "-",
+            "--omit-deprecated-fields-in-json",
+        ]
+        capture_json(command, timeout=25)
+        signaled.append(pid)
+    return signaled
+
+
+def verify_and_launch_system_sileo(
+    device: dict[str, str],
+    expected_version: str,
+    preinstall_bootstrap_pids: set[int],
+    icon_output: Path,
+) -> dict[str, Any]:
+    initial = application_record(device, SYSTEM_SILEO_IDENTIFIER)
+    signaled: list[int] = []
+    if not system_sileo_record_is_valid(initial, expected_version):
+        signaled = signal_stale_bootstrap(device, preinstall_bootstrap_pids)
+
+    record: dict[str, Any] | None = None
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        candidate = application_record(device, SYSTEM_SILEO_IDENTIFIER)
+        if system_sileo_record_is_valid(candidate, expected_version):
+            record = candidate
+            break
+        time.sleep(1.0)
+    if record is None:
+        raise DeployError(
+            "the new Cryptex did not register original-ID Sileo as a system app"
+        )
+
+    expected_executable_url = record["url"].rstrip("/") + "/Sileo"
+    launched_pid: int | None = None
+    launch_deadline = time.monotonic() + 120.0
+    while time.monotonic() < launch_deadline:
+        launch = capture_json(
+            [
+                "xcrun",
+                "devicectl",
+                "device",
+                "process",
+                "launch",
+                "--device",
+                device["udid"],
+                "--timeout",
+                "20",
+                "--terminate-existing",
+                "--json-output",
+                "-",
+                "--omit-deprecated-fields-in-json",
+                SYSTEM_SILEO_IDENTIFIER,
+            ],
+            timeout=25,
+        )
+        process = launch.get("result", {}).get("process", {})
+        candidate_pid = process.get("processIdentifier")
+        launched_url = process.get("executable")
+        time.sleep(2.0)
+        if (
+            isinstance(candidate_pid, int)
+            and candidate_pid > 1
+            and launched_url == expected_executable_url
+            and process_snapshot(device).get(candidate_pid) == "Sileo"
+        ):
+            launched_pid = candidate_pid
+            break
+        time.sleep(2.0)
+    if launched_pid is None:
+        raise DeployError(
+            "system Sileo did not survive launch from its registered fixed path"
+        )
+
+    icon_payload = capture_json(
+        [
+            "xcrun",
+            "devicectl",
+            "device",
+            "info",
+            "appIcon",
+            "--device",
+            device["udid"],
+            "--app-bundle-id",
+            SYSTEM_SILEO_IDENTIFIER,
+            "--allow-placeholder",
+            "false",
+            "--width",
+            "60",
+            "--height",
+            "60",
+            "--scale",
+            "3",
+            "--destination",
+            str(icon_output),
+            "--timeout",
+            "20",
+            "--json-output",
+            "-",
+            "--omit-deprecated-fields-in-json",
+        ],
+        timeout=25,
+    )
+    icon = icon_payload.get("result", {}).get("icon", {})
+    pixel_size = icon.get("pixelSize", {})
+    icon_sha256 = sha256_file(icon_output) if icon_output.is_file() else None
+    if (
+        icon.get("placeholder") is not False
+        or pixel_size.get("width") != 180
+        or pixel_size.get("height") != 180
+        or not icon_output.is_file()
+        or icon_output.stat().st_size < 512
+        or icon_sha256 == GENERIC_IOS_APP_ICON_SHA256
+    ):
+        raise DeployError(
+            "IconServices returned a placeholder or generic grid instead of "
+            "Sileo's 60pt @3x icon"
+        )
+
+    removed_legacy: list[str] = []
+    for identifier in LEGACY_SILEO_IDENTIFIERS:
+        if application_record(device, identifier) is None:
+            continue
+        capture_json(
+            [
+                "xcrun",
+                "devicectl",
+                "device",
+                "uninstall",
+                "app",
+                "--device",
+                device["udid"],
+                "--timeout",
+                "30",
+                "--json-output",
+                "-",
+                "--omit-deprecated-fields-in-json",
+                identifier,
+            ],
+            timeout=35,
+        )
+        removed_legacy.append(identifier)
+
+    return {
+        "bundleIdentifier": SYSTEM_SILEO_IDENTIFIER,
+        "url": record["url"],
+        "builtByDeveloper": record["builtByDeveloper"],
+        "removable": record["removable"],
+        "launchedPid": launched_pid,
+        "icon": {
+            "path": str(icon_output.resolve()),
+            "sha256": icon_sha256,
+            "pixelWidth": pixel_size["width"],
+            "pixelHeight": pixel_size["height"],
+            "placeholder": icon["placeholder"],
+        },
+        "staleBootstrapPidsSignaled": signaled,
+        "legacyAppsRemoved": removed_legacy,
+    }
+
+
 def require_layout() -> None:
     required = (
         BUILD_SCRIPT,
-        APP_SCRIPT,
         CAPTURE_SCRIPT,
         INSTALL_SCRIPT,
         PERSONALIZE_SCRIPT,
@@ -254,13 +543,6 @@ def is_verified_device(device: dict[str, str]) -> bool:
 
 def configure_target_build_environment(device: dict[str, str]) -> None:
     os.environ.setdefault("CODEX_TARGET_UDID", device["udid"])
-    for target in SUPPORTED_TARGETS:
-        if device["udid"].casefold() == target["udid"].casefold():
-            os.environ.setdefault(
-                "CODEX_SILEO_BUNDLE_IDENTIFIER",
-                target["sileoBundleIdentifier"],
-            )
-            return
 
 
 def supported_target_description() -> str:
@@ -330,17 +612,6 @@ def new_version() -> str:
     return f"1.0.{stamp}"
 
 
-def app_member_from_ipa(ipa: Path, relative_path: str) -> bytes:
-    member = f"Payload/Sileo.app/{relative_path}"
-    with zipfile.ZipFile(ipa) as archive:
-        matches = [info for info in archive.infolist() if info.filename == member]
-        if len(matches) != 1:
-            raise DeployError(
-                f"expected one {member} in {ipa}, found {len(matches)}"
-            )
-        return archive.read(matches[0])
-
-
 def build_pair(version: str | None) -> dict[str, Any]:
     require_layout()
     version = version or os.environ.get("CODEX_CRYPTEX_VERSION") or new_version()
@@ -348,82 +619,76 @@ def build_pair(version: str | None) -> dict[str, Any]:
         raise DeployError(
             "Cryptex version must contain only numeric dot-separated components"
         )
-    safe_version = re.sub(r"[^A-Za-z0-9._-]", "_", version)
-    ipa = SCRIPT_DIR / "out" / f"Sileo.brokered-{safe_version}.ipa"
-    app_summary_path = SCRIPT_DIR / "out" / f"sileo-brokered-{safe_version}.json"
-
     env = os.environ.copy()
     env["CODEX_CRYPTEX_VERSION"] = version
-    env["CODEX_SILEO_LAUNCHER_IPA"] = str(ipa)
-    env["CODEX_SILEO_LAUNCHER_SUMMARY"] = str(app_summary_path)
 
-    note(f"Building matched Cryptex/Sileo pair version {version}")
+    note(f"Building fixed-trust Cryptex system Sileo version {version}")
     run([str(BUILD_SCRIPT)], env=env)
-    run([str(APP_SCRIPT)], env=env)
 
     build_summary = read_json(BUILD_SUMMARY)
-    app_summary = read_json(app_summary_path)
     if build_summary.get("version") != version:
         raise DeployError("Cryptex build summary version does not match this run")
-    if Path(str(app_summary.get("ipa", ""))).resolve() != ipa.resolve():
-        raise DeployError("Sileo build summary points at an unexpected IPA")
-    if app_summary.get("cryptexVersion") != version:
-        raise DeployError("Sileo build summary is not paired to this Cryptex version")
-    if app_summary.get("cryptexBuildSummarySha256") != sha256_file(BUILD_SUMMARY):
-        raise DeployError("Sileo build summary is not paired to this build summary")
+    system_app = SCRIPT_DIR / "work" / "image-root" / "Applications" / "Sileo.app"
+    info_path = system_app / "Info.plist"
+    if not info_path.is_file():
+        raise DeployError("Cryptex system Sileo Info.plist is missing")
+    info = plistlib.loads(info_path.read_bytes())
+    if info.get("CFBundleIdentifier") != "org.coolstar.SileoStore":
+        raise DeployError("Cryptex system Sileo does not use its original bundle ID")
+    if info.get("CFBundleVersion") != version:
+        raise DeployError("Cryptex system Sileo bundle version is not build-unique")
+    primary_icon_files = (
+        info.get("CFBundleIcons", {})
+        .get("CFBundlePrimaryIcon", {})
+        .get("CFBundleIconFiles")
+    )
+    if (
+        primary_icon_files != ["AppIcon60x60"]
+        or info.get("CFBundleIconFiles") != ["AppIcon60x60"]
+        or not (system_app / "Assets.car").is_file()
+        or not (system_app / "AppIcon60x60@2x.png").is_file()
+        or not (system_app / "AppIcon60x60@3x.png").is_file()
+        or not (system_app / "CodexSystemEntitlements.plist").is_file()
+    ):
+        raise DeployError("Cryptex system Sileo icon metadata is incomplete")
+    if (system_app / "embedded.mobileprovision").exists():
+        raise DeployError("Cryptex system Sileo unexpectedly has a provisioning profile")
 
-    source_app = (
-        SCRIPT_DIR
-        / "work"
-        / "sileo-package"
-        / "var"
-        / "jb"
-        / "Applications"
-        / "Sileo.app"
-    )
-    trusted_app = (
-        SCRIPT_DIR
-        / "work"
-        / "image-root"
-        / "usr"
-        / "local"
-        / "share"
-        / "codex-bootstrap"
-        / "trusted"
-        / "Sileo.app"
-    )
-    executable_copies: dict[str, dict[str, str]] = {}
+    fixed_trust = build_summary.get("inputs", {}).get("sileoFixedTrust", {})
+    if (
+        fixed_trust.get("installMode") != "cryptex-system-app"
+        or fixed_trust.get("bundleIdentifier") != "org.coolstar.SileoStore"
+        or fixed_trust.get("provisioningProfile") is not False
+    ):
+        raise DeployError("build summary does not describe fixed-trust system Sileo")
+    executable_hashes: dict[str, str] = {}
     for relative_path in SILEO_TRUSTED_EXECUTABLES:
-        hashes = {
-            "workingCopy": sha256_file(source_app / relative_path),
-            "cryptexCopy": sha256_file(trusted_app / relative_path),
-            "ipaCopy": sha256_bytes(app_member_from_ipa(ipa, relative_path)),
-        }
-        if len(set(hashes.values())) != 1:
-            raise DeployError(
-                "the Cryptex and provisioned app differ for Sileo executable "
-                + relative_path
-            )
-        executable_copies[relative_path] = hashes
-
-    expected = app_summary.get("rootHelperSha256")
-    helper_hashes = executable_copies["giveMeRoot"]
-    if not isinstance(expected, str) or set(helper_hashes.values()) != {expected}:
-        raise DeployError("Sileo's root helper does not match its build summary")
+        path = system_app / relative_path
+        if not path.is_file():
+            raise DeployError(f"missing Cryptex Sileo executable {relative_path}")
+        executable_hashes[relative_path] = sha256_file(path)
+    summarized = {
+        Path(item["path"]).relative_to(system_app).as_posix(): item["sha256"]
+        for item in fixed_trust.get("machOs", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("sha256"), str)
+        and Path(item["path"]).is_relative_to(system_app)
+    }
+    if summarized != executable_hashes:
+        raise DeployError("Cryptex Sileo executable hashes do not match the summary")
 
     result = {
         "identifier": build_summary["identifier"],
         "version": version,
         "unsignedBundle": build_summary["bundle"],
         "buildSummary": str(BUILD_SUMMARY.resolve()),
-        "ipa": str(ipa.resolve()),
-        "ipaSha256": sha256_file(ipa),
-        "appSummary": str(app_summary_path.resolve()),
-        "rootHelperSha256": expected,
-        "rootHelperCopies": helper_hashes,
-        "sileoFixedTrustCopies": executable_copies,
+        "sileoSystemApp": str(system_app.resolve()),
+        "sileoBundleIdentifier": "org.coolstar.SileoStore",
+        "sileoProvisioningProfile": False,
+        "sileoFixedTrustExecutables": executable_hashes,
     }
-    note("Matched build verification passed")
+    note("Fixed-trust system Sileo build verification passed")
     print(json.dumps(result, indent=2, sort_keys=True))
     return result
 
@@ -478,7 +743,6 @@ if __name__ == "__main__":
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         ValueError,
-        zipfile.BadZipFile,
     ) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1)

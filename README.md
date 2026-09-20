@@ -8,13 +8,13 @@ for educational reference.
 Procursus and Sileo environment, gives that environment a small root broker,
 and uses it to study which kinds of native code iOS will admit after boot.
 
-> **Project state — 2026-09-18:** the core bootstrap is working on two exact
-> test configurations. Sileo, root package operations, persistent Cryptex
-> remounting, trusted-library injection, and code execution inside a specially
-> authorized worker have all passed on a real device. This is still a research
-> prototype, not a finished jailbreak or a general-purpose installer. New
-> native payloads still need Apple-backed trust, and the current `customd`
-> SpringBoard handoff is experimental.
+> **Project state — 2026-09-20:** the iPhone 13 / 24A435 path boots the SBInject
+> SpringBoard and Settings replacements, loads ElleKit tweaks and PreferenceLoader
+> panes, and runs original-ID Sileo as a system app whose exact trust source is
+> the Cryptex. Sileo,
+> package operations, respring, and reboot recovery no longer depend on an Apple
+> Development profile or host-side re-signing. This remains an SRD research
+> project tied to exact builds, not a general retail-device installer.
 
 ## Start here
 
@@ -41,17 +41,11 @@ the complete current path has not passed its device acceptance test.
 
 ### The shortest honest summary
 
-The repository is a useful and repeatable research platform today. It is able
-to install and maintain a rootless-style userland, run a package manager, load
-properly trusted libraries into SpringBoard, and run dynamic code inside one
-fixed worker that iOS has explicitly authorized for debugging.
-
-The remaining goal is broader: admit a newly installed native tweak entirely
-on-device when Apple TSS is unavailable, then give it the process semantics it
-expects. That boundary has **not** been crossed. The current source tree is
-working toward it with `customd`, a fixed SpringBoard candidate, and guarded
-re-exec helpers. Treat that work as a development checkpoint rather than a new
-accepted release baseline.
+The current iPhone 13 lane is a repeatable rootless-style environment: the
+Cryptex carries the fixed control plane and Sileo, while third-party
+SpringBoard tweaks remain ordinary `/var/jb` packages loaded by ElleKit inside
+the SBInject replacement. This result is specific to the checked-in device and
+OS identities and does not imply arbitrary system-wide code admission.
 
 ## The idea in plain English
 
@@ -111,7 +105,7 @@ make another device or build supported.
 - Do not interpret root, platform status, a task port, or a successful
   `vm_protect` return as proof that code executed. The acceptance records check
   the resulting process, image list, memory protection, and observable output.
-- Generated tickets, provisioning profiles, keys, device logs, and build
+- Generated tickets, keys, device logs, and build
   products stay in ignored local directories. Review them before moving any
   artifact elsewhere.
 
@@ -149,29 +143,17 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 formulae through Homebrew. Xcode, Homebrew, and the SRD tools must already be
 available.
 
-### Apple Development signing
+### Sileo signing
 
-Xcode needs:
+No Apple Development identity or provisioning profile is used. The build
+preserves Sileo's upstream system-app entitlements, gives every bundled Mach-O
+an ad-hoc CodeDirectory, omits `embedded.mobileprovision`, and places the exact
+CDHashes in the static Cryptex trust cache. LaunchServices registers the mounted
+bundle as the non-removable system app `org.coolstar.SileoStore`.
 
-- a valid Apple Development certificate in the login keychain;
-- an unexpired iOS development provisioning profile whose application-ID
-  pattern covers the selected Sileo app ID (`com.lilycohl.sileo27b8` for the
-  attached iPhone 13, or `org.coolstar.SileoStore` by default); and
-- the target iPhone registered in that profile.
-
-The least surprising setup is to sign in under **Xcode → Settings →
-Accounts**, create an Apple Development certificate if needed, and build one
-simple automatically signed iOS app to the connected phone. A compatible
-wildcard team profile is sufficient.
-
-Check that macOS can see the signing identity:
-
-```sh
-security find-identity -v -p codesigning
-```
-
-Setup selects and validates the identity and profile, then writes only
-machine-local signing configuration into ignored work directories.
+Sileo's installed Debian metadata version is `2.5.1+codex1`. APT rejects repo
+replacements of that package; update Sileo by building a new Cryptex instead of
+installing a mutable app under `/var/jb`.
 
 ### iPhone
 
@@ -213,8 +195,8 @@ cd untitled
 ```
 
 This creates the pinned Python environment, fetches the pinned upstream
-Dopamine revision into the ignored `Dopamine-upstream/` tree, applies the
-tracked overlay, and validates local signing.
+Dopamine revision into the ignored `Dopamine-upstream/` tree, and applies the
+tracked overlay.
 
 To report missing Homebrew dependencies without installing them:
 
@@ -275,6 +257,10 @@ following in the newest run summary and device markers:
 - ticket and payload validation are true;
 - the expected Cryptex identifier and generated version match;
 - the bootstrap completion marker reports `result=success` and UID 0;
+- LaunchServices reports `org.coolstar.SileoStore` as non-removable and not
+  developer-built, with the fixed managed application-container URL;
+- Sileo launches from that exact URL and remains alive after its constructor
+  consumes the six process-bound extensions;
 - the root broker is ready;
 - package configuration and `apt-get check` exit 0;
 - Sileo is running as `mobile`, while privileged package work stays in the
@@ -296,23 +282,6 @@ The bootstrap configures Procursus, Chariz, Havoc, BigBoss, and ElleKit in
 Sileo. It installs the managed repository keys and compatibility policy, then
 runs an APT consistency check before declaring success. Existing custom source
 files remain alongside the managed defaults.
-
-## Signing overrides
-
-Automatic signing selection is recommended. If this Mac has several teams or
-profiles, narrow the choice with:
-
-```sh
-export CODEX_SILEO_DEVELOPMENT_IDENTITY=<certificate-SHA1-or-unique-name>
-export CODEX_SILEO_PROVISIONING_PROFILE=/absolute/path/profile.mobileprovision
-export CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS=/absolute/path/entitlements.plist
-
-./Dopamine-CryptexBootstrap/setup.sh --install
-```
-
-The selected identity must be valid, installed, and present in the profile. A
-custom entitlement file is still checked against the profile's application
-identifier, team identifier, and `get-task-allow` value.
 
 ## Separate research workflows
 
@@ -431,12 +400,6 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 xcrun --sdk iphoneos --show-sdk-path
 ```
 
-### No valid signing identity or profile
-
-Open Xcode, sign in to the intended team, create an Apple Development
-certificate, and build one automatically signed app to the target phone. If
-several teams are installed, use the signing overrides above.
-
 ### No connected validated target
 
 Unlock and reconnect the phone, accept the trust prompt, and inspect:
@@ -450,9 +413,11 @@ Use `--device <UDID>` when selection is ambiguous. Reserve
 
 ### Sileo installation fails
 
-Confirm Developer Mode, device registration in the selected profile, and a
-fresh pairing. Building an automatically signed app from Xcode to the same
-phone often refreshes stale registration or profile state.
+Confirm Developer Mode, an unlocked phone, and a fresh pairing. The install
+summary's `systemSileoVerification` must show the original bundle ID, a Cryptex
+URL, `builtByDeveloper: false`, and `removable: false`. There is no profile to
+renew. If a pre-install bootstrap survived replacement, the driver restarts
+only that recorded stale PID and waits for the new registration.
 
 ### RemoteXPC reports `GOAWAY error 3`
 
