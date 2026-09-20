@@ -12,6 +12,7 @@ final class InstallerModel {
     private(set) var state = InstallState.idle
     private(set) var currentStep = InstallStep.connect
     private(set) var logLines: [String] = []
+    private(set) var logFileURL: URL?
     private(set) var isDiscoveringDevices = false
     private(set) var sshShellIsAvailable = false
     var isShowingError = false
@@ -45,6 +46,10 @@ final class InstallerModel {
 
     var canOpenSSHShell: Bool {
         state != .running && sshShellIsAvailable
+    }
+
+    var canShowLog: Bool {
+        logFileURL != nil
     }
 
     var selectedDevice: ConnectedDevice? {
@@ -165,11 +170,17 @@ final class InstallerModel {
         }
     }
 
+    func showLog() {
+        guard let logFileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([logFileURL])
+    }
+
     func startInstall() {
         guard canStart, let repositoryURL, let selectedDevice else { return }
         state = .running
         currentStep = .connect
         logLines.removeAll(keepingCapacity: true)
+        logFileURL = nil
         errorMessage = ""
         let shouldEnableHostSSH = enableHostSSH
         installTask = Task { [weak self] in
@@ -207,14 +218,42 @@ final class InstallerModel {
             uniquingKeysWith: { _, new in new }
         )
 
+        var logHandle: FileHandle?
+        defer {
+            if let logHandle {
+                try? logHandle.synchronize()
+                try? logHandle.close()
+            }
+        }
+
         do {
+            let logFile = try createLogFile(deviceIdentifier: requestedDevice)
+            logFileURL = logFile.url
+            logHandle = logFile.handle
+            writeLog(
+                """
+                CryptexSn0w install log
+                Started: \(Date().formatted(.iso8601))
+                Repository: \(repositoryURL.path)
+                Device: \(requestedDevice)
+                Command: \(process.executableURL?.path ?? "setup.sh") \(arguments.joined(separator: " "))
+
+                """,
+                to: logFile.handle
+            )
+
             try process.run()
             activeProcess = process
             for try await line in outputPipe.fileHandleForReading.bytes.lines {
+                writeLog("\(line)\n", to: logFile.handle)
                 ingest(line)
             }
             process.waitUntilExit()
             activeProcess = nil
+            writeLog(
+                "\nFinished: \(Date().formatted(.iso8601))\nExit status: \(process.terminationStatus)\n",
+                to: logFile.handle
+            )
             if process.terminationStatus == 0 {
                 currentStep = .verify
                 state = .complete
@@ -226,8 +265,53 @@ final class InstallerModel {
         } catch {
             activeProcess = nil
             state = .failed
-            presentError(title: "Installation Failed", error.localizedDescription)
+            if let logHandle {
+                writeLog("\nGUI error: \(error.localizedDescription)\n", to: logHandle)
+            }
+            let logLocation = logFileURL.map {
+                "\n\nLog file: \($0.path)"
+            } ?? ""
+            presentError(
+                title: "Installation Failed",
+                error.localizedDescription + logLocation
+            )
         }
+    }
+
+    private func createLogFile(
+        deviceIdentifier: String
+    ) throws -> (url: URL, handle: FileHandle) {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Logs/CryptexSn0w", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let device = deviceIdentifier.replacingOccurrences(
+            of: "[^A-Za-z0-9._-]",
+            with: "_",
+            options: .regularExpression
+        )
+        let url = directory.appending(
+            path: "install-\(formatter.string(from: Date()))-\(device).log"
+        )
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return (url, try FileHandle(forWritingTo: url))
+    }
+
+    private func writeLog(_ text: String, to handle: FileHandle) {
+        guard let data = text.data(using: .utf8) else { return }
+        try? handle.write(contentsOf: data)
+        try? handle.synchronize()
     }
 
     private func ingest(_ line: String) {

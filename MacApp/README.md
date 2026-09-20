@@ -39,6 +39,12 @@ to run the complete no-reboot pull, resign, Cryptex build, and install flow.
 Persistent root SSH is off by default. The unchecked **Enable root SSH access
 for this Mac** option passes `--enable-host-ssh` only when explicitly selected.
 
+Every GUI install writes the complete combined installer output to a timestamped
+file under `~/Library/Logs/CryptexSn0w`. The current file can be revealed with
+the status view's **Show Log** button or **Device > Show Install Log**, and a
+failure alert includes its exact path so the log can be sent without copying
+the shortened on-screen status.
+
 ## SSH shell menu
 
 After an SSH-enabled successful install, **Device > Open SSH Shell…** reads

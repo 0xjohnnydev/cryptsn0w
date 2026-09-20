@@ -125,6 +125,9 @@ static NSString *const kInstallerIdentifier =
 #ifndef CODEX_SILEO_BUNDLE_IDENTIFIER
 #define CODEX_SILEO_BUNDLE_IDENTIFIER @"org.coolstar.SileoStore"
 #endif
+#ifndef CODEX_PREFER_DIRECT_SILEO_REGISTRATION
+#define CODEX_PREFER_DIRECT_SILEO_REGISTRATION 0
+#endif
 static NSString *const kSileoIdentifier = CODEX_SILEO_BUNDLE_IDENTIFIER;
 static NSString *const kSileoPackageVersion = @"2.5.1+codex1";
 static NSString *const kSystemSileoDataRoot = @"/var/mobile";
@@ -738,12 +741,6 @@ static bool register_sileo_system_application(NSString *bundlePath,
         }
         return false;
     }
-    if (!prepare_lsd_registration_hook("system-sileo-registration")) {
-        if (errorText != NULL) {
-            *errorText = @"iOS 27 lsd registration hook is unavailable";
-        }
-        return false;
-    }
     // registered_application_proxy() performs the one-time MobileCoreServices
     // load that publishes LSApplicationWorkspace into this process.
     (void)registered_application_proxy(kSileoIdentifier);
@@ -807,42 +804,65 @@ static bool register_sileo_system_application(NSString *bundlePath,
         return false;
     }
     [requestContext setValue:@501 forKey:@"targetUserID"];
-    NSError *registrationError = nil;
-    id registrationResult = [workspace
-        registerContainerizedApplicationWithInfoDictionaries:@[registration]
-        operationUUID:[NSUUID UUID]
-        requestContext:requestContext
-        saveObserver:nil
-        registrationError:&registrationError];
-    (void)notify_post("com.apple.mobile.application_installed");
-    (void)notify_post("com.apple.itunesstored.application_installed");
     bool registered = false;
+    NSError *registrationError = nil;
     NSString *observedPath = nil;
     NSString *applicationType = nil;
-    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
-        id proxy = registered_application_proxy(kSileoIdentifier);
-        observedPath = [proxy respondsToSelector:@selector(bundleURL)]
-            ? [[proxy bundleURL] path] : nil;
-        applicationType =
-            [proxy respondsToSelector:@selector(applicationType)]
-                ? [proxy applicationType] : nil;
-        if (executable_paths_match(bundlePath, observedPath) &&
-            [applicationType isEqualToString:@"System"]) {
-            registered = true;
+    const bool preferDirectRegistration =
+        CODEX_PREFER_DIRECT_SILEO_REGISTRATION != 0;
+    const NSUInteger laneCount = preferDirectRegistration ? 2 : 1;
+    for (NSUInteger laneAttempt = 0; laneAttempt < laneCount; ++laneAttempt) {
+        const bool useLsdHook = !preferDirectRegistration || laneAttempt == 1;
+        const char *lane = useLsdHook ? "lsd-hook" : "client-entitlement";
+        if (useLsdHook &&
+            !prepare_lsd_registration_hook(
+                preferDirectRegistration
+                    ? "system-sileo-registration-fallback"
+                    : "system-sileo-registration")) {
+            log_message("sileoSystemRegistration lane=%s unavailable=true", lane);
             break;
         }
-        usleep(25 * 1000);
+
+        registrationError = nil;
+        observedPath = nil;
+        applicationType = nil;
+        id registrationResult = [workspace
+            registerContainerizedApplicationWithInfoDictionaries:@[registration]
+            operationUUID:[NSUUID UUID]
+            requestContext:requestContext
+            saveObserver:nil
+            registrationError:&registrationError];
+        (void)notify_post("com.apple.mobile.application_installed");
+        (void)notify_post("com.apple.itunesstored.application_installed");
+        for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+            id proxy = registered_application_proxy(kSileoIdentifier);
+            observedPath = [proxy respondsToSelector:@selector(bundleURL)]
+                ? [[proxy bundleURL] path] : nil;
+            applicationType =
+                [proxy respondsToSelector:@selector(applicationType)]
+                    ? [proxy applicationType] : nil;
+            if (executable_paths_match(bundlePath, observedPath) &&
+                [applicationType isEqualToString:@"System"]) {
+                registered = true;
+                break;
+            }
+            usleep(25 * 1000);
+        }
+        log_message("sileoSystemRegistration lane=%s transport=%s error=%s "
+                    "registered=%s path=%s observed=%s type=%s profile=false "
+                    "bundleId=%s",
+                    lane, registrationResult != nil ? "true" : "false",
+                    registrationError != nil
+                        ? [[registrationError description] UTF8String] : "none",
+                    registered ? "true" : "false",
+                    [bundlePath UTF8String],
+                    observedPath != nil ? [observedPath UTF8String] : "none",
+                    applicationType != nil ? [applicationType UTF8String] : "none",
+                    [kSileoIdentifier UTF8String]);
+        if (registered) {
+            break;
+        }
     }
-    log_message("sileoSystemRegistration transport=%s error=%s registered=%s "
-                "path=%s observed=%s type=%s profile=false bundleId=%s",
-                registrationResult != nil ? "true" : "false",
-                registrationError != nil
-                    ? [[registrationError description] UTF8String] : "none",
-                registered ? "true" : "false",
-                [bundlePath UTF8String],
-                observedPath != nil ? [observedPath UTF8String] : "none",
-                applicationType != nil ? [applicationType UTF8String] : "none",
-                [kSileoIdentifier UTF8String]);
     if (!registered && errorText != NULL) {
         *errorText = [NSString stringWithFormat:
             @"Cryptex Sileo system registration failed (error=%@ path=%@ "
