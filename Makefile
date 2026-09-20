@@ -2,7 +2,7 @@ PYTHON := .venv/bin/python
 OVERLAY := Dopamine-CryptexBootstrap/CryptexBootstrap
 PYMOBILEDEVICE_PATCH := Dopamine-CryptexBootstrap/patch_pymobiledevice3_remotexpc.py
 
-.PHONY: python validate build install
+.PHONY: python validate build install app
 
 python: .venv/.ready
 
@@ -23,3 +23,6 @@ build: validate
 
 install: validate
 	./Dopamine-CryptexBootstrap/setup.sh --install
+
+app:
+	./MacApp/build_app.sh

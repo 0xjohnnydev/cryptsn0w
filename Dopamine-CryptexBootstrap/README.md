@@ -30,9 +30,10 @@ build/target/SpringBoard.app/
 build/target/Preferences.app/
 ```
 
-The normal `--install` flow creates an ephemeral SSH Cryptex, reboots once,
-copies those bundles from the selected phone, and installs the final patched
-Cryptex as its second Cryptex installation. No model or UDID is hardcoded.
+The normal `--install` flow uses the already-loaded base-bootstrap job to swap
+in an ephemeral SSH payload, copies those bundles from the selected phone, and
+installs the final patched Cryptex as its second live Cryptex installation. It
+does not reboot. No model or UDID is hardcoded.
 
 All network inputs and the upstream commit are pinned. The image is rejected
 above 128 MiB. Sileo retains `org.coolstar.SileoStore`, has no provisioning

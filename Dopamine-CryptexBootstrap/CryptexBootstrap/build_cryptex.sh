@@ -115,6 +115,7 @@ PATCHED_OPAINJECT_THREAD_UTILS="$PATCHED_OPAINJECT_DIR/thread_utils.m"
 PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
+OPENSSH_PACKAGE_ROOT="$WORK_DIR/openssh-package"
 REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
@@ -180,10 +181,13 @@ build_ssh_stage() {
     local stage_payload="$stage_image/usr/local/share/codex-stage-ssh"
     local stage_unsigned="$STAGE_OUT_DIR/unsigned"
     local launcher="$stage_image/usr/local/bin/codex-dopamine-bootstrap"
+    local stage_host_key="$STAGE_WORK_DIR/host-key"
+    local stage_sshd="$stage_payload/root/usr/sbin/sshd"
+    local stage_sshd_entitlements="$STAGE_WORK_DIR/sshd-entitlements.plist"
     local bundle trustcache trustcache_dump image image_bytes entry_count
     local -a stage_variants
 
-    for tool in awk curl ditto ldid plutil python3 shasum stat tar xcrun zstd; do
+    for tool in awk curl ditto ldid plutil python3 shasum ssh-keygen stat tar xcrun zstd; do
         command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
     done
     [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
@@ -204,11 +208,55 @@ build_ssh_stage() {
        -x "$stage_extract/var/jb/usr/bin/ssh-keygen" ]] || \
         die "SSH bootstrap payload is incomplete"
     ditto --noqtn "$stage_extract/var/jb" "$stage_payload/root"
+    ldid -e "$stage_sshd" >"$stage_sshd_entitlements"
+    plutil -lint "$stage_sshd_entitlements" >/dev/null || \
+        die "could not preserve temporary sshd entitlements"
+    python3 - "$stage_sshd" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+data = bytearray(path.read_bytes())
+needle = b"sshd\0Privilege separation user %s does not exist"
+replacement = b"root\0Privilege separation user %s does not exist"
+if data.count(needle) != 1:
+    raise SystemExit("temporary sshd privilege-separation marker is not unique")
+data[:] = data.replace(needle, replacement)
+
+# This pinned Procursus sshd always chroots its pre-auth child.  A Cryptex
+# launch daemon cannot perform that operation on iOS, and this isolated stage
+# already runs as root with public-key-only access.  Replace only that call's
+# ARM64 `bl _chroot` with `mov w0, #0`; the following error check then follows
+# the normal success path.  Exact bytes keep this tied to the pinned archive.
+privsep_chroot_call = 0x5301C
+expected_call = bytes.fromhex("31980094")
+return_success = bytes.fromhex("00008052")
+if data[privsep_chroot_call:privsep_chroot_call + 4] != expected_call:
+    raise SystemExit("temporary sshd chroot call does not match pinned binary")
+data[privsep_chroot_call:privsep_chroot_call + 4] = return_success
+
+# The same pinned build asks sandbox_init() for the removed
+# `pure-computation` named profile.  The transfer daemon is already confined
+# to loopback-over-usbmux, one ephemeral key, and this disposable Cryptex, so
+# return immediately from ssh_sandbox_child instead of aborting pre-auth.
+sandbox_child_entry = 0x2E018
+expected_prologue = bytes.fromhex("ff4301d1")
+return_instruction = bytes.fromhex("c0035fd6")
+if data[sandbox_child_entry:sandbox_child_entry + 4] != expected_prologue:
+    raise SystemExit("temporary sshd sandbox function does not match pinned binary")
+data[sandbox_child_entry:sandbox_child_entry + 4] = return_instruction
+path.write_bytes(data)
+PY
+    ldid -S"$stage_sshd_entitlements" -Cadhoc "$stage_sshd"
     cp "$authorized_key" "$stage_payload/authorized_keys"
+    ssh-keygen -q -t ed25519 -N '' -f "$stage_host_key"
+    cp "$stage_host_key" "$stage_payload/host-key"
     cp "$SCRIPT_DIR/stage_sshd_config" "$stage_payload/sshd_config"
     cp "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" \
         "$stage_image/Library/LaunchDaemons/"
-    chmod 0600 "$stage_payload/authorized_keys"
+    plutil -replace ThrottleInterval -integer 10 \
+        "$stage_image/Library/LaunchDaemons/com.openai.codex.dopamine.bootstrap.plist"
+    chmod 0600 "$stage_payload/authorized_keys" "$stage_payload/host-key"
     chmod 0644 "$stage_payload/sshd_config" \
         "$stage_image/Library/LaunchDaemons/com.openai.codex.dopamine.bootstrap.plist"
 
@@ -301,6 +349,7 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
+    "$OPENSSH_PACKAGE_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
     "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES" \
@@ -550,6 +599,21 @@ zstd -dc "$BOOTSTRAP_ARCHIVE" | \
 ditto --noqtn "$WORK_DIR/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
 rm -rf "$WORK_DIR/var"
+
+# The bootstrap archive and the standalone OpenSSH packages are released on
+# independent schedules.  Trust and compare the exact pinned package payload
+# that dpkg installs, rather than whichever OpenSSH build happened to be in
+# the base archive.
+mkdir -p "$OPENSSH_PACKAGE_ROOT"
+for package in "$OPENSSH_CLIENT_DEB" "$OPENSSH_SFTP_SERVER_DEB" \
+               "$OPENSSH_SERVER_DEB"; do
+    dpkg-deb -x "$package" "$OPENSSH_PACKAGE_ROOT"
+done
+[[ -x "$OPENSSH_PACKAGE_ROOT/var/jb/usr/bin/ssh-keygen" && \
+   -x "$OPENSSH_PACKAGE_ROOT/var/jb/usr/sbin/sshd" ]] || \
+    die "pinned OpenSSH package payload is incomplete"
+ditto --noqtn "$OPENSSH_PACKAGE_ROOT/var/jb" \
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
 typeset -a trusted_openssh_machos=(
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh"
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh-keygen"

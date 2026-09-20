@@ -67,19 +67,39 @@ cache.
 ./Dopamine-CryptexBootstrap/setup.sh --install --device <UDID>
 ```
 
-One install command performs two Cryptex installs. It first installs a temporary
-key-only SSH Cryptex and reboots once so that job is loaded. It copies the
-phone's own SpringBoard and Settings bundles over USB-forwarded SSH, builds the
-resigned candidates, then replaces the stage with the final Cryptex. The stage
-key is ephemeral and removed after the transfer. The final step verifies system
-Sileo's registration, launch, and icon. No command is run manually on the
-phone.
+One install command performs two live Cryptex installs through the already
+loaded base-bootstrap job. It first swaps in a temporary key-only SSH payload,
+copies the phone's own SpringBoard and Settings bundles over USB-forwarded SSH,
+builds the resigned candidates, then replaces that payload with the final
+Cryptex. No reboot or manual phone command is required. The ephemeral key is
+removed after handoff, and the final step verifies system Sileo's registration,
+launch, and icon.
 
 Per-run inputs and results are retained below:
 
 ```text
 Dopamine-upstream/CryptexBootstrap/out/runs/
 ```
+
+## Native macOS installer
+
+Build and open the redsn0w-style SwiftUI front end with:
+
+```sh
+make app
+open dist/SBInject.app
+```
+
+The app uses the supplied running-pineapple image as both its logo and macOS
+application icon. Keep the app in `dist/` and it locates this repository
+automatically; a folder chooser is available if the app is moved. Connect and
+unlock one paired phone, then press **Jailbreak**. The app runs the exact same
+two-stage, no-reboot installer shown above and streams its progress and log in
+the window. An optional UDID field supports hosts with multiple devices.
+
+The app requires Swift 6.2 or newer. `make app` produces an ad-hoc-signed
+native application and does not embed Apple device binaries or build output in
+Git. See `MacApp/README.md` for the compact app layout.
 
 ## Runtime design
 
@@ -116,6 +136,10 @@ Dopamine-CryptexBootstrap/
     deploy.py                    build/personalize/install verification
     codex_dopamine_bootstrap.m   reboot recovery and Sileo control plane
     codex_exec_worker.c          Mach-O package-script executor
+MacApp/
+  Package.swift                  native SwiftUI installer
+  build_app.sh                   release .app/icon/signing packager
+  Resources/PineappleLogo.png    installer logo and icon source
 ```
 
 Runtime bootstrap diagnostics are written to

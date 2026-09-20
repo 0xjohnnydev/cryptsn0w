@@ -18,12 +18,12 @@ stage; it contains no research probes.
 - `deploy.py`, `personalize_generic_cryptex1.py`, and
   `install_cryptex_bootstrap.py` perform the two-Cryptex installation.
 
-An install first mounts an ephemeral public-key-only SSH Cryptex and reboots
-once. It copies the device's own SpringBoard and Preferences bundles into the
-ignored `build/target/` directory, builds the candidates from those exact
-files, then replaces the stage with the final Cryptex. Nothing in the tracked
-repository is tied to a device model, UDID, Apple binary hash, UUID, or dyld
-offset.
+An install uses the already-loaded base-bootstrap job to mount an ephemeral
+public-key-only SSH payload without rebooting. It copies the device's own
+SpringBoard and Preferences bundles into the ignored `build/target/` directory,
+builds the candidates from those exact files, then replaces the stage with the
+final Cryptex. Nothing in the tracked repository is tied to a device model,
+UDID, Apple binary hash, UUID, or dyld offset.
 
 ## Installed model
 

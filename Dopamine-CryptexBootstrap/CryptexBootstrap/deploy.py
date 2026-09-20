@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
 import shutil
 import socket
@@ -410,14 +411,6 @@ def pull_target_bundles(device: dict[str, str], private_key: Path) -> None:
             staging / "Preferences.app" / "Preferences"
         ).is_file():
             raise DeployError("device app transfer is incomplete")
-        cleanup = subprocess.run(
-            [
-                "ssh", *options, "root@127.0.0.1",
-                "/usr/local/bin/codex-dopamine-bootstrap --cleanup",
-            ]
-        )
-        if cleanup.returncode != 0:
-            raise DeployError("temporary SSH stage cleanup failed")
         if TARGET_BUNDLE_ROOT.exists():
             shutil.rmtree(TARGET_BUNDLE_ROOT)
         os.replace(staging, TARGET_BUNDLE_ROOT)
@@ -429,6 +422,96 @@ def pull_target_bundles(device: dict[str, str], private_key: Path) -> None:
             forward.kill()
         if staging.exists():
             shutil.rmtree(staging)
+
+
+def start_stage_handoff(
+    device: dict[str, str], private_key: Path
+) -> tuple[subprocess.Popen[bytes], subprocess.Popen[bytes]]:
+    local_port = free_local_port()
+    forward = subprocess.Popen(
+        [
+            sys.executable, "-m", "pymobiledevice3", "usbmux", "forward",
+            str(local_port), "22222", "--serial", device["udid"],
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    options = [
+        "-i", str(private_key), "-p", str(local_port),
+        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
+    ]
+    time.sleep(1)
+    handoff = subprocess.Popen(
+        [
+            "ssh", *options, "root@127.0.0.1",
+            "/private/var/tmp/codex-stage-ssh/cleanup --cleanup",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert handoff.stdout is not None
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(handoff.stdout, selectors.EVENT_READ)
+        events = selector.select(timeout=10)
+        ready = handoff.stdout.readline() if events else b""
+    finally:
+        selector.close()
+    if ready != b"handoff-ready\n" or handoff.poll() is not None:
+        handoff.terminate()
+        forward.terminate()
+        try:
+            _, error = handoff.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            handoff.kill()
+            _, error = handoff.communicate()
+        detail = error.decode("utf-8", "replace").strip()
+        raise DeployError(f"could not arm SSH-stage handoff: {detail}")
+    return forward, handoff
+
+
+def finish_stage_handoff(
+    forward: subprocess.Popen[bytes], handoff: subprocess.Popen[bytes]
+) -> None:
+    try:
+        output, error = handoff.communicate(b"\n", timeout=30)
+        acknowledged = b"handoff-armed\n" in output.splitlines(keepends=True)
+        expected_close = (
+            handoff.returncode == 255
+            and b"closed by remote host" in error
+        )
+        # cryptexd normally tears down the replaced stage as soon as the final
+        # mount becomes active, closing this already-authenticated connection
+        # before the delayed helper needs to fire.  Either an explicit helper
+        # acknowledgement or that exact post-install SSH close is a valid
+        # handoff; all other exits remain failures.
+        if not expected_close and (
+            not acknowledged or handoff.returncode != 0
+        ):
+            raise DeployError(
+                "SSH-stage handoff failed: "
+                + error.decode("utf-8", "replace").strip()
+            )
+    finally:
+        forward.terminate()
+        try:
+            forward.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            forward.kill()
+
+
+def cancel_stage_handoff(
+    forward: subprocess.Popen[bytes], handoff: subprocess.Popen[bytes]
+) -> None:
+    handoff.terminate()
+    forward.terminate()
+    for process in (handoff, forward):
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
 
 def new_version() -> str:
@@ -526,69 +609,32 @@ def build_ssh_stage(version: str, public_key: Path) -> dict[str, Any]:
     }
 
 
-def reboot_into_ssh_stage(device: dict[str, str]) -> None:
-    capture_json([
-        "xcrun", "devicectl", "device", "reboot", "--device", device["udid"],
-        "--style", "full", "--timeout", "20",
-        "--json-output", "-", "--omit-deprecated-fields-in-json",
-    ], timeout=25)
-    disconnected = False
-    deadline = time.monotonic() + 300
-    while time.monotonic() < deadline:
-        try:
-            present = any(
-                item["udid"].casefold() == device["udid"].casefold()
-                for item in connected_devices()
-            )
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-            present = False
-        disconnected |= not present
-        if disconnected and present:
-            break
-        time.sleep(2)
-    else:
-        raise DeployError("device did not return after the stage reboot")
-    time.sleep(5)
 
 
-def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, Any]:
-    run_id = (
-        dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + "-"
-        + uuid.uuid4().hex[:8]
-    )
-    run_dir = SCRIPT_DIR / "out" / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=False)
-    base_version = args.cryptex_version or os.environ.get(
-        "CODEX_CRYPTEX_VERSION"
-    ) or new_version()
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", base_version):
-        raise DeployError("Cryptex version must be numeric and dot-separated")
-
-    private_key = run_dir / "stage-key"
-    run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private_key)])
-
-    stage_context = run_dir / "stage-context"
-    capture_context(device, stage_context)
-    stage = build_ssh_stage(base_version + ".1", private_key.with_suffix(".pub"))
-    stage_personalized = run_dir / "stage-personalized"
-    stage_bundle = personalize(stage, stage_context, stage_personalized)
-    stage_install = run_dir / "stage-install.json"
-    install_cryptex(stage, stage_bundle, device, stage_install)
-    reboot_into_ssh_stage(device)
+def finish_install(
+    run_dir: Path,
+    device: dict[str, str],
+    private_key: Path,
+    base_version: str,
+    stage_install: Path,
+) -> dict[str, Any]:
     pull_target_bundles(device, private_key)
+    forward, handoff = start_stage_handoff(device, private_key)
+
+    try:
+        final_context = run_dir / "final-context"
+        capture_context(device, final_context)
+        build = build_pair(base_version + ".2")
+        final_personalized = run_dir / "final-personalized"
+        final_bundle = personalize(build, final_context, final_personalized)
+        final_install = run_dir / "final-install.json"
+        install_cryptex(build, final_bundle, device, final_install)
+        finish_stage_handoff(forward, handoff)
+    except Exception:
+        cancel_stage_handoff(forward, handoff)
+        raise
     private_key.unlink(missing_ok=True)
     private_key.with_suffix(".pub").unlink(missing_ok=True)
-
-    final_context = run_dir / "final-context"
-    capture_context(device, final_context)
-    build = build_pair(base_version + ".2")
-    final_personalized = run_dir / "final-personalized"
-    final_bundle = personalize(build, final_context, final_personalized)
-    final_install = run_dir / "final-install.json"
-    installation = install_cryptex(
-        build, final_bundle, device, final_install
-    )
     system_sileo_verification = verify_and_launch_system_sileo(
         device, build["version"],
         run_dir / "system-sileo-icon.png",
@@ -611,14 +657,61 @@ def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, 
     return result
 
 
+def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, Any]:
+    run_id = (
+        dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+    run_dir = SCRIPT_DIR / "out" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    base_version = args.cryptex_version or os.environ.get(
+        "CODEX_CRYPTEX_VERSION"
+    ) or new_version()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", base_version):
+        raise DeployError("Cryptex version must be numeric and dot-separated")
+
+    private_key = run_dir / "stage-key"
+    run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(private_key)])
+    stage_context = run_dir / "stage-context"
+    capture_context(device, stage_context)
+    stage = build_ssh_stage(base_version + ".1", private_key.with_suffix(".pub"))
+    stage_personalized = run_dir / "stage-personalized"
+    stage_bundle = personalize(stage, stage_context, stage_personalized)
+    stage_install = run_dir / "stage-install.json"
+    install_cryptex(stage, stage_bundle, device, stage_install)
+    return finish_install(
+        run_dir, device, private_key, base_version, stage_install
+    )
+
+
+def resume_pair(run_dir: Path, device: dict[str, str]) -> dict[str, Any]:
+    run_dir = run_dir.resolve()
+    runs_root = (SCRIPT_DIR / "out" / "runs").resolve()
+    if run_dir.parent != runs_root:
+        raise DeployError("resume run must be a direct child of out/runs")
+    private_key = run_dir / "stage-key"
+    stage_install = run_dir / "stage-install.json"
+    stage_version = read_json(stage_install).get("installed", {}).get("version")
+    if not private_key.is_file() or not isinstance(stage_version, str) or not (
+        stage_version.endswith(".1")
+    ):
+        raise DeployError("resume run has no installed SSH stage or private key")
+    return finish_install(
+        run_dir, device, private_key, stage_version.removesuffix(".1"),
+        stage_install,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("build", "install"))
+    parser.add_argument("action", choices=("build", "install", "resume"))
     parser.add_argument("--device", help="target UDID; optional with one device")
     parser.add_argument(
         "--cryptex-version",
         help="fresh numeric dot-separated version (generated automatically by default)",
     )
+    parser.add_argument("--run", type=Path, help="interrupted out/runs directory")
     args = parser.parse_args()
 
     if args.action == "build":
@@ -627,7 +720,12 @@ def main() -> int:
 
     device = choose_device(args.device)
     configure_target_build_environment(device)
-    install_pair(args, device)
+    if args.action == "resume":
+        if args.run is None:
+            parser.error("resume requires --run")
+        resume_pair(args.run, device)
+    else:
+        install_pair(args, device)
     return 0
 
 
