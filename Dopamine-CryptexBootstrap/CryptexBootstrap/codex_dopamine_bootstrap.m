@@ -3100,6 +3100,51 @@ static int32_t run_root_broker_command(
     if (packageMutation) {
         bool finalized = finish_sbinject_package_transaction(
             springBoardBefore, status, resolvedCommand);
+        bool respringRequired =
+            finalized && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+            exact_empty_root_marker(kSBInjectRespringMarker);
+        bool sileoFinishChannelExpected = false;
+        for (uint32_t index = 0; index < controlEnvironmentCount; ++index) {
+            if (strncmp(controlEnvironment[index], "SILEO=", 6U) == 0) {
+                sileoFinishChannelExpected = true;
+                break;
+            }
+        }
+        if (respringRequired && sileoFinishChannelExpected) {
+            static const char finishSignal[] = "finish:restart\n";
+            bool signaled = false;
+            // Pinned Sileo reserves descriptor 6 for its native finish-action
+            // channel.  The virtualized spawn keeps that pipe open through
+            // this post-hook, so upgrade the otherwise-successful result from
+            // Done to Sileo's standard Respring Now / Respring Later sheet.
+            for (uint32_t index = 0; index < descriptorCount; ++index) {
+                if (descriptorNumbers[index] == 6) {
+                    signaled = write_all(descriptors[index], finishSignal,
+                                         sizeof(finishSignal) - 1U);
+                    break;
+                }
+            }
+            log_message("sileoRootBrokerFinishSignal command=%s "
+                        "action=restart descriptor=6 status=%s",
+                        resolvedCommand, signaled ? "success" : "failed");
+            if (!signaled) {
+                static const char finishError[] =
+                    "Error: SBInject prepared the SpringBoard redirect but "
+                    "could not notify Sileo that a respring is required.\n";
+                for (uint32_t index = 0; index < descriptorCount; ++index) {
+                    if (descriptorNumbers[index] == STDERR_FILENO) {
+                        (void)write_all(descriptors[index], finishError,
+                                        sizeof(finishError) - 1U);
+                        break;
+                    }
+                }
+                status = 76 << 8;
+            }
+        } else if (respringRequired) {
+            log_message("sileoRootBrokerFinishSignal command=%s "
+                        "action=restart status=not-requested-headless",
+                        resolvedCommand);
+        }
         if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && !finalized) {
             static const char packageError[] =
                 "Error: SBInject could not prepare and verify the resigned "
@@ -5838,6 +5883,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceOpenSSHSFTPServer =
             [payloadRoot stringByAppendingPathComponent:
                              @"openssh-sftp-server.deb"];
+        NSString *sourceHostSSHAuthorizedKeys =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"host-ssh-authorized-keys"];
         NSString *sourceTrustedSileo =
             [mountRoot stringByAppendingPathComponent:@"Applications/Sileo.app"];
         NSString *sourceTrustedElleKitRoot =
@@ -6482,6 +6530,12 @@ int main(int argc, char *argv[]) {
                 fastPayloadExact &= files_are_equal(pair[@"source"],
                                                      pair[@"installed"]);
             }
+            if ([[NSFileManager defaultManager]
+                    fileExistsAtPath:sourceHostSSHAuthorizedKeys]) {
+                fastPayloadExact &= files_are_equal(
+                    sourceHostSSHAuthorizedKeys,
+                    @"/var/jb/var/root/.ssh/authorized_keys");
+            }
             NSArray<NSString *> *fastSileoExecutables = @[
                 @"Sileo", @"giveMeRoot", @"F/libiosexec.1.dylib",
                 @"F/liblzma.5.dylib", @"F/libcodex-sileo-broker.dylib",
@@ -6694,6 +6748,23 @@ int main(int argc, char *argv[]) {
                               preferenceLoaderDpkgStatus],
                 nil);
         }
+        // Re-running the explicit Cryptex repair is the recovery boundary for
+        // Settings. The launchd hook may have disabled only the Preferences
+        // redirect after a prior rapid-launch window; once the pinned
+        // PreferenceLoader package has verified again, discard that stale
+        // marker and let this run re-arm the resigned candidate. A genuine
+        // crash loop can still recreate the marker during the current boot.
+        bool preferencesCrashMarkerPresent =
+            access([kSBInjectPreferencesCrashMarker fileSystemRepresentation],
+                   F_OK) == 0;
+        if (preferencesCrashMarkerPresent &&
+            unlink([kSBInjectPreferencesCrashMarker
+                       fileSystemRepresentation]) != 0) {
+            return fail(@"could not reset the Settings crash-loop marker",
+                        nil);
+        }
+        log_message("sbinjectPreferencesRepairReset=%s",
+                    preferencesCrashMarkerPresent ? "true" : "not-needed");
 
         char *openSSHDpkgArguments[] = {
             "/var/jb/usr/bin/dpkg", "-i",
@@ -6738,6 +6809,26 @@ int main(int argc, char *argv[]) {
         }
         log_message("openSSHFixedTrustReady=true version=9.7p1-1 files=%lu",
                     (unsigned long)trustedOpenSSHFiles.count);
+
+        bool hostSSHAuthorizedKeysUpdated = false;
+        NSString *hostSSHAuthorizedKeysError = nil;
+        bool hostSSHAuthorizedKeyAvailable =
+            [[NSFileManager defaultManager]
+                fileExistsAtPath:sourceHostSSHAuthorizedKeys];
+        if (hostSSHAuthorizedKeyAvailable &&
+            !install_managed_apt_file(
+                sourceHostSSHAuthorizedKeys, @"/var/jb/var/root/.ssh",
+                @"authorized_keys", 64 * 1024, 0600,
+                "openSSHHostAuthorizedKeys", &hostSSHAuthorizedKeysUpdated,
+                &hostSSHAuthorizedKeysError)) {
+            return fail(hostSSHAuthorizedKeysError, nil);
+        }
+        log_message("openSSHHostAccess=%s updated=%s path=%s",
+                    hostSSHAuthorizedKeyAvailable ? "enabled" : "disabled",
+                    hostSSHAuthorizedKeysUpdated ? "true" : "false",
+                    hostSSHAuthorizedKeyAvailable
+                        ? "/var/jb/var/root/.ssh/authorized_keys"
+                        : "none");
 
         bool elleKitKeyUpdated = false;
         bool bigBossKeyUpdated = false;
@@ -7213,6 +7304,8 @@ int main(int argc, char *argv[]) {
         manifest[@"OpenSSHVersion"] = @"9.7p1-1";
         manifest[@"OpenSSHExecutable"] = kOpenSSHExecutable;
         manifest[@"OpenSSHLaunchDaemon"] = kOpenSSHPlist;
+        manifest[@"OpenSSHHostKeyAccess"] =
+            @(hostSSHAuthorizedKeyAvailable);
         manifest[@"SileoRootBrokerPlist"] = kRootBrokerPlist;
         manifest[@"SileoExecutableMode"] =
             @"fixed-trust-adhoc-system-app-with-constructor-broker";

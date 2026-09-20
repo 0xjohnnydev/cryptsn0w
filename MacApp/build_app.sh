@@ -5,7 +5,8 @@ set -euo pipefail
 SCRIPT_DIR=${0:A:h}
 REPOSITORY_ROOT=${SCRIPT_DIR:h}
 OUTPUT_DIRECTORY="$REPOSITORY_ROOT/dist"
-APP="$OUTPUT_DIRECTORY/SBInject.app"
+APP="$OUTPUT_DIRECTORY/CryptexSn0w.app"
+LEGACY_APP="$OUTPUT_DIRECTORY/SBInject.app"
 CONTENTS="$APP/Contents"
 RESOURCES="$CONTENTS/Resources"
 MACOS="$CONTENTS/MacOS"
@@ -25,15 +26,15 @@ swift build --disable-sandbox --package-path "$SCRIPT_DIR" \
 BIN_DIRECTORY=$(swift build --package-path "$SCRIPT_DIR" \
     --disable-sandbox --configuration release -debug-info-format none \
     --show-bin-path)
-EXECUTABLE="$BIN_DIRECTORY/SBInjectInstaller"
+EXECUTABLE="$BIN_DIRECTORY/CryptexSn0w"
 [[ -x "$EXECUTABLE" ]] || {
     print -u2 -- "error: Swift build did not emit $EXECUTABLE"
     exit 1
 }
 
-rm -rf "$APP"
+rm -rf "$APP" "$LEGACY_APP"
 mkdir -p "$MACOS" "$RESOURCES"
-cp "$EXECUTABLE" "$MACOS/SBInjectInstaller"
+cp "$EXECUTABLE" "$MACOS/CryptexSn0w"
 cp "$SCRIPT_DIR/Info.plist" "$CONTENTS/Info.plist"
 cp "$LOGO" "$RESOURCES/PineappleLogo.png"
 

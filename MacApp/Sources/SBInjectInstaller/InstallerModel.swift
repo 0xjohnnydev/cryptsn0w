@@ -5,23 +5,33 @@ import Observation
 @MainActor
 @Observable
 final class InstallerModel {
-    var deviceIdentifier = ""
+    private(set) var devices: [ConnectedDevice] = []
+    var selectedDeviceIdentifier: String?
+    var enableHostSSH = false
     private(set) var repositoryURL: URL?
     private(set) var state = InstallState.idle
     private(set) var currentStep = InstallStep.connect
     private(set) var logLines: [String] = []
+    private(set) var isDiscoveringDevices = false
+    private(set) var sshShellIsAvailable = false
     var isShowingError = false
+    private(set) var errorTitle = "CryptexSn0w"
     private(set) var errorMessage = ""
 
     @ObservationIgnored private var activeProcess: Process?
     @ObservationIgnored private var installTask: Task<Void, Never>?
+    @ObservationIgnored private let deviceDiscovery = DeviceDiscoveryService()
+    @ObservationIgnored private let sshSession = SSHShellSessionManager()
 
     init() {
         repositoryURL = RepositoryLocator.locate()
     }
 
     var statusTitle: String {
-        switch state {
+        if isDiscoveringDevices && state == .idle {
+            return "Looking for connected devices"
+        }
+        return switch state {
         case .idle: "Ready to jailbreak"
         case .running: currentStep.title
         case .complete: "Jailbreak complete"
@@ -30,7 +40,50 @@ final class InstallerModel {
     }
 
     var canStart: Bool {
-        state != .running && repositoryURL != nil
+        state != .running && repositoryURL != nil && selectedDevice != nil
+    }
+
+    var canOpenSSHShell: Bool {
+        state != .running && sshShellIsAvailable
+    }
+
+    var selectedDevice: ConnectedDevice? {
+        devices.first { $0.id == selectedDeviceIdentifier }
+    }
+
+    var statusDetail: String {
+        switch state {
+        case .idle:
+            if repositoryURL == nil {
+                "Choose the installer repository from the Device menu."
+            } else {
+                selectedDevice?.detail ?? "Connect and unlock a paired iPhone."
+            }
+        case .running:
+            logLines.last ?? "Preparing the installer…"
+        case .complete:
+            "Sileo and the SBInject environment are ready."
+        case .failed:
+            logLines.last ?? "The installation stopped before completion."
+        }
+    }
+
+    var sshStatusText: String {
+        if sshShellIsAvailable {
+            "SSH Shell is available from the Device menu."
+        } else if enableHostSSH {
+            "This install will authorize this Mac for root SSH."
+        } else {
+            "Root SSH remains off unless you explicitly enable it."
+        }
+    }
+
+    var actionTitle: String {
+        switch state {
+        case .idle, .failed: "Jailbreak"
+        case .running: "Installing…"
+        case .complete: "Reinstall"
+        }
     }
 
     func chooseRepository() {
@@ -43,33 +96,93 @@ final class InstallerModel {
         guard panel.runModal() == .OK, let selected = panel.url else { return }
         if RepositoryLocator.isRepository(selected) {
             repositoryURL = selected
+            requestDeviceRefresh()
         } else {
             presentError(
+                title: "Repository Not Found",
                 "That folder does not contain Dopamine-CryptexBootstrap/setup.sh."
             )
         }
     }
 
+    func requestDeviceRefresh() {
+        Task { [weak self] in
+            await self?.refreshDevices()
+        }
+    }
+
+    func refreshDevices() async {
+        guard !isDiscoveringDevices else { return }
+        isDiscoveringDevices = true
+        defer { isDiscoveringDevices = false }
+
+        do {
+            let discovered = try await deviceDiscovery.discover(
+                repositoryURL: repositoryURL
+            )
+            let previousSelection = selectedDeviceIdentifier
+            devices = discovered
+            if let previousSelection,
+               discovered.contains(where: { $0.id == previousSelection }) {
+                selectedDeviceIdentifier = previousSelection
+            } else {
+                selectedDeviceIdentifier = discovered.first?.id
+            }
+            updateSSHShellAvailability()
+        } catch {
+            devices = []
+            selectedDeviceIdentifier = nil
+            sshShellIsAvailable = false
+            presentError(title: "Device Discovery Failed", error.localizedDescription)
+        }
+    }
+
+    func updateSSHShellAvailability() {
+        guard let repositoryURL, let selectedDevice else {
+            sshShellIsAvailable = false
+            return
+        }
+        sshShellIsAvailable = sshSession.hasCredential(
+            repositoryURL: repositoryURL,
+            deviceIdentifier: selectedDevice.id
+        )
+    }
+
+    func openSSHShell() {
+        guard let repositoryURL, let selectedDevice else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await sshSession.open(
+                    repositoryURL: repositoryURL,
+                    device: selectedDevice
+                )
+            } catch {
+                presentError(title: "SSH Shell Unavailable", error.localizedDescription)
+            }
+        }
+    }
+
     func startInstall() {
-        guard canStart, let repositoryURL else { return }
+        guard canStart, let repositoryURL, let selectedDevice else { return }
         state = .running
         currentStep = .connect
         logLines.removeAll(keepingCapacity: true)
         errorMessage = ""
-        let requestedDevice = deviceIdentifier.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
+        let shouldEnableHostSSH = enableHostSSH
         installTask = Task { [weak self] in
             await self?.runInstaller(
                 repositoryURL: repositoryURL,
-                requestedDevice: requestedDevice
+                requestedDevice: selectedDevice.id,
+                enableHostSSH: shouldEnableHostSSH
             )
         }
     }
 
     private func runInstaller(
         repositoryURL: URL,
-        requestedDevice: String
+        requestedDevice: String,
+        enableHostSSH: Bool
     ) async {
         let process = Process()
         let outputPipe = Pipe()
@@ -79,6 +192,9 @@ final class InstallerModel {
         var arguments = ["--install"]
         if !requestedDevice.isEmpty {
             arguments.append(contentsOf: ["--device", requestedDevice])
+        }
+        if enableHostSSH {
+            arguments.append("--enable-host-ssh")
         }
         process.arguments = arguments
         process.currentDirectoryURL = repositoryURL
@@ -101,13 +217,14 @@ final class InstallerModel {
                 currentStep = .verify
                 state = .complete
                 appendLog("Installation completed successfully.")
+                updateSSHShellAvailability()
             } else {
                 throw InstallerFailure.exitStatus(process.terminationStatus)
             }
         } catch {
             activeProcess = nil
             state = .failed
-            presentError(error.localizedDescription)
+            presentError(title: "Installation Failed", error.localizedDescription)
         }
     }
 
@@ -137,7 +254,8 @@ final class InstallerModel {
         }
     }
 
-    private func presentError(_ message: String) {
+    private func presentError(title: String, _ message: String) {
+        errorTitle = title
         errorMessage = message
         isShowingError = true
     }

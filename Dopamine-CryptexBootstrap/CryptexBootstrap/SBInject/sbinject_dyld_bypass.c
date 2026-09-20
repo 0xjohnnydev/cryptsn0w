@@ -7,6 +7,7 @@
 #include <mach/mach.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
+#include <os/log.h>
 #include <ptrauth.h>
 #include <signal.h>
 #include <stdint.h>
@@ -33,7 +34,13 @@ extern void *__mmap(void *address, size_t length, int protection, int flags,
                     int descriptor, off_t offset);
 extern int __fcntl(int descriptor, int command, void *argument);
 
-static int (*original_fcntl)(int, int, void *);
+static os_log_t bypass_log(void) {
+    static os_log_t log;
+    if (log == NULL) {
+        log = os_log_create("com.openai.codex.sbinject", "dyld-bypass");
+    }
+    return log;
+}
 
 __attribute__((naked)) static kern_return_t raw_vm_protect(
     mach_port_name_t task, mach_vm_address_t address, mach_vm_size_t size,
@@ -43,6 +50,43 @@ __attribute__((naked)) static kern_return_t raw_vm_protect(
     __asm("ret");
 }
 
+// Direct Unix syscall wrappers avoid recursing through the libsystem entry
+// points when those entry points themselves are the fallback patch targets.
+// XNU reports Unix errors in x0 with carry set; mirror libsystem's errno/-1
+// contract so the surrounding mmap/fcntl logic remains conventional C.
+__attribute__((naked)) static void *raw_mmap(
+    void *address, size_t length, int protection, int flags, int descriptor,
+    off_t offset) {
+    __asm("mov x16, #197");
+    __asm("svc 0x80");
+    __asm("b.cc 1f");
+    __asm("stp x29, x30, [sp, #-32]!");
+    __asm("mov x29, sp");
+    __asm("str x0, [sp, #16]");
+    __asm("bl ___error");
+    __asm("ldr w9, [sp, #16]");
+    __asm("str w9, [x0]");
+    __asm("mov x0, #-1");
+    __asm("ldp x29, x30, [sp], #32");
+    __asm("1: ret");
+}
+
+__attribute__((naked)) static int raw_fcntl(int descriptor, int command,
+                                            void *argument) {
+    __asm("mov x16, #92");
+    __asm("svc 0x80");
+    __asm("b.cc 1f");
+    __asm("stp x29, x30, [sp, #-32]!");
+    __asm("mov x29, sp");
+    __asm("str x0, [sp, #16]");
+    __asm("bl ___error");
+    __asm("ldr w9, [sp, #16]");
+    __asm("str w9, [x0]");
+    __asm("mov x0, #-1");
+    __asm("ldp x29, x30, [sp], #32");
+    __asm("1: ret");
+}
+
 static void copy_bytes(uint8_t *destination, const uint8_t *source,
                        size_t amount) {
     for (size_t index = 0; index < amount; ++index) {
@@ -50,7 +94,8 @@ static void copy_bytes(uint8_t *destination, const uint8_t *source,
     }
 }
 
-static bool write_absolute_jump(void *location, void *replacement) {
+static bool write_absolute_jump(void *location, void *replacement,
+                                const char *name) {
     static const uint8_t jump_template[24] = {
         0x88, 0x00, 0x00, 0x58, 0x00, 0x01, 0x1f, 0xd6,
         0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5,
@@ -60,6 +105,9 @@ static bool write_absolute_jump(void *location, void *replacement) {
         mach_task_self(), (mach_vm_address_t)location, sizeof(jump_template),
         false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
     if (result != KERN_SUCCESS) {
+        os_log_error(bypass_log(),
+                     "%{public}s writable transition failed kr=%{public}d",
+                     name, result);
         return false;
     }
     copy_bytes(location, jump_template, sizeof(jump_template));
@@ -69,9 +117,16 @@ static bool write_absolute_jump(void *location, void *replacement) {
     copy_bytes((uint8_t *)location + 16U, (const uint8_t *)&target,
                sizeof(target));
     sys_icache_invalidate(location, sizeof(jump_template));
-    return raw_vm_protect(mach_task_self(), (mach_vm_address_t)location,
-                          sizeof(jump_template), false,
-                          VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS;
+    result = raw_vm_protect(mach_task_self(), (mach_vm_address_t)location,
+                            sizeof(jump_template), false,
+                            VM_PROT_READ | VM_PROT_EXECUTE);
+    if (result != KERN_SUCCESS) {
+        os_log_error(bypass_log(),
+                     "%{public}s executable transition failed kr=%{public}d",
+                     name, result);
+        return false;
+    }
+    return true;
 }
 
 static const struct mach_header_64 *dyld_header(void) {
@@ -91,10 +146,12 @@ static const struct mach_header_64 *dyld_header(void) {
 static bool find_unique_signature(const struct mach_header_64 *header,
                                   const uint8_t *signature,
                                   size_t signature_size,
-                                  uint8_t **match_out) {
+                                  uint8_t **match_out,
+                                  size_t *match_count_out) {
     if (header == NULL || header->magic != MH_MAGIC_64 ||
         header->ncmds == 0 || header->ncmds > 1024U ||
-        header->sizeofcmds > 16U * 1024U * 1024U || match_out == NULL) {
+        header->sizeofcmds > 16U * 1024U * 1024U || match_out == NULL ||
+        match_count_out == NULL) {
         return false;
     }
     const uint8_t *commands = (const uint8_t *)(header + 1);
@@ -156,6 +213,7 @@ static bool find_unique_signature(const struct mach_header_64 *header,
         cursor += command->cmdsize;
     }
     *match_out = observed;
+    *match_count_out = matches;
     return matches == 1U;
 }
 
@@ -165,8 +223,8 @@ static void *bypass_mmap(void *address, size_t length, int protection,
         errno = EINVAL;
         return MAP_FAILED;
     }
-    void *mapping = __mmap(address, length, protection, flags, descriptor,
-                           offset);
+    void *mapping = raw_mmap(address, length, protection, flags, descriptor,
+                             offset);
     if (descriptor == -1 || (protection & PROT_EXEC) == 0) {
         return mapping;
     }
@@ -177,14 +235,14 @@ static void *bypass_mmap(void *address, size_t length, int protection,
         (void)munmap(mapping, length);
     }
 
-    void *source = __mmap(NULL, length, PROT_READ, MAP_PRIVATE, descriptor,
-                          offset);
+    void *source = raw_mmap(NULL, length, PROT_READ, MAP_PRIVATE, descriptor,
+                            offset);
     if (source == MAP_FAILED) {
         return MAP_FAILED;
     }
     int anonymous_flags = (flags & ~MAP_SHARED) | MAP_PRIVATE | MAP_ANON;
-    mapping = __mmap(address, length, PROT_READ | PROT_WRITE,
-                     anonymous_flags, -1, 0);
+    mapping = raw_mmap(address, length, PROT_READ | PROT_WRITE,
+                       anonymous_flags, -1, 0);
     if (mapping == MAP_FAILED) {
         (void)munmap(source, length);
         return MAP_FAILED;
@@ -202,7 +260,7 @@ static void *bypass_mmap(void *address, size_t length, int protection,
 
 static int bypass_fcntl(int descriptor, int command, void *argument) {
     if (command == F_ADDFILESIGS_RETURN) {
-        (void)original_fcntl(descriptor, command, argument);
+        (void)raw_fcntl(descriptor, command, argument);
         if (argument != NULL) {
             fsignatures_t *signatures = argument;
             signatures->fs_file_start = 0xffffffffU;
@@ -212,7 +270,7 @@ static int bypass_fcntl(int descriptor, int command, void *argument) {
     if (command == F_CHECK_LV) {
         return 0;
     }
-    return original_fcntl(descriptor, command, argument);
+    return raw_fcntl(descriptor, command, argument);
 }
 
 bool sbinject_install_dyld_validation_bypass(void) {
@@ -225,22 +283,56 @@ bool sbinject_install_dyld_validation_bypass(void) {
     const struct mach_header_64 *header = dyld_header();
     uint8_t *mmap_site = NULL;
     uint8_t *fcntl_site = NULL;
-    if (!find_unique_signature(header, k_mmap_signature,
-                               sizeof(k_mmap_signature), &mmap_site) ||
-        !find_unique_signature(header, k_fcntl_signature,
-                               sizeof(k_fcntl_signature), &fcntl_site)) {
+    size_t mmap_matches = 0;
+    size_t fcntl_matches = 0;
+    bool dyld_mmap = find_unique_signature(
+        header, k_mmap_signature, sizeof(k_mmap_signature), &mmap_site,
+        &mmap_matches);
+    bool dyld_fcntl = find_unique_signature(
+        header, k_fcntl_signature, sizeof(k_fcntl_signature), &fcntl_site,
+        &fcntl_matches);
+    // Some iOS 27 process configurations route dyld's late validation calls
+    // through the exported libsystem stubs and therefore contain no private
+    // syscall sequence in dyld itself. Patch those exact stubs as the runtime
+    // fallback; the replacements use syscall(2), so they never recurse into
+    // the overwritten entry points.
+    if (!dyld_mmap) {
+        mmap_site = (uint8_t *)ptrauth_strip(
+            (void *)(uintptr_t)&__mmap, ptrauth_key_function_pointer);
+    }
+    if (!dyld_fcntl) {
+        fcntl_site = (uint8_t *)ptrauth_strip(
+            (void *)(uintptr_t)&__fcntl, ptrauth_key_function_pointer);
+    }
+    if (mmap_site == NULL || fcntl_site == NULL) {
+        os_log_error(bypass_log(),
+                     "target discovery failed header=%{public}s "
+                     "mmapMatches=%{public}lu fcntlMatches=%{public}lu",
+                     header != NULL ? "valid" : "missing",
+                     (unsigned long)mmap_matches,
+                     (unsigned long)fcntl_matches);
         return false;
     }
-    original_fcntl = __fcntl;
     struct sigaction ignored = {0};
     struct sigaction prior = {0};
     ignored.sa_handler = SIG_IGN;
     sigemptyset(&ignored.sa_mask);
     (void)sigaction(SIGBUS, &ignored, &prior);
-    bool mmap_ready = write_absolute_jump(mmap_site, bypass_mmap);
+    bool mmap_ready = write_absolute_jump(mmap_site, bypass_mmap, "mmap");
     bool fcntl_ready =
-        mmap_ready && write_absolute_jump(fcntl_site, bypass_fcntl);
+        mmap_ready &&
+        write_absolute_jump(fcntl_site, bypass_fcntl, "fcntl");
     (void)sigaction(SIGBUS, &prior, NULL);
     installed = mmap_ready && fcntl_ready;
+    os_log_with_type(bypass_log(),
+                     installed ? OS_LOG_TYPE_DEFAULT : OS_LOG_TYPE_ERROR,
+                     "installation %{public}s mmapMatches=%{public}lu "
+                     "fcntlMatches=%{public}lu mmapTarget=%{public}s "
+                     "fcntlTarget=%{public}s",
+                     installed ? "succeeded" : "failed",
+                     (unsigned long)mmap_matches,
+                     (unsigned long)fcntl_matches,
+                     dyld_mmap ? "dyld" : "libsystem",
+                     dyld_fcntl ? "dyld" : "libsystem");
     return installed;
 }

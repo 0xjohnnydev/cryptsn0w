@@ -27,6 +27,7 @@ SILEO_UPSTREAM_PACKAGE_VERSION=2.5.1
 SILEO_PACKAGE_VERSION=2.5.1+codex1
 FORCE_CLEAN_INSTALL=${CODEX_FORCE_CLEAN_INSTALL:-0}
 BUILD_STAGE=${CODEX_CRYPTEX_STAGE:-final}
+HOST_SSH_AUTHORIZED_KEY=${CODEX_HOST_SSH_AUTHORIZED_KEY:-}
 MAX_CRYPTEX_IMAGE_BYTES=$((128 * 1024 * 1024))
 MAX_PREFERENCES_BRIDGE_BYTES=$((1024 * 1024))
 
@@ -67,6 +68,7 @@ EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/prefe
 EMBEDDED_OPENSSH_CLIENT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-client.deb"
 EMBEDDED_OPENSSH_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-server.deb"
 EMBEDDED_OPENSSH_SFTP_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-sftp-server.deb"
+EMBEDDED_HOST_SSH_AUTHORIZED_KEY="$IMAGE_ROOT/usr/local/share/codex-bootstrap/host-ssh-authorized-keys"
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
 SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
 SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
@@ -376,6 +378,17 @@ cp "$OPENSSH_SFTP_SERVER_DEB" "$EMBEDDED_OPENSSH_SFTP_SERVER_DEB"
 chmod 0644 "$EMBEDDED_OPENSSH_CLIENT_DEB" \
     "$EMBEDDED_OPENSSH_SERVER_DEB" \
     "$EMBEDDED_OPENSSH_SFTP_SERVER_DEB"
+if [[ -n "$HOST_SSH_AUTHORIZED_KEY" ]]; then
+    [[ -f "$HOST_SSH_AUTHORIZED_KEY" ]] || \
+        die "CODEX_HOST_SSH_AUTHORIZED_KEY is not a regular file"
+    [[ $(wc -l <"$HOST_SSH_AUTHORIZED_KEY") -eq 1 ]] || \
+        die "host SSH authorized key must contain exactly one key"
+    rg -q '^ssh-ed25519 [A-Za-z0-9+/]+={0,2}( .*)?$' \
+        "$HOST_SSH_AUTHORIZED_KEY" || \
+        die "host SSH authorized key is not an Ed25519 public key"
+    cp "$HOST_SSH_AUTHORIZED_KEY" "$EMBEDDED_HOST_SSH_AUTHORIZED_KEY"
+    chmod 0600 "$EMBEDDED_HOST_SSH_AUTHORIZED_KEY"
+fi
 
 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
 

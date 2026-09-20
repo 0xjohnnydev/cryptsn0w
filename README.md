@@ -87,15 +87,16 @@ Build and open the redsn0w-style SwiftUI front end with:
 
 ```sh
 make app
-open dist/SBInject.app
+open dist/CryptexSn0w.app
 ```
 
-The app uses the supplied running-pineapple image as both its logo and macOS
-application icon. Keep the app in `dist/` and it locates this repository
+CryptexSn0w uses the supplied running-pineapple image as both its logo and
+macOS application icon. Keep the app in `dist/` and it locates this repository
 automatically; a folder chooser is available if the app is moved. Connect and
-unlock one paired phone, then press **Jailbreak**. The app runs the exact same
-two-stage, no-reboot installer shown above and streams its progress and log in
-the window. An optional UDID field supports hosts with multiple devices.
+unlock a paired phone, choose it from the device selector, then press
+**Jailbreak**. The app runs the exact same two-stage, no-reboot installer shown
+above. Persistent root SSH is disabled by default and requires an explicit
+opt-in during installation before **Device > Open SSH Shell…** is available.
 
 The app requires Swift 6.2 or newer. `make app` produces an ad-hoc-signed
 native application and does not embed Apple device binaries or build output in
