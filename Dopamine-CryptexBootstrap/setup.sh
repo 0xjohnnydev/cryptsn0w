@@ -13,6 +13,7 @@ CRYPTEXCTL=/System/Library/SecurityResearch/usr/bin/cryptexctl.research
 ACTION=prepare
 DEVICE=
 NO_BREW=0
+ENABLE_HOST_SSH=0
 
 die() {
     print -u2 -- "error: $*"
@@ -32,6 +33,7 @@ Options:
   --build                   Prepare and build a matched Cryptex/Sileo pair
   --install                 Run the two-stage SSH pull and final install
   --device UDID             Select a connected paired device
+  --enable-host-ssh         Authorize this Mac's retained key for root SSH
   --no-brew                 Report missing Homebrew tools without installing
   -h, --help                Show this help
 
@@ -56,6 +58,9 @@ while (( $# > 0 )); do
             ;;
         --no-brew)
             NO_BREW=1
+            ;;
+        --enable-host-ssh)
+            ENABLE_HOST_SSH=1
             ;;
         -h|--help)
             usage
@@ -195,6 +200,7 @@ fi
 
 DEPLOY_ARGS=("$ACTION")
 [[ -z "$DEVICE" ]] || DEPLOY_ARGS+=(--device "$DEVICE")
+(( ENABLE_HOST_SSH == 0 )) || DEPLOY_ARGS+=(--enable-host-ssh)
 exec "$PROJECT_ROOT/.venv/bin/python" \
     "$UPSTREAM_DIR/CryptexBootstrap/deploy.py" \
     "${DEPLOY_ARGS[@]}"

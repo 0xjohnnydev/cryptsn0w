@@ -4,31 +4,29 @@ struct ContentView: View {
     @Bindable var model: InstallerModel
 
     var body: some View {
-        VStack(spacing: AppTheme.spacing) {
-            InstallerHeaderView(statusTitle: model.statusTitle)
-            DeviceOptionsView(model: model)
-            HStack(alignment: .top, spacing: AppTheme.spacing) {
-                ProgressStepsView(
-                    currentStep: model.currentStep,
-                    installState: model.state
-                )
-                InstallerLogView(lines: model.logLines)
+        ZStack {
+            CryptexBackgroundView()
+            VStack(spacing: 0) {
+                TitleStripView()
+                VStack(spacing: AppTheme.spacing) {
+                    DeviceInstallView(model: model)
+                    InstallStatusView(model: model)
+                    InstallerNoteView()
+                    Spacer(minLength: 0)
+                    BrandFooterView()
+                }
+                .padding(.horizontal, 26)
+                .padding(.top, 20)
+                .padding(.bottom, 16)
             }
-            InstallerActionView(model: model)
         }
-        .padding()
-        .background {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.87, green: 0.90, blue: 0.94),
-                    Color(red: 0.65, green: 0.72, blue: 0.80),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+        .frame(width: AppTheme.windowWidth, height: AppTheme.windowHeight)
+        .foregroundStyle(AppTheme.ink)
+        .preferredColorScheme(.light)
+        .task {
+            await model.refreshDevices()
         }
-        .alert("Installation Failed", isPresented: $model.isShowingError) {
+        .alert(model.errorTitle, isPresented: $model.isShowingError) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(model.errorMessage)

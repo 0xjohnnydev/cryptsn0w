@@ -522,7 +522,10 @@ def new_version() -> str:
     return f"1.0.{stamp}"
 
 
-def build_pair(version: str | None) -> dict[str, Any]:
+def build_pair(
+    version: str | None,
+    host_ssh_public_key: Path | None = None,
+) -> dict[str, Any]:
     require_layout()
     version = version or os.environ.get("CODEX_CRYPTEX_VERSION") or new_version()
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", version):
@@ -531,6 +534,12 @@ def build_pair(version: str | None) -> dict[str, Any]:
         )
     env = os.environ.copy()
     env["CODEX_CRYPTEX_VERSION"] = version
+    if host_ssh_public_key is not None:
+        if not host_ssh_public_key.is_file():
+            raise DeployError("host SSH public key is missing")
+        env["CODEX_HOST_SSH_AUTHORIZED_KEY"] = str(
+            host_ssh_public_key.resolve()
+        )
 
     note(f"Building fixed-trust Cryptex system Sileo version {version}")
     run([str(BUILD_SCRIPT)], env=env)
@@ -592,6 +601,7 @@ def finish_install(
     private_key: Path,
     base_version: str,
     stage_install: Path,
+    enable_host_ssh: bool,
 ) -> dict[str, Any]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
@@ -608,6 +618,11 @@ def resume_pair(run_dir: Path, device: dict[str, str]) -> dict[str, Any]:
     if run_dir.parent != runs_root:
         raise DeployError("resume run must be a direct child of out/runs")
     private_key = run_dir / "stage-key"
+    host_ssh_marker = run_dir / "host-ssh-enabled"
+    enable_host_ssh = (
+        host_ssh_marker.is_file()
+        and host_ssh_marker.read_text().strip() == "yes"
+    )
     stage_install = run_dir / "stage-install.json"
     stage_version = read_json(stage_install).get("installed", {}).get("version")
     if not private_key.is_file() or not isinstance(stage_version, str) or not (
@@ -616,7 +631,7 @@ def resume_pair(run_dir: Path, device: dict[str, str]) -> dict[str, Any]:
         raise DeployError("resume run has no installed SSH stage or private key")
     return finish_install(
         run_dir, device, private_key, stage_version.removesuffix(".1"),
-        stage_install,
+        stage_install, enable_host_ssh,
     )
 
 
@@ -629,6 +644,10 @@ def main() -> int:
         help="fresh numeric dot-separated version (generated automatically by default)",
     )
     parser.add_argument("--run", type=Path, help="interrupted out/runs directory")
+    parser.add_argument(
+        "--enable-host-ssh", action="store_true",
+        help="retain the run key and authorize it for root SSH on the device",
+    )
     args = parser.parse_args()
     if getattr(args, "action", None) in ("install", "resume"):
         raise DeployError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')

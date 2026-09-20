@@ -3,14 +3,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "SBInjectInstaller",
+    name: "CryptexSn0w",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "SBInjectInstaller", targets: ["SBInjectInstaller"]),
+        .executable(name: "CryptexSn0w", targets: ["CryptexSn0w"]),
     ],
     targets: [
         .executableTarget(
-            name: "SBInjectInstaller",
+            name: "CryptexSn0w",
             path: "Sources/SBInjectInstaller"
         ),
     ]

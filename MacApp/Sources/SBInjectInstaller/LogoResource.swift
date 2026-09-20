@@ -18,7 +18,7 @@ enum LogoResource {
         }
         return NSImage(
             systemSymbolName: "iphone.and.arrow.forward",
-            accessibilityDescription: "SBInject"
+            accessibilityDescription: "CryptexSn0w"
         ) ?? NSImage()
     }()
 }
