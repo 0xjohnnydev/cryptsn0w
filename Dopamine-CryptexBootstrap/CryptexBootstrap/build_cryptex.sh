@@ -10,6 +10,8 @@ BOOTSTRAP_SHA256=8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9c
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
 ELLEKIT_URL=https://ellekit.space/pool/ellekit_1.2_iphoneos-arm64.deb
 ELLEKIT_SHA256=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
+PREFERENCELOADER_URL=https://github.com/Yves000/preferenceloader/releases/download/2.3.3/preferenceloader_2.3.3_iphoneos-arm64.deb
+PREFERENCELOADER_SHA256=eaacb5204e13dee166cc44763566bbbd565fbf3cf1ecc25b1a2f432b6bee6f86
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
@@ -20,16 +22,20 @@ SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
 SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
 SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}
 FORCE_CLEAN_INSTALL=${CODEX_FORCE_CLEAN_INSTALL:-0}
+MAX_CRYPTEX_IMAGE_BYTES=$((128 * 1024 * 1024))
+MAX_PREFERENCES_BRIDGE_BYTES=$((1024 * 1024))
 
 CACHE_DIR="$SCRIPT_DIR/cache"
 WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
 BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
 ELLEKIT_DEB="$CACHE_DIR/ellekit_1.2_iphoneos-arm64.deb"
+PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.3.3_iphoneos-arm64.deb"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
 SBINJECT_APT_CONFIG="$SCRIPT_DIR/sbinject-package.conf"
+PREFERENCELOADER_PIN="$SCRIPT_DIR/preferenceloader.pref"
 APT_LIST_NORMALIZER="$SCRIPT_DIR/normalize_apt_lists.sh"
 ELLEKIT_KEY="$SCRIPT_DIR/keyrings/ellekit.asc"
 BIGBOSS_KEY="$SCRIPT_DIR/keyrings/bigboss.asc"
@@ -39,12 +45,14 @@ EMBEDDED_DEFAULT_SOURCES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/dopamine-d
 EMBEDDED_APT_CONFIG_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/apt"
 EMBEDDED_REPOSITORY_COMPAT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/99dopamine-repository-compat"
 EMBEDDED_SBINJECT_APT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/98sbinject-packages"
+EMBEDDED_PREFERENCELOADER_PIN="$EMBEDDED_APT_CONFIG_DIR/99preferenceloader"
 EMBEDDED_APT_LIST_NORMALIZER="$IMAGE_ROOT/usr/local/share/codex-bootstrap/normalize-apt-lists.sh"
 EMBEDDED_CLEAN_INSTALL_TOKEN="$IMAGE_ROOT/usr/local/share/codex-bootstrap/clean-install-token.txt"
 EMBEDDED_KEYRING_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/keyrings"
 EMBEDDED_ELLEKIT_KEY="$EMBEDDED_KEYRING_DIR/ellekit.gpg"
 EMBEDDED_BIGBOSS_KEY="$EMBEDDED_KEYRING_DIR/bigboss.gpg"
 EMBEDDED_ELLEKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ellekit.deb"
+EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/preferenceloader.deb"
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
@@ -70,7 +78,10 @@ EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
-SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v3.dylib"
+SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
+PREFERENCES_BRIDGE_SUPPORT_DIR="$SBINJECT_SOURCE_DIR/PreferenceBridgeSupport"
+PREFERENCES_BRIDGE_BUILD_DIRECTORY="$WORK_DIR/preferences-bridge-build"
 SBINJECT_JITTERD="$IMAGE_ROOT/usr/local/bin/sbinject-jitterd"
 SBINJECT_JITTERD_ENTITLEMENTS="$SBINJECT_SOURCE_DIR/jitterd-entitlements.plist"
 SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.jitterd.plist"
@@ -86,6 +97,15 @@ SPRINGBOARD_CANDIDATE_INFO="$SPRINGBOARD_CANDIDATE_DIRECTORY/Info.plist"
 SPRINGBOARD_CANDIDATE_ENTITLEMENTS="$SPRINGBOARD_CANDIDATE_DIRECTORY/entitlements.plist"
 SPRINGBOARD_CANDIDATE_MANIFEST="$SPRINGBOARD_CANDIDATE_DIRECTORY/build-manifest.json"
 SPRINGBOARD_CANDIDATE_GENERALHOOK="$SPRINGBOARD_CANDIDATE_DIRECTORY/g"
+PREFERENCES_CANDIDATE_SOURCE=${CODEX_PREFERENCES_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/Preferences.app/Preferences"}
+PREFERENCES_CANDIDATE_INFO_SOURCE=${CODEX_PREFERENCES_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/Preferences.app/Info.plist"}
+PREFERENCES_CANDIDATE_BUNDLE_SOURCE=${CODEX_PREFERENCES_CANDIDATE_BUNDLE_SOURCE:-${PREFERENCES_CANDIDATE_SOURCE:h}}
+PREFERENCES_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/Preferences.app"
+PREFERENCES_CANDIDATE="$PREFERENCES_CANDIDATE_DIRECTORY/notPreferences"
+PREFERENCES_CANDIDATE_INFO="$PREFERENCES_CANDIDATE_DIRECTORY/Info.plist"
+PREFERENCES_CANDIDATE_ENTITLEMENTS="$PREFERENCES_CANDIDATE_DIRECTORY/entitlements.plist"
+PREFERENCES_CANDIDATE_MANIFEST="$PREFERENCES_CANDIDATE_DIRECTORY/build-manifest.json"
+PREFERENCES_CANDIDATE_GENERALHOOK="$PREFERENCES_CANDIDATE_DIRECTORY/g"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
@@ -162,7 +182,7 @@ require_true_entitlement() {
         die "required entitlement $display_name is not true in ${plist:t}"
 }
 
-for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg security shasum tar xcrun zstd; do
+for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg security shasum stat tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 for plist in "$ELLEKIT_COMPAT_ENTITLEMENTS" "$EXEC_WORKER_ENTITLEMENTS"; do
@@ -195,6 +215,12 @@ require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
     die "missing pinned iPhone 13 SpringBoard Info.plist source"
 [[ -d "$SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE" ]] || \
     die "missing pinned iPhone 13 SpringBoard.app source"
+[[ -f "$PREFERENCES_CANDIDATE_SOURCE" ]] || \
+    die "missing pinned iPhone 13 Preferences source"
+[[ -f "$PREFERENCES_CANDIDATE_INFO_SOURCE" ]] || \
+    die "missing pinned iPhone 13 Preferences Info.plist source"
+[[ -d "$PREFERENCES_CANDIDATE_BUNDLE_SOURCE" ]] || \
+    die "missing pinned iPhone 13 Preferences.app source"
 [[ -x "$CUSTOMD_BUILDER" ]] || die "missing customd builder"
 [[ -x "$CUSTOMD_TRACE_REEXEC_BUILDER" ]] || \
     die "missing customd trace/re-exec builder"
@@ -215,14 +241,22 @@ verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
     die "missing Sileo maintainer-script compatibility patch"
 [[ -f "$SCRIPT_DIR/sbinject_package_validator.c" ]] || \
     die "missing SBInject package validator source"
+[[ -f "$PREFERENCELOADER_PIN" ]] || \
+    die "missing PreferenceLoader version pin"
 for source in \
     sbinject_protocol.h \
     litehook_rebind.h litehook_rebind.c \
     sbinject_launchdhook.c \
     sbinject_dyld_bypass.h sbinject_dyld_bypass.c \
-    sbinject_generalhook.c sbinject_jitterd.m; do
+    sbinject_generalhook.c sbinject_jitterd.m \
+    sbinject_preferences_bridge.m sbinject_preferences_bridge.swift; do
     [[ -f "$SBINJECT_SOURCE_DIR/$source" ]] || \
         die "missing supplied SBInject integration source: $source"
+done
+for source in PLHeap.h PLHeap.m PLSwiftMeta.h PLSwiftMeta.m \
+              PLSwiftString.swift LICENSE UPSTREAM.md; do
+    [[ -f "$PREFERENCES_BRIDGE_SUPPORT_DIR/$source" ]] || \
+        die "missing pinned PreferenceLoader bridge support: $source"
 done
 for plist in "$SBINJECT_JITTERD_ENTITLEMENTS" \
              "$SBINJECT_JITTERD_PLIST_SOURCE"; do
@@ -265,12 +299,15 @@ security find-identity -v -p codesigning | \
     die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
+fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
+    "$PREFERENCELOADER_DEB"
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
-    "$CUSTOMD_BUILD_DIRECTORY" "$UNSIGNED_OUT" "$REPACKED_SILEO" \
+    "$CUSTOMD_BUILD_DIRECTORY" "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
+    "$UNSIGNED_OUT" "$REPACKED_SILEO" \
     "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES"
 mkdir -p \
     "$IMAGE_ROOT/Library/LaunchDaemons" \
@@ -282,6 +319,7 @@ mkdir -p \
     "$EMBEDDED_APT_CONFIG_DIR" \
     "$EMBEDDED_KEYRING_DIR" \
     "$TRUSTED_ELLEKIT_ROOT" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
     "$PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
 
@@ -316,6 +354,13 @@ done
 dpkg-deb --root-owner-group -b "$ELLEKIT_PACKAGE_ROOT" \
     "$REPACKED_ELLEKIT" >/dev/null
 cp "$REPACKED_ELLEKIT" "$EMBEDDED_ELLEKIT_DEB"
+[[ "$(dpkg-deb -f "$PREFERENCELOADER_DEB" Package)" == preferenceloader && \
+   "$(dpkg-deb -f "$PREFERENCELOADER_DEB" Version)" == 2.3.3 && \
+   "$(dpkg-deb -f "$PREFERENCELOADER_DEB" Architecture)" == \
+       iphoneos-arm64 ]] || \
+    die "pinned PreferenceLoader package identity changed"
+cp "$PREFERENCELOADER_DEB" "$EMBEDDED_PREFERENCELOADER_DEB"
+chmod 0644 "$EMBEDDED_PREFERENCELOADER_DEB"
 dpkg-deb -x "$REPACKED_ELLEKIT" "$TRUSTED_ELLEKIT_ROOT"
 typeset -a trusted_ellekit_machos=(
     "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/lib/ellekit/MobileSafety.dylib"
@@ -343,7 +388,7 @@ xcrun --sdk iphoneos clang \
     -I "$SBINJECT_SOURCE_DIR" \
     "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -install_name /var/jb/usr/lib/sbinject/launchdhook.dylib \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook-v3.dylib \
     -o "$SBINJECT_LAUNCHDHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LAUNCHDHOOK"
@@ -353,15 +398,74 @@ xcrun --sdk iphoneos clang \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
     -dynamiclib \
+    -fobjc-arc -fblocks -x objective-c \
     -Os -Wall -Wextra -Werror \
     -I "$SBINJECT_SOURCE_DIR" \
     "$SBINJECT_SOURCE_DIR/sbinject_generalhook.c" \
     "$SBINJECT_SOURCE_DIR/sbinject_dyld_bypass.c" \
     -lsandbox \
+    -framework Foundation \
+    -framework UIKit \
     -install_name /var/jb/usr/lib/sbinject/generalhook.dylib \
     -o "$SBINJECT_GENERALHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_GENERALHOOK"
+
+# Build the iOS 27 SwiftUI Settings bridge as a small, fixed arm64e control
+# plane dylib. PreferenceLoader 2.3.3 still supplies libprefs and constructs the
+# legacy preference controllers; this bridge publishes those entries in
+# SettingsSidebarListState and routes selections to the existing controllers.
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -fobjc-arc -fblocks \
+    -Wall -Wextra -Werror \
+    -I "$PREFERENCES_BRIDGE_SUPPORT_DIR" \
+    -c "$SBINJECT_SOURCE_DIR/sbinject_preferences_bridge.m" \
+    -o "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/bridge.o"
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -fobjc-arc -fblocks \
+    -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    -c "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
+    -o "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/litehook_rebind.o"
+for source in PLHeap PLSwiftMeta; do
+    xcrun --sdk iphoneos clang \
+        -arch arm64e \
+        -miphoneos-version-min=17.0 \
+        -isysroot "$SDKROOT" \
+        -fobjc-arc -fblocks \
+        -Wall -Wextra -Werror \
+        -I "$PREFERENCES_BRIDGE_SUPPORT_DIR" \
+        -c "$PREFERENCES_BRIDGE_SUPPORT_DIR/${source}.m" \
+        -o "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/${source}.o"
+done
+xcrun --sdk iphoneos swiftc \
+    -target arm64e-apple-ios17.0 \
+    -sdk "$SDKROOT" \
+    -module-cache-path "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
+    -Osize \
+    -emit-library \
+    "$SBINJECT_SOURCE_DIR/sbinject_preferences_bridge.swift" \
+    "$PREFERENCES_BRIDGE_SUPPORT_DIR/PLSwiftString.swift" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/bridge.o" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/litehook_rebind.o" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/PLHeap.o" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/PLSwiftMeta.o" \
+    -Xlinker -framework -Xlinker UIKit \
+    -Xlinker -framework -Xlinker QuartzCore \
+    -Xlinker -install_name \
+    -Xlinker /var/jb/usr/lib/sbinject/preferences-bridge.dylib \
+    -o "$SBINJECT_PREFERENCES_BRIDGE"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_PREFERENCES_BRIDGE"
+(( $(stat -f %z "$SBINJECT_PREFERENCES_BRIDGE") <= \
+   MAX_PREFERENCES_BRIDGE_BYTES )) || \
+    die "iOS 27 Settings bridge exceeds its 1 MiB size ceiling"
 
 xcrun --sdk iphoneos clang \
     -arch arm64e \
@@ -378,6 +482,7 @@ codesign --force --sign - --timestamp=none --pagesize 4096 \
     --entitlements "$SBINJECT_JITTERD_ENTITLEMENTS" \
     "$SBINJECT_JITTERD"
 for artifact in "$SBINJECT_LAUNCHDHOOK" "$SBINJECT_GENERALHOOK" \
+                "$SBINJECT_PREFERENCES_BRIDGE" \
                 "$SBINJECT_JITTERD"; do
     codesign --verify --strict --all-architectures "$artifact" || \
         die "SBInject artifact signature is invalid: ${artifact:t}"
@@ -426,6 +531,51 @@ otool -L "$SPRINGBOARD_CANDIDATE" | rg -q \
    "$(sha256_of "$SBINJECT_GENERALHOOK")" ]] || \
     die "SpringBoard bundle generalhook changed while copying"
 
+# Build the Settings replacement through the same supplied SBInject pre-main
+# lane.  Preserve its exact on-device bundle and entitlement dictionary, add
+# only the target's debugger/JIT policy, preload the compact general hook, and
+# retain a separate launchd crash-loop fallback from SpringBoard.
+ditto --noqtn "$PREFERENCES_CANDIDATE_BUNDLE_SOURCE" \
+    "$PREFERENCES_CANDIDATE_DIRECTORY"
+rm -f "$PREFERENCES_CANDIDATE_DIRECTORY/Preferences"
+rm -rf "$PREFERENCES_CANDIDATE_DIRECTORY/_CodeSignature"
+cp "$SBINJECT_GENERALHOOK" "$PREFERENCES_CANDIDATE_GENERALHOOK"
+chmod 0755 "$PREFERENCES_CANDIDATE_GENERALHOOK"
+python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
+    "$PREFERENCES_CANDIDATE_SOURCE" \
+    "$PREFERENCES_CANDIDATE_DIRECTORY" \
+    --target preferences \
+    --info-plist "$PREFERENCES_CANDIDATE_INFO_SOURCE" \
+    --executable-name notPreferences \
+    --bundle-executable notPreferences \
+    --load-dylib @loader_path/g \
+    --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
+[[ -x "$PREFERENCES_CANDIDATE" ]] || \
+    die "Preferences candidate was not produced"
+[[ -f "$PREFERENCES_CANDIDATE_INFO" ]] || \
+    die "Preferences candidate Info.plist was not produced"
+[[ -f "$PREFERENCES_CANDIDATE_ENTITLEMENTS" ]] || \
+    die "Preferences candidate entitlements were not produced"
+[[ -f "$PREFERENCES_CANDIDATE_MANIFEST" ]] || \
+    die "Preferences candidate manifest was not produced"
+[[ -x "$PREFERENCES_CANDIDATE_GENERALHOOK" ]] || \
+    die "Preferences candidate generalhook was not produced"
+codesign --verify --strict --all-architectures --ignore-resources \
+    "$PREFERENCES_CANDIDATE" || \
+    die "Preferences candidate signature is invalid"
+otool -L "$PREFERENCES_CANDIDATE" | rg -q \
+    '^\s+@loader_path/g ' || \
+    die "Preferences candidate does not preload the SBInject generalhook"
+ldid -e "$PREFERENCES_CANDIDATE" | rg -q \
+    '<key>com.apple.private.debugger</key>' || \
+    die "Preferences candidate lacks com.apple.private.debugger"
+ldid -e "$PREFERENCES_CANDIDATE" | rg -q \
+    '<key>get-task-allow</key>' || \
+    die "Preferences candidate lacks get-task-allow"
+[[ "$(sha256_of "$PREFERENCES_CANDIDATE_GENERALHOOK")" == \
+   "$(sha256_of "$SBINJECT_GENERALHOOK")" ]] || \
+    die "Preferences bundle generalhook changed while copying"
+
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
 [[ -d "$WORK_DIR/var/jb" ]] || die "archive did not extract var/jb"
@@ -460,6 +610,43 @@ APP_DIR="$PACKAGE_ROOT/var/jb/Applications/Sileo.app"
 plutil -replace CFBundleIdentifier -string "$SILEO_BUNDLE_IDENTIFIER" \
     "$APP_DIR/Info.plist"
 
+# Prepare the exact provisioned Sileo payload before constructing the Cryptex
+# trust cache.  The IPA packager recognizes this finalized layout and copies it
+# byte-for-byte, so fixed trust covers the code that MobileInstallation runs,
+# not the pre-rpath package binary.
+FRAMEWORKS_DIR="$APP_DIR/F"
+PROCURSUS_LIB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib"
+for library in libiosexec.1.dylib liblzma.5.dylib libzstd.1.5.5.dylib; do
+    [[ -f "$PROCURSUS_LIB/$library" ]] || \
+        die "missing Procursus runtime library: $PROCURSUS_LIB/$library"
+done
+mkdir -p "$FRAMEWORKS_DIR"
+cp "$PROCURSUS_LIB/libiosexec.1.dylib" \
+    "$FRAMEWORKS_DIR/libiosexec.1.dylib"
+cp "$PROCURSUS_LIB/liblzma.5.dylib" \
+    "$FRAMEWORKS_DIR/liblzma.5.dylib"
+cp "$PROCURSUS_LIB/libzstd.1.5.5.dylib" \
+    "$FRAMEWORKS_DIR/libzstd.real.dylib"
+install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
+install_name_tool -id @rpath/libzstd.real.dylib \
+    "$FRAMEWORKS_DIR/libzstd.real.dylib"
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fblocks \
+    -Wall -Wextra -Werror \
+    -lsandbox \
+    -Wl,-install_name,@rpath/libzstd.1.dylib \
+    -Wl,-reexport_library,"$FRAMEWORKS_DIR/libzstd.real.dylib" \
+    "$SCRIPT_DIR/sileo_broker_constructor.c" \
+    -o "$FRAMEWORKS_DIR/libzstd.1.dylib"
+for library in "$FRAMEWORKS_DIR"/*.dylib; do
+    codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
+        --pagesize 4096 "$library"
+done
+
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
@@ -467,8 +654,6 @@ xcrun --sdk iphoneos clang \
     -Wall -Wextra -Werror \
     "$SCRIPT_DIR/sileo_root_helper.c" \
     -o "$APP_DIR/giveMeRoot"
-codesign --force --deep --sign - --timestamp=none --pagesize 4096 \
-    --preserve-metadata=identifier,entitlements "$APP_DIR"
 codesign --force --sign "$SILEO_DEVELOPMENT_IDENTITY" --timestamp=none \
     --pagesize 4096 "$APP_DIR/giveMeRoot"
 chmod 0755 "$APP_DIR/giveMeRoot"
@@ -484,15 +669,42 @@ ldid -e "$APP_DIR/Sileo" | rg -q \
     -F -- "<string>$SILEO_APPLICATION_IDENTIFIER</string>" || \
     die "Sileo development application identifier is missing"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+otool -l "$APP_DIR/Sileo" | rg -q 'path @loader_path/F' || \
+    die "final Sileo app is missing its bundled-library rpath"
+otool -L "$FRAMEWORKS_DIR/libzstd.1.dylib" | \
+    rg -q '@rpath/libzstd.real.dylib' || \
+    die "final Sileo constructor does not re-export bundled zstd"
 dpkg-deb -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null
 cp "$REPACKED_SILEO" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/sileo.deb"
 # cryptexctl does not recurse into a Debian archive when it constructs the
-# trust cache. Keep an exact extracted copy so the helper and rootless package
-# executables are represented; the provisioned app's main executable remains
-# untouched in its MobileInstallation container.
-ditto --noqtn "$APP_DIR" \
-    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/Sileo.app"
+# trust cache. Keep the exact finalized executable subset that the provisioned
+# app will install, including the constructor and its bundled runtime.
+TRUSTED_SILEO_APP="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/Sileo.app"
+mkdir -p "$TRUSTED_SILEO_APP/F"
+cp -p "$APP_DIR/Sileo" "$APP_DIR/giveMeRoot" "$TRUSTED_SILEO_APP/"
+cp -p "$FRAMEWORKS_DIR"/*.dylib "$TRUSTED_SILEO_APP/F/"
+typeset -a prepared_sileo_machos=(
+    "$APP_DIR/Sileo"
+    "$APP_DIR/giveMeRoot"
+    "$FRAMEWORKS_DIR/libiosexec.1.dylib"
+    "$FRAMEWORKS_DIR/liblzma.5.dylib"
+    "$FRAMEWORKS_DIR/libzstd.1.dylib"
+    "$FRAMEWORKS_DIR/libzstd.real.dylib"
+)
+typeset -a trusted_sileo_machos=(
+    "$TRUSTED_SILEO_APP/Sileo"
+    "$TRUSTED_SILEO_APP/giveMeRoot"
+    "$TRUSTED_SILEO_APP/F/libiosexec.1.dylib"
+    "$TRUSTED_SILEO_APP/F/liblzma.5.dylib"
+    "$TRUSTED_SILEO_APP/F/libzstd.1.dylib"
+    "$TRUSTED_SILEO_APP/F/libzstd.real.dylib"
+)
+for (( index = 1; index <= ${#prepared_sileo_machos}; ++index )); do
+    [[ "$(sha256_of "${prepared_sileo_machos[$index]}")" == \
+       "$(sha256_of "${trusted_sileo_machos[$index]}")" ]] || \
+        die "trusted Sileo payload changed while copying"
+done
 
 python3 "$SCRIPT_DIR/patch_opainject_dyld.py" \
     "$OPAINJECT_DIR/dyld.m" "$PATCHED_OPAINJECT_DYLD"
@@ -630,10 +842,14 @@ for candidate in \
     "$CUSTOMD_SETEXEC_EXECUTABLE" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_PREFERENCES_BRIDGE" \
     "$SBINJECT_LAUNCHDHOOK" \
     "$SBINJECT_JITTERD" \
     "$SPRINGBOARD_CANDIDATE_GENERALHOOK" \
     "$SPRINGBOARD_CANDIDATE" \
+    "$PREFERENCES_CANDIDATE_GENERALHOOK" \
+    "$PREFERENCES_CANDIDATE" \
+    "${prepared_sileo_machos[@]}" \
     "${trusted_ellekit_machos[@]}"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
@@ -667,10 +883,12 @@ cp "$DEFAULT_SOURCES" \
 cp "$REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG"
 cp "$SBINJECT_APT_CONFIG" "$EMBEDDED_SBINJECT_APT_CONFIG"
+cp "$PREFERENCELOADER_PIN" "$EMBEDDED_PREFERENCELOADER_PIN"
 cp "$APT_LIST_NORMALIZER" "$EMBEDDED_APT_LIST_NORMALIZER"
 chmod 0644 "$EMBEDDED_DEFAULT_SOURCES" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_SBINJECT_APT_CONFIG" \
+    "$EMBEDDED_PREFERENCELOADER_PIN" \
     "$EMBEDDED_APT_LIST_NORMALIZER"
 if [[ "$FORCE_CLEAN_INSTALL" == 1 ]]; then
     print -r -- "$VERSION" >"$EMBEDDED_CLEAN_INSTALL_TOKEN"

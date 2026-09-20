@@ -53,7 +53,14 @@ SUPPORTED_TARGETS = (
         "sileoBundleIdentifier": "com.johnnyfranks.codex.profilebootstrap12mini",
     },
 )
-APP_HELPER_MEMBER = "Payload/Sileo.app/giveMeRoot"
+SILEO_TRUSTED_EXECUTABLES = (
+    "Sileo",
+    "giveMeRoot",
+    "F/libiosexec.1.dylib",
+    "F/liblzma.5.dylib",
+    "F/libzstd.1.dylib",
+    "F/libzstd.real.dylib",
+)
 
 
 class DeployError(RuntimeError):
@@ -323,14 +330,13 @@ def new_version() -> str:
     return f"1.0.{stamp}"
 
 
-def helper_from_ipa(ipa: Path) -> bytes:
+def app_member_from_ipa(ipa: Path, relative_path: str) -> bytes:
+    member = f"Payload/Sileo.app/{relative_path}"
     with zipfile.ZipFile(ipa) as archive:
-        matches = [
-            info for info in archive.infolist() if info.filename == APP_HELPER_MEMBER
-        ]
+        matches = [info for info in archive.infolist() if info.filename == member]
         if len(matches) != 1:
             raise DeployError(
-                f"expected one {APP_HELPER_MEMBER} in {ipa}, found {len(matches)}"
+                f"expected one {member} in {ipa}, found {len(matches)}"
             )
         return archive.read(matches[0])
 
@@ -366,7 +372,7 @@ def build_pair(version: str | None) -> dict[str, Any]:
     if app_summary.get("cryptexBuildSummarySha256") != sha256_file(BUILD_SUMMARY):
         raise DeployError("Sileo build summary is not paired to this build summary")
 
-    source_helper = (
+    source_app = (
         SCRIPT_DIR
         / "work"
         / "sileo-package"
@@ -374,9 +380,8 @@ def build_pair(version: str | None) -> dict[str, Any]:
         / "jb"
         / "Applications"
         / "Sileo.app"
-        / "giveMeRoot"
     )
-    trusted_helper = (
+    trusted_app = (
         SCRIPT_DIR
         / "work"
         / "image-root"
@@ -386,18 +391,25 @@ def build_pair(version: str | None) -> dict[str, Any]:
         / "codex-bootstrap"
         / "trusted"
         / "Sileo.app"
-        / "giveMeRoot"
     )
+    executable_copies: dict[str, dict[str, str]] = {}
+    for relative_path in SILEO_TRUSTED_EXECUTABLES:
+        hashes = {
+            "workingCopy": sha256_file(source_app / relative_path),
+            "cryptexCopy": sha256_file(trusted_app / relative_path),
+            "ipaCopy": sha256_bytes(app_member_from_ipa(ipa, relative_path)),
+        }
+        if len(set(hashes.values())) != 1:
+            raise DeployError(
+                "the Cryptex and provisioned app differ for Sileo executable "
+                + relative_path
+            )
+        executable_copies[relative_path] = hashes
+
     expected = app_summary.get("rootHelperSha256")
-    hashes = {
-        "workingCopy": sha256_file(source_helper),
-        "cryptexCopy": sha256_file(trusted_helper),
-        "ipaCopy": sha256_bytes(helper_from_ipa(ipa)),
-    }
-    if not isinstance(expected, str) or set(hashes.values()) != {expected}:
-        raise DeployError(
-            "the Cryptex and provisioned app do not contain the exact same root helper"
-        )
+    helper_hashes = executable_copies["giveMeRoot"]
+    if not isinstance(expected, str) or set(helper_hashes.values()) != {expected}:
+        raise DeployError("Sileo's root helper does not match its build summary")
 
     result = {
         "identifier": build_summary["identifier"],
@@ -408,7 +420,8 @@ def build_pair(version: str | None) -> dict[str, Any]:
         "ipaSha256": sha256_file(ipa),
         "appSummary": str(app_summary_path.resolve()),
         "rootHelperSha256": expected,
-        "rootHelperCopies": hashes,
+        "rootHelperCopies": helper_hashes,
+        "sileoFixedTrustCopies": executable_copies,
     }
     note("Matched build verification passed")
     print(json.dumps(result, indent=2, sort_keys=True))

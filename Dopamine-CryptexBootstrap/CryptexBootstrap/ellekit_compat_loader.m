@@ -32,7 +32,7 @@ extern int posix_spawnattr_set_ptrauth_task_port_np(
 static const char *const kDefaultDylib =
     "/var/jb/usr/lib/ellekit/libinjector.dylib";
 static const char *const kSBInjectLaunchdHook =
-    "/var/jb/usr/lib/sbinject/launchdhook.dylib";
+    "/var/jb/usr/lib/sbinject/launchdhook-v3.dylib";
 static const char *const kPtrauthChild = "--ptrauth-child";
 static const char *const kInspectPid = "--inspect-pid";
 static const char *const kPreflightPid = "--preflight-pid";

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
-from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
+from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 # [REDACTED] Related personalization helper imports omitted.
 # [REDACTED] Related personalization helper imports omitted.
 from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
@@ -92,13 +92,25 @@ def _validate_bundle(
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-async def _open_rsd(args: argparse.Namespace) -> Any:
+async def _open_rsd(args: argparse.Namespace) -> tuple[Any, Any | None]:
     if args.tunneld:
         rsd = await get_tunneld_device_by_udid(args.udid)
         if rsd is None:
             raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
-        return rsd
-    return await establish_userspace_rsd(serial=args.udid)
+        return rsd, None
+    tunnel = UserspaceRsdTunnel(serial=args.udid, autopair=True)
+    try:
+        return await tunnel.aopen(), tunnel
+    except Exception:
+        await tunnel.aclose()
+        raise
+
+
+async def _close_rsd(rsd: Any, owner: Any | None) -> None:
+    if owner is not None:
+        await owner.aclose()
+    else:
+        await rsd.close()
 
 
 async def _install(args: argparse.Namespace) -> dict[str, Any]:

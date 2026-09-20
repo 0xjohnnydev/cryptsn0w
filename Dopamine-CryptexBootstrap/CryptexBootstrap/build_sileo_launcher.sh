@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR=${0:A:h}
 SOURCE_APP=${CODEX_SILEO_SOURCE_APP:-$SCRIPT_DIR/work/sileo-package/var/jb/Applications/Sileo.app}
+MATCHED_ROOT_HELPER=${CODEX_SILEO_ROOT_HELPER:-$SCRIPT_DIR/work/sileo-package/var/jb/Applications/Sileo.app/giveMeRoot}
 PROCURSUS_LIB=${CODEX_PROCURSUS_LIB:-$SCRIPT_DIR/work/image-root/usr/local/share/codex-bootstrap/procursus/usr/lib}
 DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
 PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
@@ -29,11 +30,13 @@ print(value)
 PY
 }
 
-for tool in awk codesign ditto file install_name_tool ldid otool plutil python3 rg security shasum tr xcrun; do
+for tool in awk cmp codesign ditto file install_name_tool ldid otool plutil python3 rg security shasum tr xcrun; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 [[ -d "$SOURCE_APP" && -x "$SOURCE_APP/Sileo" ]] || \
     die "missing built Sileo app: $SOURCE_APP"
+[[ -x "$MATCHED_ROOT_HELPER" ]] || \
+    die "missing matched Cryptex root helper: $MATCHED_ROOT_HELPER"
 for library in libiosexec.1.dylib liblzma.5.dylib libzstd.1.5.5.dylib; do
     [[ -f "$PROCURSUS_LIB/$library" ]] || \
         die "missing Procursus runtime library: $PROCURSUS_LIB/$library"
@@ -75,38 +78,61 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$PAYLOAD_DIR" "${OUTPUT_IPA:h}"
 ditto --noqtn "$SOURCE_APP" "$APP_DIR"
-cp "$PROVISIONING_PROFILE" "$APP_DIR/embedded.mobileprovision"
-mkdir -p "$FRAMEWORKS_DIR"
-cp "$PROCURSUS_LIB/libiosexec.1.dylib" \
-    "$FRAMEWORKS_DIR/libiosexec.1.dylib"
-cp "$PROCURSUS_LIB/liblzma.5.dylib" \
-    "$FRAMEWORKS_DIR/liblzma.5.dylib"
-cp "$PROCURSUS_LIB/libzstd.1.5.5.dylib" \
-    "$FRAMEWORKS_DIR/libzstd.real.dylib"
-install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
-install_name_tool -id @rpath/libzstd.real.dylib \
-    "$FRAMEWORKS_DIR/libzstd.real.dylib"
+PREPARED_APP=0
+if [[ -x "$APP_DIR/giveMeRoot" && \
+      -f "$APP_DIR/embedded.mobileprovision" && \
+      -f "$FRAMEWORKS_DIR/libiosexec.1.dylib" && \
+      -f "$FRAMEWORKS_DIR/liblzma.5.dylib" && \
+      -f "$FRAMEWORKS_DIR/libzstd.1.dylib" && \
+      -f "$FRAMEWORKS_DIR/libzstd.real.dylib" ]] && \
+   otool -l "$APP_DIR/Sileo" | rg -q 'path @loader_path/F' && \
+   otool -L "$FRAMEWORKS_DIR/libzstd.1.dylib" | \
+       rg -q '@rpath/libzstd.real.dylib'; then
+    PREPARED_APP=1
+fi
 
-SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
-xcrun --sdk iphoneos clang \
-    -arch arm64 \
-    -miphoneos-version-min=17.0 \
-    -isysroot "$SDKROOT" \
-    -dynamiclib \
-    -fblocks \
-    -Wall -Wextra -Werror \
-    -lsandbox \
-    -Wl,-install_name,@rpath/libzstd.1.dylib \
-    -Wl,-reexport_library,"$FRAMEWORKS_DIR/libzstd.real.dylib" \
-    "$SCRIPT_DIR/sileo_broker_constructor.c" \
-    -o "$FRAMEWORKS_DIR/libzstd.1.dylib"
-for library in "$FRAMEWORKS_DIR"/*.dylib; do
+if (( PREPARED_APP )); then
+    cmp -s "$MATCHED_ROOT_HELPER" "$APP_DIR/giveMeRoot" || \
+        die "prepared Sileo helper differs from the matched Cryptex helper"
+    cmp -s "$PROVISIONING_PROFILE" "$APP_DIR/embedded.mobileprovision" || \
+        die "prepared Sileo profile differs from the matched signing profile"
+    codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+else
+    cp "$MATCHED_ROOT_HELPER" "$APP_DIR/giveMeRoot"
+    chmod 0755 "$APP_DIR/giveMeRoot"
+    cp "$PROVISIONING_PROFILE" "$APP_DIR/embedded.mobileprovision"
+    mkdir -p "$FRAMEWORKS_DIR"
+    cp "$PROCURSUS_LIB/libiosexec.1.dylib" \
+        "$FRAMEWORKS_DIR/libiosexec.1.dylib"
+    cp "$PROCURSUS_LIB/liblzma.5.dylib" \
+        "$FRAMEWORKS_DIR/liblzma.5.dylib"
+    cp "$PROCURSUS_LIB/libzstd.1.5.5.dylib" \
+        "$FRAMEWORKS_DIR/libzstd.real.dylib"
+    install_name_tool -rpath /opt/procursus/lib @loader_path/F "$APP_DIR/Sileo"
+    install_name_tool -id @rpath/libzstd.real.dylib \
+        "$FRAMEWORKS_DIR/libzstd.real.dylib"
+
+    SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+    xcrun --sdk iphoneos clang \
+        -arch arm64 \
+        -miphoneos-version-min=17.0 \
+        -isysroot "$SDKROOT" \
+        -dynamiclib \
+        -fblocks \
+        -Wall -Wextra -Werror \
+        -lsandbox \
+        -Wl,-install_name,@rpath/libzstd.1.dylib \
+        -Wl,-reexport_library,"$FRAMEWORKS_DIR/libzstd.real.dylib" \
+        "$SCRIPT_DIR/sileo_broker_constructor.c" \
+        -o "$FRAMEWORKS_DIR/libzstd.1.dylib"
+    for library in "$FRAMEWORKS_DIR"/*.dylib; do
+        codesign --force --sign "$DEVELOPMENT_IDENTITY" --timestamp=none \
+            --pagesize 4096 "$library"
+    done
     codesign --force --sign "$DEVELOPMENT_IDENTITY" --timestamp=none \
-        --pagesize 4096 "$library"
-done
-codesign --force --sign "$DEVELOPMENT_IDENTITY" --timestamp=none \
-    --pagesize 4096 --entitlements "$ENTITLEMENTS" "$APP_DIR"
-codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+        --pagesize 4096 --entitlements "$ENTITLEMENTS" "$APP_DIR"
+    codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+fi
 
 otool -l "$APP_DIR/Sileo" | rg -q 'path @loader_path/F'
 otool -L "$FRAMEWORKS_DIR/libzstd.1.dylib" | \

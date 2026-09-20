@@ -31,6 +31,8 @@ static int (*original_posix_spawnp)(pid_t *, const char *,
 static pthread_mutex_t g_redirect_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_window_started;
 static unsigned int g_window_launches;
+static uint64_t g_preferences_window_started;
+static unsigned int g_preferences_window_launches;
 
 static void hook_log(const char *format, ...) {
     int descriptor = open(CODEX_SBINJECT_LOG,
@@ -64,17 +66,61 @@ static bool safe_root_file(const char *path, bool executable) {
            (!executable || (status.st_mode & S_IXUSR) != 0);
 }
 
-static bool marker_is_enabled(void) {
+static bool marker_is_enabled(const char *path) {
     struct stat status;
-    return lstat(CODEX_SBINJECT_ENABLE_MARKER, &status) == 0 &&
+    return lstat(path, &status) == 0 &&
            S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
            status.st_nlink == 1 && status.st_uid == 0 && status.st_gid == 0 &&
            status.st_size == 0 && (status.st_mode & 07777) == 0644;
 }
 
-static void disable_redirect(const char *reason) {
-    (void)unlink(CODEX_SBINJECT_ENABLE_MARKER);
-    int marker = open(CODEX_SBINJECT_CRASH_MARKER,
+static bool tweak_safe_mode_active(void) {
+    struct stat status;
+    return lstat(CODEX_SBINJECT_SAFE_MODE_MARKER, &status) == 0 &&
+           S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
+           status.st_nlink == 1 &&
+           (status.st_uid == 0 || status.st_uid == 501) &&
+           status.st_size > 0 && status.st_size <= 4096 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static void reset_springboard_redirect_window(uint64_t seconds) {
+    pthread_mutex_lock(&g_redirect_lock);
+    g_window_started = seconds;
+    g_window_launches = 0;
+    pthread_mutex_unlock(&g_redirect_lock);
+}
+
+static bool enter_tweak_safe_mode(const char *reason) {
+    int marker = open(CODEX_SBINJECT_SAFE_MODE_MARKER,
+                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                      0600);
+    if (marker < 0) {
+        return false;
+    }
+    const char *prefix = "tweak=Unknown tweak\nreason=";
+    bool wrote = write(marker, prefix, strlen(prefix)) == (ssize_t)strlen(prefix) &&
+                 write(marker, reason, strlen(reason)) == (ssize_t)strlen(reason) &&
+                 write(marker, "\n", 1) == 1 && fchown(marker, 501, 501) == 0 &&
+                 fchmod(marker, 0600) == 0 && fsync(marker) == 0;
+    close(marker);
+    if (!wrote) {
+        (void)unlink(CODEX_SBINJECT_SAFE_MODE_MARKER);
+        return false;
+    }
+    hook_log("tweak safe mode armed culprit=Unknown tweak reason=%s", reason);
+    return true;
+}
+
+static void disable_redirect(bool preferences, const char *reason) {
+    const char *enable_marker = preferences
+                                    ? CODEX_SBINJECT_PREFERENCES_ENABLE_MARKER
+                                    : CODEX_SBINJECT_ENABLE_MARKER;
+    const char *crash_marker = preferences
+                                   ? CODEX_SBINJECT_PREFERENCES_CRASH_MARKER
+                                   : CODEX_SBINJECT_CRASH_MARKER;
+    (void)unlink(enable_marker);
+    int marker = open(crash_marker,
                       O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
                       0600);
     if (marker >= 0) {
@@ -82,7 +128,8 @@ static void disable_redirect(const char *reason) {
         (void)write(marker, "\n", 1);
         close(marker);
     }
-    hook_log("launchd redirect disabled reason=%s", reason);
+    hook_log("launchd redirect disabled target=%s reason=%s",
+             preferences ? "Preferences" : "SpringBoard", reason);
 }
 
 static bool publish_ready_marker(void) {
@@ -101,37 +148,81 @@ static bool publish_ready_marker(void) {
     return ready;
 }
 
-static bool reserve_redirect_attempt(void) {
+static bool reserve_redirect_attempt(bool preferences) {
     struct timespec now = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         return false;
     }
     pthread_mutex_lock(&g_redirect_lock);
     uint64_t seconds = (uint64_t)now.tv_sec;
-    if (g_window_started == 0 || seconds < g_window_started ||
-        seconds - g_window_started > 60U) {
-        g_window_started = seconds;
-        g_window_launches = 0;
+    uint64_t *window_started = preferences ? &g_preferences_window_started
+                                           : &g_window_started;
+    unsigned int *window_launches =
+        preferences ? &g_preferences_window_launches : &g_window_launches;
+    if (*window_started == 0 || seconds < *window_started ||
+        seconds - *window_started > 60U) {
+        *window_started = seconds;
+        *window_launches = 0;
     }
-    bool allowed = g_window_launches < 3U;
+    bool allowed = *window_launches < 3U;
     if (allowed) {
-        ++g_window_launches;
+        ++*window_launches;
     }
     pthread_mutex_unlock(&g_redirect_lock);
     if (!allowed) {
-        disable_redirect("three SpringBoard launches in sixty seconds");
+        const char *reason = preferences
+            ? "three Preferences launches in sixty seconds"
+            : "three SpringBoard launches in sixty seconds";
+        if (preferences) {
+            disable_redirect(true, reason);
+        } else if (enter_tweak_safe_mode(reason)) {
+            reset_springboard_redirect_window(seconds);
+            allowed = true;
+        } else {
+            disable_redirect(false, reason);
+        }
     }
     return allowed;
 }
 
-static bool should_redirect(const char *path) {
-    return path != NULL &&
-           strcmp(path, CODEX_SBINJECT_STOCK_SPRINGBOARD) == 0 &&
-           access("/var/mobile/.eksafemode", F_OK) != 0 &&
-           marker_is_enabled() &&
-           safe_root_file(CODEX_SBINJECT_SPRINGBOARD, true) &&
-           safe_root_file(CODEX_SBINJECT_BUNDLE_HOOK, true) &&
-           reserve_redirect_attempt();
+static const char *redirect_candidate(const char *path,
+                                      bool *preferences_out) {
+    if (preferences_out != NULL) {
+        *preferences_out = false;
+    }
+    if (path == NULL) {
+        return NULL;
+    }
+    bool safe_mode = tweak_safe_mode_active();
+    if (!safe_mode &&
+        access(CODEX_SBINJECT_ELLEKIT_SAFE_MODE_MARKER, F_OK) == 0) {
+        (void)enter_tweak_safe_mode("ElleKit reported a SpringBoard crash");
+        safe_mode = true;
+    }
+    if (safe_mode) {
+        struct timespec now = {0};
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            reset_springboard_redirect_window((uint64_t)now.tv_sec);
+        }
+    }
+    if (strcmp(path, CODEX_SBINJECT_STOCK_SPRINGBOARD) == 0 &&
+        marker_is_enabled(CODEX_SBINJECT_ENABLE_MARKER) &&
+        safe_root_file(CODEX_SBINJECT_SPRINGBOARD, true) &&
+        safe_root_file(CODEX_SBINJECT_BUNDLE_HOOK, true) &&
+        (safe_mode || reserve_redirect_attempt(false))) {
+        return CODEX_SBINJECT_SPRINGBOARD;
+    }
+    if (strcmp(path, CODEX_SBINJECT_STOCK_PREFERENCES) == 0 &&
+        marker_is_enabled(CODEX_SBINJECT_PREFERENCES_ENABLE_MARKER) &&
+        safe_root_file(CODEX_SBINJECT_PREFERENCES, true) &&
+        safe_root_file(CODEX_SBINJECT_PREFERENCES_HOOK, true) &&
+        reserve_redirect_attempt(true)) {
+        if (preferences_out != NULL) {
+            *preferences_out = true;
+        }
+        return CODEX_SBINJECT_PREFERENCES;
+    }
+    return NULL;
 }
 
 static int spawn_redirected(
@@ -144,7 +235,9 @@ static int spawn_redirected(
                           const posix_spawnattr_t *, char *const[],
                           char *const[]) =
         search_path ? original_posix_spawnp : original_posix_spawn;
-    if (!should_redirect(path)) {
+    bool preferences = false;
+    const char *redirected_path = redirect_candidate(path, &preferences);
+    if (redirected_path == NULL) {
         return implementation(pid, path, file_actions, attributes, arguments,
                               environment);
     }
@@ -153,15 +246,16 @@ static int spawn_redirected(
     char *saved_argument_zero =
         mutable_arguments != NULL ? mutable_arguments[0] : NULL;
     if (arguments != NULL) {
-        mutable_arguments[0] = (char *)CODEX_SBINJECT_SPRINGBOARD;
+        mutable_arguments[0] = (char *)redirected_path;
     }
     if (attributes != NULL) {
         (void)posix_spawnattr_set_launch_type_np(
             (posix_spawnattr_t *)attributes, 0);
     }
-    hook_log("redirecting SpringBoard to %s", CODEX_SBINJECT_SPRINGBOARD);
-    int result = implementation(pid, CODEX_SBINJECT_SPRINGBOARD, file_actions,
-                                attributes, arguments, environment);
+    hook_log("redirecting %s to %s",
+             preferences ? "Preferences" : "SpringBoard", redirected_path);
+    int result = implementation(pid, redirected_path, file_actions, attributes,
+                                arguments, environment);
     if (arguments != NULL) {
         mutable_arguments[0] = saved_argument_zero;
     }
@@ -169,9 +263,9 @@ static int spawn_redirected(
         return 0;
     }
 
-    hook_log("redirected SpringBoard spawn failed error=%d; using stock",
-             result);
-    disable_redirect("redirected posix_spawn failed");
+    hook_log("redirected %s spawn failed error=%d; using stock",
+             preferences ? "Preferences" : "SpringBoard", result);
+    disable_redirect(preferences, "redirected posix_spawn failed");
     return implementation(pid, path, file_actions, attributes, arguments,
                           environment);
 }
@@ -195,6 +289,17 @@ static int hooked_posix_spawnp(
 }
 
 __attribute__((constructor)) static void initialize_launchd_hook(void) {
+    void *previous = dlopen(CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK,
+                            RTLD_LAZY | RTLD_NOLOAD);
+    if (previous != NULL) {
+        bool published = publish_ready_marker();
+        hook_log("launchd hook delegated to live previous image=%s "
+                 "published=%s",
+                 CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK,
+                 published ? "true" : "false");
+        dlclose(previous);
+        return;
+    }
     original_posix_spawn = dlsym(RTLD_DEFAULT, "posix_spawn");
     original_posix_spawnp = dlsym(RTLD_DEFAULT, "posix_spawnp");
     if (original_posix_spawn == NULL || original_posix_spawnp == NULL) {
@@ -203,10 +308,14 @@ __attribute__((constructor)) static void initialize_launchd_hook(void) {
     }
     const struct mach_header_64 *header =
         (const struct mach_header_64 *)_dyld_get_image_header(0);
-    litehook_rebind_result_t spawn = litehook_rebind_symbol(
-        header, original_posix_spawn, hooked_posix_spawn);
-    litehook_rebind_result_t spawnp = litehook_rebind_symbol(
-        header, original_posix_spawnp, hooked_posix_spawnp);
+    litehook_rebind_result_t spawn =
+        litehook_rebind_symbol_with_previous_image(
+            header, original_posix_spawn, hooked_posix_spawn,
+            CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK);
+    litehook_rebind_result_t spawnp =
+        litehook_rebind_symbol_with_previous_image(
+            header, original_posix_spawnp, hooked_posix_spawnp,
+            CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK);
     bool ready = spawn.matches > 0 && spawn.writes == spawn.matches &&
                  spawnp.matches > 0 && spawnp.writes == spawnp.matches &&
                  publish_ready_marker();

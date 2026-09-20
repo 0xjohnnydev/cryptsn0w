@@ -11,6 +11,9 @@
 #define CODEX_ROOT_BROKER_MAX_ENVIRONMENT 2U
 #define CODEX_ROOT_BROKER_MACH_SERVICE                                      \
     "com.openai.codex.dopamine.sileo-root-broker"
+#define CODEX_ROOT_BROKER_OPERATION_KEY "operation"
+#define CODEX_ROOT_BROKER_PREFERENCES_RESPRING_OPERATION                     \
+    "preferences-respring-v1"
 
 struct codex_root_broker_header {
     uint32_t magic;

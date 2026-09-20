@@ -29,6 +29,7 @@ static const uint8_t k_fcntl_signature[] = {
 static const size_t k_mmap_offset = 0x147d4U;
 static const size_t k_fcntl_offset = 0x0b6ccU;
 static const size_t k_dyld_scan_size = 0x80000U;
+static const uintptr_t k_user_pointer_mask = 0x0000FFFFFFFFFFFFULL;
 
 extern void *__mmap(void *address, size_t length, int protection, int flags,
                     int descriptor, off_t offset);
@@ -66,6 +67,7 @@ static bool write_absolute_jump(void *location, void *replacement) {
     copy_bytes(location, jump_template, sizeof(jump_template));
     uintptr_t target = (uintptr_t)ptrauth_strip(
         replacement, ptrauth_key_function_pointer);
+    target &= k_user_pointer_mask;
     copy_bytes((uint8_t *)location + 16U, (const uint8_t *)&target,
                sizeof(target));
     sys_icache_invalidate(location, sizeof(jump_template));
@@ -84,7 +86,8 @@ static void *dyld_base(void) {
     }
     const struct dyld_all_image_infos *images =
         (const struct dyld_all_image_infos *)information.all_image_info_addr;
-    return (void *)images->dyldImageLoadAddress;
+    return (void *)((uintptr_t)images->dyldImageLoadAddress &
+                    k_user_pointer_mask);
 }
 
 static bool signature_is_unique(const uint8_t *base, const uint8_t *signature,
@@ -187,4 +190,3 @@ bool sbinject_install_dyld_validation_bypass(void) {
     installed = mmap_ready && fcntl_ready;
     return installed;
 }
-

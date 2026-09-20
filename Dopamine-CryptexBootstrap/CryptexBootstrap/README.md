@@ -14,9 +14,13 @@ The device has two deliberately separate pieces:
    active preboot UUID. `prep_bootstrap.sh` and opa334's bundled Sileo package
    are installed there once. A later Cryptex version enters repair mode only
    when the symlink target and rollback manifest exactly match this installer.
-2. Sileo is a normal Apple Development-provisioned app. The attached iPhone
-   13 target uses `com.lilycohl.sileo27b8`, matching its installed profile;
-   other targets retain their configured bundle identifier.
+2. Sileo is a normal Apple Development-provisioned app whose complete runtime
+   executable set is also admitted by the fixed Cryptex trust cache. The build
+   requires byte-identical copies of the main executable, root helper,
+   constructor shim, and three bundled libraries in the app, IPA, and trusted
+   Cryptex payload, then proves every resulting CDHash is present in the cache.
+   The attached iPhone 13 target uses `com.lilycohl.sileo27b8`, matching its
+   installed profile; other targets retain their configured bundle identifier.
    Its three non-system pre-main dependencies (`liblzma`, `libzstd`, and
    `libiosexec`) are signed by the same team and bundled under `Sileo.app/F`.
    The app's `/opt/procursus/lib` rpath is changed to `@loader_path/F`.
@@ -132,6 +136,30 @@ The stock Procursus archive includes the chain
 `shshd -> libdimentio0 -> libkrw0 -> libkrw0-plugin`. This compatibility lane
 detects that dormant package chain and removes it only after checking that no
 package outside the exact removal set depends on it.
+
+The bootstrap pins PreferenceLoader 2.3.3 from the maintained
+`Yves000/preferenceloader` release for libprefs, filtering, and legacy pane
+construction. Build 24A435 replaced its older `PrimarySettingsListModel` with
+`SettingsSidebarListState`, so the Cryptex also carries a fixed arm64e bridge
+for that exact iOS 27 model. SBInject loads PreferenceLoader and then the bridge
+synchronously before the resigned Settings executable enters `main`. The
+bridge inserts all valid registrations into the Swift section array and both
+identifier lookup dictionaries, and resolves selections back through libprefs.
+The canonical rootless MobileSubstrate path is preferred; the TweakInject path
+is retained only as a compatibility fallback.
+
+The bridge is built directly with Xcode from the local Objective-C/Swift files
+under `SBInject/`; its five small metadata helpers are pinned in
+`SBInject/PreferenceBridgeSupport` with their upstream commit and LGPL license.
+No Theos checkout or network source fetch is part of the build.
+
+For a live Settings acceptance check, the pre-main stage log at
+`/var/mobile/.sbinject-generalhook.log` must contain, in order,
+`jitterd-ready`, `dyld-bypass-ready`, `ellekit-ready`,
+`preferenceloader-ready`, and `preferences-bridge-ready`. The bounded bridge
+log at `/var/mobile/.sbinject-preferences-bridge.log` then reports the number of
+published rows. A bridge failure remains isolated behind the existing
+Preferences crash-loop fallback and does not disable SpringBoard injection.
 
 ## Runtime model
 

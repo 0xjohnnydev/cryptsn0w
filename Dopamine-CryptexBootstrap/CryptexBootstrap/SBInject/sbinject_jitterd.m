@@ -40,11 +40,26 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
         return false;
     }
     char path[CODEX_PROC_PIDPATH_MAX] = {0};
-    char configured[CODEX_PROC_PIDPATH_MAX] = {0};
     char observed[CODEX_PROC_PIDPATH_MAX] = {0};
     if (proc_pidpath(requested, path, sizeof(path)) <= 0 ||
-        realpath(CODEX_SBINJECT_SPRINGBOARD, configured) == NULL ||
-        realpath(path, observed) == NULL || strcmp(configured, observed) != 0) {
+        realpath(path, observed) == NULL) {
+        return false;
+    }
+    const char *const candidates[] = {
+        CODEX_SBINJECT_SPRINGBOARD,
+        CODEX_SBINJECT_PREFERENCES,
+    };
+    char configured[CODEX_PROC_PIDPATH_MAX] = {0};
+    bool exact = false;
+    for (size_t index = 0;
+         index < sizeof(candidates) / sizeof(candidates[0]); ++index) {
+        if (realpath(candidates[index], configured) != NULL &&
+            strcmp(configured, observed) == 0) {
+            exact = true;
+            break;
+        }
+    }
+    if (!exact) {
         return false;
     }
     struct stat status;
@@ -141,4 +156,3 @@ int main(void) {
         dispatch_main();
     }
 }
-
