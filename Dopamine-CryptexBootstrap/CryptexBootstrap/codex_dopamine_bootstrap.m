@@ -4019,10 +4019,22 @@ static void serve_sileo_file_broker(NSString *registeredPath,
                 (void)unlink([request fileSystemRepresentation]);
 
                 char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
+                NSString *peerExecutable = nil;
+                for (unsigned int attempt = 0; attempt < 100U; ++attempt) {
+                    if (proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0) {
+                        break;
+                    }
+                    if (attempt + 1U < 100U) {
+                        usleep(10U * 1000U);
+                    }
+                }
+                if (peerPath[0] != '\0') {
+                    peerExecutable =
+                        [NSString stringWithUTF8String:peerPath];
+                }
                 bool accepted =
-                    proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0 &&
-                    [expectedExecutable
-                        isEqual:[NSString stringWithUTF8String:peerPath]];
+                    executable_paths_match(expectedExecutable,
+                                           peerExecutable);
                 if (!accepted) {
                     log_message("sileoFileBrokerRejected pid=%d path=%s",
                                 peerPid,
