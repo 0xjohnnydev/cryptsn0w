@@ -13,7 +13,6 @@ from typing import Any
 
 from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
 from pymobiledevice3.services.cryptexd import CryptexdService
-from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 
 def _json_value(value: Any) -> Any:
@@ -28,15 +27,8 @@ def _json_value(value: Any) -> Any:
     return int(value) if hasattr(value, "__int__") else str(value)
 
 
-async def _capture(
-    udid: str, nonce_domain: int, use_tunneld: bool
-) -> dict[str, Any]:
-    if use_tunneld:
-        rsd = await get_tunneld_device_by_udid(udid)
-        if rsd is None:
-            raise RuntimeError(f"local tunneld has no tunnel for {udid}")
-    else:
-        rsd = await establish_userspace_rsd(serial=udid)
+async def _capture(udid: str, nonce_domain: int) -> dict[str, Any]:
+    rsd = await establish_userspace_rsd(serial=udid)
     try:
         service = CryptexdService(rsd)
         chip = await service.read_personalization_identifiers()
@@ -63,11 +55,10 @@ def main() -> int:
     parser.add_argument("--udid", required=True)
     parser.add_argument("--nonce-domain", type=int, default=3)
     parser.add_argument("--out-dir", required=True, type=Path)
-    parser.add_argument("--tunneld", action="store_true")
     args = parser.parse_args()
 
     result = asyncio.run(
-        _capture(args.udid, args.nonce_domain, args.tunneld)
+        _capture(args.udid, args.nonce_domain)
     )
     args.out_dir.mkdir(parents=True, exist_ok=False)
     (args.out_dir / "context.json").write_text(

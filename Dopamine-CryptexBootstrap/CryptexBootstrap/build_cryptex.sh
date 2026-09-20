@@ -5,8 +5,14 @@ set -euo pipefail
 SCRIPT_DIR=${0:A:h}
 REPO_DIR=${SCRIPT_DIR:h}
 CRYPTEXCTL=/System/Library/SecurityResearch/usr/bin/cryptexctl.research
-BOOTSTRAP_URL=https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.tar.zst
-BOOTSTRAP_SHA256=8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb
+BOOTSTRAP_URL=https://apt.procurs.us/bootstraps/1900/bootstrap-ssh-iphoneos-arm64.tar.zst
+BOOTSTRAP_SHA256=2c639b83423e4365a3a849e2bc7c56671cdcc8da534d424b6b1779a27c0c7c08
+OPENSSH_CLIENT_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-client_9.7p1-1_iphoneos-arm64.deb
+OPENSSH_CLIENT_SHA256=deafb689997363b3d86e0f5616c6878299fefb2ad292b6aede4227c2bb64af5d
+OPENSSH_SERVER_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-server_9.7p1-1_iphoneos-arm64.deb
+OPENSSH_SERVER_SHA256=578a172e679c961d2966caaf300bd0a43cfdf0a311741712690cfdb6e16eca54
+OPENSSH_SFTP_SERVER_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb
+OPENSSH_SFTP_SERVER_SHA256=d31534b270710381ddf5763f38458498c6bfe7308cbe09d1c45a1109d40dfb19
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
 ELLEKIT_URL=https://ellekit.space/pool/ellekit_1.2_iphoneos-arm64.deb
 ELLEKIT_SHA256=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
@@ -20,6 +26,7 @@ SILEO_BUNDLE_IDENTIFIER=org.coolstar.SileoStore
 SILEO_UPSTREAM_PACKAGE_VERSION=2.5.1
 SILEO_PACKAGE_VERSION=2.5.1+codex1
 FORCE_CLEAN_INSTALL=${CODEX_FORCE_CLEAN_INSTALL:-0}
+BUILD_STAGE=${CODEX_CRYPTEX_STAGE:-final}
 MAX_CRYPTEX_IMAGE_BYTES=$((128 * 1024 * 1024))
 MAX_PREFERENCES_BRIDGE_BYTES=$((1024 * 1024))
 
@@ -27,7 +34,10 @@ CACHE_DIR="$SCRIPT_DIR/cache"
 GPG_HOME="$CACHE_DIR/gnupg"
 WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
-BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
+BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_ssh_1900.tar.zst"
+OPENSSH_CLIENT_DEB="$CACHE_DIR/openssh-client_9.7p1-1_iphoneos-arm64.deb"
+OPENSSH_SERVER_DEB="$CACHE_DIR/openssh-server_9.7p1-1_iphoneos-arm64.deb"
+OPENSSH_SFTP_SERVER_DEB="$CACHE_DIR/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb"
 ELLEKIT_DEB="$CACHE_DIR/ellekit_1.2_iphoneos-arm64.deb"
 PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.3.3_iphoneos-arm64.deb"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
@@ -54,6 +64,9 @@ EMBEDDED_ELLEKIT_KEY="$EMBEDDED_KEYRING_DIR/ellekit.gpg"
 EMBEDDED_BIGBOSS_KEY="$EMBEDDED_KEYRING_DIR/bigboss.gpg"
 EMBEDDED_ELLEKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ellekit.deb"
 EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/preferenceloader.deb"
+EMBEDDED_OPENSSH_CLIENT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-client.deb"
+EMBEDDED_OPENSSH_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-server.deb"
+EMBEDDED_OPENSSH_SFTP_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-sftp-server.deb"
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
 SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
 SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
@@ -62,22 +75,6 @@ SILEO_NORMALIZED_ICON="$WORK_DIR/AppIcon60x60@2x.png"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
-CUSTOMD_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd.sh"
-CUSTOMD_TRACE_REEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_trace_me_reexec_probe.sh"
-CUSTOMD_SETEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_springboard_setexec.sh"
-CUSTOMD_BUILD_DIRECTORY="$WORK_DIR/customd-build"
-CUSTOMD_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd"
-CUSTOMCTL_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customctl"
-CUSTOMD_REGISTRAR_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-candidate-registrar"
-CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-trace-me-reexec-probe"
-CUSTOMD_SETEXEC_BUILD_EXECUTABLE="$CUSTOMD_BUILD_DIRECTORY/customd-springboard-setexec"
-CUSTOMD_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd"
-CUSTOMCTL_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customctl"
-CUSTOMD_REGISTRAR_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-candidate-registrar"
-CUSTOMD_TRACE_REEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-trace-me-reexec-probe"
-CUSTOMD_SETEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-springboard-setexec"
-CUSTOMD_JOB_PLIST_SOURCE="$SCRIPT_DIR/../../Sources/com.openai.customd.plist"
-EMBEDDED_CUSTOMD_JOB_PLIST="$IMAGE_ROOT/usr/local/share/codex-bootstrap/com.openai.customd.plist"
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
@@ -93,24 +90,23 @@ SBINJECT_JITTERD_ENTITLEMENTS="$SBINJECT_SOURCE_DIR/jitterd-entitlements.plist"
 SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.jitterd.plist"
 EMBEDDED_SBINJECT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/sbinject"
 EMBEDDED_SBINJECT_JITTERD_PLIST="$EMBEDDED_SBINJECT_ROOT/com.openai.codex.sbinject.jitterd.plist"
-SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/../../Scripts/build_springboard_candidate.py"
-SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/SpringBoard.app/SpringBoard"}
-SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/SpringBoard.app/Info.plist"}
+SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/build_springboard_candidate.py"
+TARGET_BUNDLE_ROOT=${CODEX_TARGET_BUNDLE_ROOT:-"$SCRIPT_DIR/../../build/target"}
+SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/SpringBoard"}
+SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/Info.plist"}
 SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE:-${SPRINGBOARD_CANDIDATE_SOURCE:h}}
 SPRINGBOARD_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/SpringBoard.app"
 SPRINGBOARD_CANDIDATE="$SPRINGBOARD_CANDIDATE_DIRECTORY/notSpringBoard"
 SPRINGBOARD_CANDIDATE_INFO="$SPRINGBOARD_CANDIDATE_DIRECTORY/Info.plist"
 SPRINGBOARD_CANDIDATE_ENTITLEMENTS="$SPRINGBOARD_CANDIDATE_DIRECTORY/entitlements.plist"
-SPRINGBOARD_CANDIDATE_MANIFEST="$SPRINGBOARD_CANDIDATE_DIRECTORY/build-manifest.json"
 SPRINGBOARD_CANDIDATE_GENERALHOOK="$SPRINGBOARD_CANDIDATE_DIRECTORY/g"
-PREFERENCES_CANDIDATE_SOURCE=${CODEX_PREFERENCES_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/Preferences.app/Preferences"}
-PREFERENCES_CANDIDATE_INFO_SOURCE=${CODEX_PREFERENCES_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/Preferences.app/Info.plist"}
+PREFERENCES_CANDIDATE_SOURCE=${CODEX_PREFERENCES_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/Preferences.app/Preferences"}
+PREFERENCES_CANDIDATE_INFO_SOURCE=${CODEX_PREFERENCES_CANDIDATE_INFO_SOURCE:-"$TARGET_BUNDLE_ROOT/Preferences.app/Info.plist"}
 PREFERENCES_CANDIDATE_BUNDLE_SOURCE=${CODEX_PREFERENCES_CANDIDATE_BUNDLE_SOURCE:-${PREFERENCES_CANDIDATE_SOURCE:h}}
 PREFERENCES_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/Preferences.app"
 PREFERENCES_CANDIDATE="$PREFERENCES_CANDIDATE_DIRECTORY/notPreferences"
 PREFERENCES_CANDIDATE_INFO="$PREFERENCES_CANDIDATE_DIRECTORY/Info.plist"
 PREFERENCES_CANDIDATE_ENTITLEMENTS="$PREFERENCES_CANDIDATE_DIRECTORY/entitlements.plist"
-PREFERENCES_CANDIDATE_MANIFEST="$PREFERENCES_CANDIDATE_DIRECTORY/build-manifest.json"
 PREFERENCES_CANDIDATE_GENERALHOOK="$PREFERENCES_CANDIDATE_DIRECTORY/g"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
@@ -122,6 +118,9 @@ ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
 REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
+STAGE_WORK_DIR="$WORK_DIR/ssh-stage"
+STAGE_OUT_DIR="$OUT_DIR/ssh-stage"
+STAGE_SUMMARY="$STAGE_OUT_DIR/build-summary.json"
 
 die() {
     print -u2 -- "error: $*"
@@ -130,6 +129,8 @@ die() {
 
 [[ "$FORCE_CLEAN_INSTALL" == 0 || "$FORCE_CLEAN_INSTALL" == 1 ]] || \
     die "CODEX_FORCE_CLEAN_INSTALL must be 0 or 1"
+[[ "$BUILD_STAGE" == final || "$BUILD_STAGE" == ssh ]] || \
+    die "CODEX_CRYPTEX_STAGE must be final or ssh"
 
 sha256_of() {
     shasum -a 256 "$1" | awk '{print $1}'
@@ -172,107 +173,126 @@ require_true_entitlement() {
         die "required entitlement $display_name is not true in ${plist:t}"
 }
 
-for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg shasum sips stat tar xcrun zstd; do
+build_ssh_stage() {
+    local authorized_key=${CODEX_STAGE_AUTHORIZED_KEY:-}
+    local stage_image="$STAGE_WORK_DIR/image-root"
+    local stage_extract="$STAGE_WORK_DIR/extracted"
+    local stage_payload="$stage_image/usr/local/share/codex-stage-ssh"
+    local stage_unsigned="$STAGE_OUT_DIR/unsigned"
+    local launcher="$stage_image/usr/local/bin/codex-dopamine-bootstrap"
+    local bundle trustcache trustcache_dump image image_bytes entry_count
+    local -a stage_variants
+
+    for tool in awk curl ditto ldid plutil python3 shasum stat tar xcrun zstd; do
+        command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+    done
+    [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
+    [[ -f "$authorized_key" ]] || die "CODEX_STAGE_AUTHORIZED_KEY is required"
+    [[ -f "$SCRIPT_DIR/stage_ssh_launcher.c" ]] || \
+        die "missing stage SSH launcher"
+    plutil -lint "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" >/dev/null || \
+        die "invalid stage SSH launch daemon"
+
+    mkdir -p "$CACHE_DIR" "$STAGE_OUT_DIR"
+    fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
+    rm -rf "$STAGE_WORK_DIR" "$stage_unsigned"
+    mkdir -p "$stage_extract" "$stage_image/usr/local/bin" \
+        "$stage_image/Library/LaunchDaemons" "$stage_payload" \
+        "$stage_unsigned"
+    zstd -dc "$BOOTSTRAP_ARCHIVE" | tar -xf - -C "$stage_extract"
+    [[ -x "$stage_extract/var/jb/usr/sbin/sshd" && \
+       -x "$stage_extract/var/jb/usr/bin/ssh-keygen" ]] || \
+        die "SSH bootstrap payload is incomplete"
+    ditto --noqtn "$stage_extract/var/jb" "$stage_payload/root"
+    cp "$authorized_key" "$stage_payload/authorized_keys"
+    cp "$SCRIPT_DIR/stage_sshd_config" "$stage_payload/sshd_config"
+    cp "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" \
+        "$stage_image/Library/LaunchDaemons/"
+    chmod 0600 "$stage_payload/authorized_keys"
+    chmod 0644 "$stage_payload/sshd_config" \
+        "$stage_image/Library/LaunchDaemons/com.openai.codex.dopamine.bootstrap.plist"
+
+    xcrun --sdk iphoneos clang -arch arm64 \
+        -miphoneos-version-min=17.0 -Os -Wall -Wextra -Werror \
+        "$SCRIPT_DIR/stage_ssh_launcher.c" -o "$launcher"
+    ldid -S"$SCRIPT_DIR/installer-entitlements.plist" -Cadhoc "$launcher"
+
+    "$CRYPTEXCTL" create --use-cryptex1-format --use-product-class \
+        --FCHP 0xff10 --TYPE 3 --STYP 0 --CLAS 0xf2 \
+        --identifier "$IDENTIFIER" --version "$VERSION" \
+        --output-directory "$stage_unsigned" "$stage_image"
+    bundle="$stage_unsigned/$IDENTIFIER.cxbd"
+    stage_variants=("$bundle"/Restore/Cryptex/*(N/))
+    (( ${#stage_variants} == 1 )) || die "stage Cryptex variant is missing"
+    trustcache="${stage_variants[1]}/gtcd"
+    image="${stage_variants[1]}/gdmg"
+    [[ -f "$trustcache" && -f "$image" ]] || die "stage Cryptex is incomplete"
+    image_bytes=$(stat -f %z "$image")
+    (( image_bytes <= MAX_CRYPTEX_IMAGE_BYTES )) || \
+        die "stage Cryptex exceeds 128 MiB"
+    trustcache_dump="$STAGE_OUT_DIR/trustcache.txt"
+    "$CRYPTEXCTL" dump-trust-cache "$trustcache" >"$trustcache_dump"
+    entry_count=$(sed -n 's/^entry count = //p' "$trustcache_dump")
+
+    python3 - "$STAGE_SUMMARY" "$bundle" "$IDENTIFIER" "$VERSION" \
+        "$trustcache" "$trustcache_dump" "$entry_count" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+summary, bundle, identifier, version, trustcache, dump, count = sys.argv[1:]
+
+def sha256(path: str) -> str:
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+entries = re.findall(
+    r"^([0-9a-f]{40})\s+", pathlib.Path(dump).read_text(), re.MULTILINE
+)
+if len(entries) != int(count):
+    raise SystemExit("stage trust-cache count mismatch")
+pathlib.Path(summary).write_text(json.dumps({
+    "identifier": identifier,
+    "version": version,
+    "bundle": str(pathlib.Path(bundle).resolve()),
+    "stage": "ssh",
+    "trustCache": {
+        "path": trustcache,
+        "sha256": sha256(trustcache),
+        "entryCount": int(count),
+        "cdhashes": entries,
+    },
+}, indent=2, sort_keys=True) + "\n")
+PY
+    print -- "stageBundle=$bundle"
+    print -- "stageBuildSummary=$STAGE_SUMMARY"
+}
+
+if [[ "$BUILD_STAGE" == ssh ]]; then
+    build_ssh_stage
+    exit 0
+fi
+
+for tool in awk codesign curl dpkg-deb gpg ldid lipo plutil python3 rg shasum sips stat tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
-for plist in "$ELLEKIT_COMPAT_ENTITLEMENTS" "$EXEC_WORKER_ENTITLEMENTS"; do
-    [[ -f "$plist" ]] || die "missing runtime entitlement file: $plist"
-    plutil -lint "$plist" >/dev/null || \
-        die "invalid runtime entitlement file: $plist"
-done
-require_true_entitlement "$ELLEKIT_COMPAT_ENTITLEMENTS" \
-    'com\.apple\.private\.cs\.debugger' \
-    'com.apple.private.cs.debugger'
-require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" \
-    'com\.apple\.private\.cs\.debugger' \
-    'com.apple.private.cs.debugger'
-require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
-    'get-task-allow'
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
-[[ -f "$SILEO_DEB" ]] || die "missing opa334 Sileo package: $SILEO_DEB"
-[[ -f "$DEFAULT_SOURCES" ]] || die "missing Dopamine default APT sources"
-[[ -f "$REPOSITORY_COMPAT_CONFIG" ]] || \
-    die "missing Dopamine repository compatibility configuration"
-[[ -f "$SBINJECT_APT_CONFIG" ]] || \
-    die "missing SBInject APT package configuration"
-[[ -f "$APT_LIST_NORMALIZER" ]] || \
-    die "missing APT package-list normalizer"
-[[ -f "$SPRINGBOARD_CANDIDATE_BUILDER" ]] || \
-    die "missing SpringBoard candidate builder"
-[[ -f "$SPRINGBOARD_CANDIDATE_SOURCE" ]] || \
-    die "missing pinned iPhone 13 SpringBoard source"
-[[ -f "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" ]] || \
-    die "missing pinned iPhone 13 SpringBoard Info.plist source"
-[[ -d "$SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE" ]] || \
-    die "missing pinned iPhone 13 SpringBoard.app source"
-[[ -f "$PREFERENCES_CANDIDATE_SOURCE" ]] || \
-    die "missing pinned iPhone 13 Preferences source"
-[[ -f "$PREFERENCES_CANDIDATE_INFO_SOURCE" ]] || \
-    die "missing pinned iPhone 13 Preferences Info.plist source"
-[[ -d "$PREFERENCES_CANDIDATE_BUNDLE_SOURCE" ]] || \
-    die "missing pinned iPhone 13 Preferences.app source"
-[[ -x "$CUSTOMD_BUILDER" ]] || die "missing customd builder"
-[[ -x "$CUSTOMD_TRACE_REEXEC_BUILDER" ]] || \
-    die "missing customd trace/re-exec builder"
-[[ -x "$CUSTOMD_SETEXEC_BUILDER" ]] || \
-    die "missing customd SpringBoard SETEXEC builder"
-[[ -f "$CUSTOMD_JOB_PLIST_SOURCE" ]] || die "missing customd job plist"
-sh -n "$CUSTOMD_BUILDER"
-sh -n "$CUSTOMD_TRACE_REEXEC_BUILDER"
-zsh -n "$CUSTOMD_SETEXEC_BUILDER"
-plutil -lint "$CUSTOMD_JOB_PLIST_SOURCE" >/dev/null || \
-    die "invalid customd job plist"
 sh -n "$APT_LIST_NORMALIZER"
-[[ -f "$ELLEKIT_KEY" ]] || die "missing ElleKit repository keyring"
-[[ -f "$BIGBOSS_KEY" ]] || die "missing BigBoss repository keyring"
 mkdir -p "$GPG_HOME"
 chmod 0700 "$GPG_HOME"
 export GNUPGHOME="$GPG_HOME"
 verify_keyring "$ELLEKIT_KEY" "$ELLEKIT_KEY_FINGERPRINT"
 verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
-[[ -f "$SCRIPT_DIR/patch_sileo_postinst.py" ]] || \
-    die "missing Sileo maintainer-script compatibility patch"
-[[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
-    die "missing deterministic Mach-O load-command patcher"
-[[ -f "$SCRIPT_DIR/sileo_broker_constructor.c" ]] || \
-    die "missing Sileo root-broker constructor"
-[[ -f "$SCRIPT_DIR/sileo_zstd_reexport.c" ]] || \
-    die "missing Sileo zstd re-export source"
-[[ -f "$SCRIPT_DIR/sbinject_package_validator.c" ]] || \
-    die "missing SBInject package validator source"
-[[ -f "$PREFERENCELOADER_PIN" ]] || \
-    die "missing PreferenceLoader version pin"
-[[ -f "$SILEO_PIN" ]] || die "missing fixed system Sileo version pin"
-for source in \
-    sbinject_protocol.h \
-    litehook_rebind.h litehook_rebind.c \
-    sbinject_launchdhook.c \
-    sbinject_lsd_registration_hook.m \
-    sbinject_dyld_bypass.h sbinject_dyld_bypass.c \
-    sbinject_generalhook.c sbinject_jitterd.m \
-    sbinject_preferences_bridge.m sbinject_preferences_bridge.swift; do
-    [[ -f "$SBINJECT_SOURCE_DIR/$source" ]] || \
-        die "missing supplied SBInject integration source: $source"
-done
-for source in PLHeap.h PLHeap.m PLSwiftMeta.h PLSwiftMeta.m \
-              PLSwiftString.swift LICENSE UPSTREAM.md; do
-    [[ -f "$PREFERENCES_BRIDGE_SUPPORT_DIR/$source" ]] || \
-        die "missing pinned PreferenceLoader bridge support: $source"
-done
-for plist in "$SBINJECT_JITTERD_ENTITLEMENTS" \
-             "$SBINJECT_JITTERD_PLIST_SOURCE"; do
-    [[ -f "$plist" ]] || die "missing SBInject plist: $plist"
-    plutil -lint "$plist" >/dev/null || die "invalid SBInject plist: $plist"
-done
-[[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
-    die "missing SpringBoard load-command patch"
-for source in dyld.m rop_inject.m thread_utils.m task_utils.m arm64.m; do
-    [[ -f "$OPAINJECT_DIR/$source" ]] || \
-        die "missing pinned opa334/opainject source: $source"
-done
 
 mkdir -p "$CACHE_DIR" "$WORK_DIR" "$OUT_DIR"
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
+fetch_pinned "$OPENSSH_CLIENT_URL" "$OPENSSH_CLIENT_SHA256" \
+    "$OPENSSH_CLIENT_DEB"
+fetch_pinned "$OPENSSH_SERVER_URL" "$OPENSSH_SERVER_SHA256" \
+    "$OPENSSH_SERVER_DEB"
+fetch_pinned "$OPENSSH_SFTP_SERVER_URL" "$OPENSSH_SFTP_SERVER_SHA256" \
+    "$OPENSSH_SFTP_SERVER_DEB"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
     "$PREFERENCELOADER_DEB"
@@ -281,7 +301,7 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
-    "$CUSTOMD_BUILD_DIRECTORY" "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
+    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
     "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES" \
     "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_ASSET_INFO" \
@@ -300,6 +320,13 @@ mkdir -p \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
     "$PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
+
+cp "$OPENSSH_CLIENT_DEB" "$EMBEDDED_OPENSSH_CLIENT_DEB"
+cp "$OPENSSH_SERVER_DEB" "$EMBEDDED_OPENSSH_SERVER_DEB"
+cp "$OPENSSH_SFTP_SERVER_DEB" "$EMBEDDED_OPENSSH_SFTP_SERVER_DEB"
+chmod 0644 "$EMBEDDED_OPENSSH_CLIENT_DEB" \
+    "$EMBEDDED_OPENSSH_SERVER_DEB" \
+    "$EMBEDDED_OPENSSH_SFTP_SERVER_DEB"
 
 SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
 
@@ -473,14 +500,6 @@ codesign --force --sign - --timestamp=none --pagesize 4096 \
     --generate-entitlement-der \
     --entitlements "$SBINJECT_JITTERD_ENTITLEMENTS" \
     "$SBINJECT_JITTERD"
-for artifact in "$SBINJECT_LAUNCHDHOOK" "$SBINJECT_GENERALHOOK" \
-                "$SBINJECT_PREFERENCES_BRIDGE" \
-                "$SBINJECT_JITTERD"; do
-    codesign --verify --strict --all-architectures "$artifact" || \
-        die "SBInject artifact signature is invalid: ${artifact:t}"
-    [[ "$(lipo -archs "$artifact")" == arm64e ]] || \
-        die "SBInject artifact is not exactly arm64e: ${artifact:t}"
-done
 cp "$SBINJECT_JITTERD_PLIST_SOURCE" "$EMBEDDED_SBINJECT_JITTERD_PLIST"
 chmod 0644 "$EMBEDDED_SBINJECT_JITTERD_PLIST"
 
@@ -498,30 +517,12 @@ chmod 0755 "$SPRINGBOARD_CANDIDATE_GENERALHOOK"
 python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     "$SPRINGBOARD_CANDIDATE_SOURCE" \
     "$SPRINGBOARD_CANDIDATE_DIRECTORY" \
+    --target springboard \
     --info-plist "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" \
     --executable-name notSpringBoard \
     --bundle-executable notSpringBoard \
     --load-dylib @loader_path/g \
     --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
-[[ -x "$SPRINGBOARD_CANDIDATE" ]] || \
-    die "SpringBoard candidate was not produced"
-[[ -f "$SPRINGBOARD_CANDIDATE_INFO" ]] || \
-    die "SpringBoard candidate Info.plist was not produced"
-[[ -f "$SPRINGBOARD_CANDIDATE_ENTITLEMENTS" ]] || \
-    die "SpringBoard candidate entitlements were not produced"
-[[ -f "$SPRINGBOARD_CANDIDATE_MANIFEST" ]] || \
-    die "SpringBoard candidate manifest was not produced"
-[[ -x "$SPRINGBOARD_CANDIDATE_GENERALHOOK" ]] || \
-    die "SpringBoard candidate generalhook was not produced"
-codesign --verify --strict --all-architectures --ignore-resources \
-    "$SPRINGBOARD_CANDIDATE" || \
-    die "SpringBoard candidate signature is invalid"
-otool -L "$SPRINGBOARD_CANDIDATE" | rg -q \
-    '^\s+@loader_path/g ' || \
-    die "SpringBoard candidate does not preload the SBInject generalhook"
-[[ "$(sha256_of "$SPRINGBOARD_CANDIDATE_GENERALHOOK")" == \
-   "$(sha256_of "$SBINJECT_GENERALHOOK")" ]] || \
-    die "SpringBoard bundle generalhook changed while copying"
 
 # Build the Settings replacement through the same supplied SBInject pre-main
 # lane.  Preserve its exact on-device bundle and entitlement dictionary, add
@@ -542,31 +543,6 @@ python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     --bundle-executable notPreferences \
     --load-dylib @loader_path/g \
     --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
-[[ -x "$PREFERENCES_CANDIDATE" ]] || \
-    die "Preferences candidate was not produced"
-[[ -f "$PREFERENCES_CANDIDATE_INFO" ]] || \
-    die "Preferences candidate Info.plist was not produced"
-[[ -f "$PREFERENCES_CANDIDATE_ENTITLEMENTS" ]] || \
-    die "Preferences candidate entitlements were not produced"
-[[ -f "$PREFERENCES_CANDIDATE_MANIFEST" ]] || \
-    die "Preferences candidate manifest was not produced"
-[[ -x "$PREFERENCES_CANDIDATE_GENERALHOOK" ]] || \
-    die "Preferences candidate generalhook was not produced"
-codesign --verify --strict --all-architectures --ignore-resources \
-    "$PREFERENCES_CANDIDATE" || \
-    die "Preferences candidate signature is invalid"
-otool -L "$PREFERENCES_CANDIDATE" | rg -q \
-    '^\s+@loader_path/g ' || \
-    die "Preferences candidate does not preload the SBInject generalhook"
-ldid -e "$PREFERENCES_CANDIDATE" | rg -q \
-    '<key>com.apple.private.debugger</key>' || \
-    die "Preferences candidate lacks com.apple.private.debugger"
-ldid -e "$PREFERENCES_CANDIDATE" | rg -q \
-    '<key>get-task-allow</key>' || \
-    die "Preferences candidate lacks get-task-allow"
-[[ "$(sha256_of "$PREFERENCES_CANDIDATE_GENERALHOOK")" == \
-   "$(sha256_of "$SBINJECT_GENERALHOOK")" ]] || \
-    die "Preferences bundle generalhook changed while copying"
 
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
@@ -574,6 +550,12 @@ zstd -dc "$BOOTSTRAP_ARCHIVE" | \
 ditto --noqtn "$WORK_DIR/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
 rm -rf "$WORK_DIR/var"
+typeset -a trusted_openssh_machos=(
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh"
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh-keygen"
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/libexec/sftp-server"
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/sbin/sshd"
+)
 
 # iOS 27 removed launch_active_user_switch from libSystem. Procursus launchctl
 # does not use it for bootout/bootstrap, but its strong unused import prevents
@@ -581,17 +563,10 @@ rm -rf "$WORK_DIR/var"
 # the original launchctl entitlements, and let the generated Cryptex trust
 # cache cover the resulting exact code directory.
 LAUNCHCTL="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/launchctl"
-[[ -x "$LAUNCHCTL" ]] || die "Procursus launchctl is missing"
 python3 "$SCRIPT_DIR/patch_weak_import.py" \
     "$LAUNCHCTL" _launch_active_user_switch
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     --preserve-metadata=identifier,entitlements "$LAUNCHCTL"
-nm -m "$LAUNCHCTL" | \
-    rg -q '\(undefined\) weak external _launch_active_user_switch' || \
-    die "launchctl compatibility import is not weak"
-ldid -e "$LAUNCHCTL" | \
-    rg -q '<key>com.apple.private.xpc.launchd.enable-disable-system-services</key>' || \
-    die "launchctl lost its launchd-control entitlement"
 
 dpkg-deb -R "$SILEO_DEB" "$PACKAGE_ROOT"
 [[ "$(dpkg-deb -f "$SILEO_DEB" Version)" == \
@@ -628,7 +603,7 @@ plutil -replace CFBundleVersion -string "$VERSION" "$APP_DIR/Info.plist"
 [[ -f "$APP_DIR/Assets.car" ]] || die "upstream Sileo asset catalog is missing"
 xcrun assetutil --info "$APP_DIR/Assets.car" >"$SILEO_ASSET_INFO"
 rg -q '"RenditionName" : "AppIcon60x60@3x.png"' "$SILEO_ASSET_INFO" || \
-    die "upstream Sileo asset catalog lacks its iPhone 13 icon"
+    die "upstream Sileo asset catalog lacks its 60pt icon"
 [[ -f "$APP_DIR/AppIcon60x60@2x.png" ]] || \
     die "upstream Sileo standalone primary icon is missing"
 # IconServices returns the generic grid when this nonstandard system-app mount
@@ -649,7 +624,7 @@ plutil -replace CFBundleIconFiles -json '["AppIcon60x60"]' \
     "$APP_DIR/Info.plist"
 [[ "$(sips -g pixelWidth "$APP_DIR/AppIcon60x60@3x.png" | \
         awk '/pixelWidth:/ { print $2 }')" == 180 ]] || \
-    die "normalized Sileo iPhone 13 icon has the wrong width"
+    die "normalized Sileo icon has the wrong width"
 ldid -e "$APP_DIR/Sileo" >"$SILEO_SYSTEM_ENTITLEMENTS"
 plutil -lint "$SILEO_SYSTEM_ENTITLEMENTS" >/dev/null || \
     die "upstream Sileo entitlements are invalid"
@@ -760,7 +735,7 @@ chmod 0755 "$SYSTEM_SILEO_APP" "$SYSTEM_SILEO_APP/Sileo" \
 [[ -f "$SYSTEM_SILEO_APP/Assets.car" ]] || \
     die "Cryptex Sileo lost its asset catalog"
 [[ -f "$SYSTEM_SILEO_APP/AppIcon60x60@3x.png" ]] || \
-    die "Cryptex Sileo lost its explicit iPhone 13 icon"
+    die "Cryptex Sileo lost its explicit 60pt icon"
 [[ -f "$SYSTEM_SILEO_APP/CodexSystemEntitlements.plist" ]] || \
     die "Cryptex Sileo lost its registration entitlements"
 
@@ -774,7 +749,6 @@ dpkg-deb -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null
     die "fixed system Sileo metadata package version mismatch"
 cp "$REPACKED_SILEO" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/sileo.deb"
-TRUSTED_SILEO_APP="$SYSTEM_SILEO_APP"
 typeset -a prepared_sileo_machos=(
     "$SYSTEM_SILEO_APP/Sileo"
     "$SYSTEM_SILEO_APP/giveMeRoot"
@@ -784,14 +758,6 @@ typeset -a prepared_sileo_machos=(
     "$SYSTEM_SILEO_APP/F/libzstd.1.dylib"
     "$SYSTEM_SILEO_APP/F/libzstd.real.dylib"
 )
-typeset -a trusted_sileo_machos=(
-    "${prepared_sileo_machos[@]}"
-)
-for (( index = 1; index <= ${#prepared_sileo_machos}; ++index )); do
-    [[ "$(sha256_of "${prepared_sileo_machos[$index]}")" == \
-       "$(sha256_of "${trusted_sileo_machos[$index]}")" ]] || \
-        die "trusted Sileo payload changed while copying"
-done
 
 python3 "$SCRIPT_DIR/patch_opainject_dyld.py" \
     "$OPAINJECT_DIR/dyld.m" "$PATCHED_OPAINJECT_DYLD"
@@ -842,67 +808,6 @@ codesign --force --sign - --timestamp=none --pagesize 4096 \
 codesign --verify --strict --all-architectures "$EXEC_WORKER" || \
     die "execution worker signature is invalid"
 
-# customd pins the finalized worker, candidate, candidate Info.plist, and
-# launchctl bytes plus its fixed transaction helpers at build time. Build the
-# helpers first, then customd only after every pinned input is complete. This
-# prevents a later bootstrap step from silently invalidating its boot policy
-# while retaining the system LaunchDaemon packaging.
-"$CUSTOMD_TRACE_REEXEC_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
-"$CUSTOMD_SETEXEC_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
-CODEX_CUSTOMD_WORKER_PATH="$EXEC_WORKER" \
-CODEX_CUSTOMD_CANDIDATE_PATH="$SPRINGBOARD_CANDIDATE" \
-CODEX_CUSTOMD_CANDIDATE_INFO_PATH="$SPRINGBOARD_CANDIDATE_INFO" \
-CODEX_CUSTOMD_LAUNCHCTL_PATH="$LAUNCHCTL" \
-CODEX_CUSTOMD_TRACE_REEXEC_PROBE_PATH="$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" \
-CODEX_CUSTOMD_SETEXEC_HELPER_PATH="$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" \
-    "$CUSTOMD_BUILDER" "$CUSTOMD_BUILD_DIRECTORY"
-[[ -x "$CUSTOMD_BUILD_EXECUTABLE" && -x "$CUSTOMCTL_BUILD_EXECUTABLE" && \
-   -x "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE" && \
-   -x "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" && \
-   -x "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" ]] || \
-    die "customd build did not produce all executables"
-cp "$CUSTOMD_BUILD_EXECUTABLE" "$CUSTOMD_EXECUTABLE"
-cp "$CUSTOMCTL_BUILD_EXECUTABLE" "$CUSTOMCTL_EXECUTABLE"
-cp "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE" \
-    "$CUSTOMD_REGISTRAR_EXECUTABLE"
-cp "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE" \
-    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE"
-cp "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE" "$CUSTOMD_SETEXEC_EXECUTABLE"
-chmod 0755 "$CUSTOMD_EXECUTABLE" "$CUSTOMCTL_EXECUTABLE" \
-    "$CUSTOMD_REGISTRAR_EXECUTABLE" "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" \
-    "$CUSTOMD_SETEXEC_EXECUTABLE"
-[[ "$(sha256_of "$CUSTOMD_BUILD_EXECUTABLE")" == \
-   "$(sha256_of "$CUSTOMD_EXECUTABLE")" && \
-   "$(sha256_of "$CUSTOMCTL_BUILD_EXECUTABLE")" == \
-   "$(sha256_of "$CUSTOMCTL_EXECUTABLE")" && \
-   "$(sha256_of "$CUSTOMD_REGISTRAR_BUILD_EXECUTABLE")" == \
-   "$(sha256_of "$CUSTOMD_REGISTRAR_EXECUTABLE")" && \
-   "$(sha256_of "$CUSTOMD_TRACE_REEXEC_BUILD_EXECUTABLE")" == \
-   "$(sha256_of "$CUSTOMD_TRACE_REEXEC_EXECUTABLE")" && \
-   "$(sha256_of "$CUSTOMD_SETEXEC_BUILD_EXECUTABLE")" == \
-   "$(sha256_of "$CUSTOMD_SETEXEC_EXECUTABLE")" ]] || \
-    die "embedded customd executables changed while copying"
-codesign --verify --strict --all-architectures "$CUSTOMD_EXECUTABLE" || \
-    die "customd signature is invalid"
-codesign --verify --strict --all-architectures "$CUSTOMCTL_EXECUTABLE" || \
-    die "customctl signature is invalid"
-codesign --verify --strict --all-architectures \
-    "$CUSTOMD_REGISTRAR_EXECUTABLE" || \
-    die "customd candidate registrar signature is invalid"
-codesign --verify --strict --all-architectures \
-    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" || \
-    die "customd trace/re-exec probe signature is invalid"
-codesign --verify --strict --all-architectures \
-    "$CUSTOMD_SETEXEC_EXECUTABLE" || \
-    die "customd SpringBoard SETEXEC helper signature is invalid"
-cp "$CUSTOMD_JOB_PLIST_SOURCE" "$EMBEDDED_CUSTOMD_JOB_PLIST"
-chmod 0644 "$EMBEDDED_CUSTOMD_JOB_PLIST"
-plutil -lint "$EMBEDDED_CUSTOMD_JOB_PLIST" >/dev/null || \
-    die "embedded customd job plist is invalid"
-[[ "$(sha256_of "$CUSTOMD_JOB_PLIST_SOURCE")" == \
-   "$(sha256_of "$EMBEDDED_CUSTOMD_JOB_PLIST")" ]] || \
-    die "embedded customd job plist changed while copying"
-
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
@@ -922,11 +827,6 @@ typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
-    "$CUSTOMD_EXECUTABLE" \
-    "$CUSTOMCTL_EXECUTABLE" \
-    "$CUSTOMD_REGISTRAR_EXECUTABLE" \
-    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" \
-    "$CUSTOMD_SETEXEC_EXECUTABLE" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
     "$SBINJECT_LSD_REGISTRATION_HOOK" \
@@ -938,7 +838,8 @@ for candidate in \
     "$PREFERENCES_CANDIDATE_GENERALHOOK" \
     "$PREFERENCES_CANDIDATE" \
     "${prepared_sileo_machos[@]}" \
-    "${trusted_ellekit_machos[@]}"; do
+    "${trusted_ellekit_machos[@]}" \
+    "${trusted_openssh_machos[@]}"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
             2>&1 | sed -n 's/^CDHash=//p')
@@ -1022,605 +923,41 @@ while IFS= read -r cdhash; do
 done <"$TRUSTED_RUNTIME_CDHASHES"
 
 python3 - "$SUMMARY" "$BUNDLE" "$IDENTIFIER" "$VERSION" \
-    "$BOOTSTRAP_ARCHIVE" "$SILEO_DEB" "$REPACKED_SILEO" \
-    "$PREFERENCELOADER_DEB" "$TRUSTED_SILEO_APP" \
-    "$ELLEKIT_DEB" "$REPACKED_ELLEKIT" "$EMBEDDED_ELLEKIT_DEB" \
-    "$TRUSTED_ELLEKIT_ROOT" \
     "$TRUSTCACHE" "$TRUSTCACHE_DUMP" "$ENTRY_COUNT" \
-    "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_PIN" "$EMBEDDED_SILEO_PIN" \
-    "$DEFAULT_SOURCES" \
-    "$EMBEDDED_DEFAULT_SOURCES" \
-    "$REPOSITORY_COMPAT_CONFIG" \
-    "$EMBEDDED_REPOSITORY_COMPAT_CONFIG" \
-    "$SBINJECT_APT_CONFIG" "$EMBEDDED_SBINJECT_APT_CONFIG" \
-    "$APT_LIST_NORMALIZER" "$EMBEDDED_APT_LIST_NORMALIZER" \
-    "$ELLEKIT_KEY" "$EMBEDDED_ELLEKIT_KEY" \
-    "$ELLEKIT_KEY_FINGERPRINT" \
-    "$BIGBOSS_KEY" "$EMBEDDED_BIGBOSS_KEY" \
-    "$BIGBOSS_KEY_FINGERPRINT" \
-    "$TRUSTED_RUNTIME_CDHASHES" \
-    "$ELLEKIT_COMPAT_LOADER" "$EXEC_WORKER" \
-    "$CUSTOMD_EXECUTABLE" "$CUSTOMCTL_EXECUTABLE" \
-    "$CUSTOMD_REGISTRAR_EXECUTABLE" \
-    "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" "$CUSTOMD_SETEXEC_EXECUTABLE" \
-    "$CUSTOMD_JOB_PLIST_SOURCE" "$EMBEDDED_CUSTOMD_JOB_PLIST" \
-    "$SBINJECT_PACKAGE_VALIDATOR" "$SBINJECT_GENERALHOOK" \
-    "$SBINJECT_LSD_REGISTRATION_HOOK" \
-    "$SBINJECT_PREFERENCES_BRIDGE" \
-    "$SBINJECT_LAUNCHDHOOK" "$SBINJECT_JITTERD" \
-    "$EMBEDDED_SBINJECT_JITTERD_PLIST" \
-    "$SPRINGBOARD_CANDIDATE_GENERALHOOK" \
-    "$SPRINGBOARD_CANDIDATE" "$SPRINGBOARD_CANDIDATE_INFO" \
-    "$SPRINGBOARD_CANDIDATE_ENTITLEMENTS" \
-    "$SPRINGBOARD_CANDIDATE_MANIFEST" \
-    "$PREFERENCES_CANDIDATE_GENERALHOOK" \
-    "$PREFERENCES_CANDIDATE" "$PREFERENCES_CANDIDATE_INFO" \
-    "$PREFERENCES_CANDIDATE_ENTITLEMENTS" \
-    "$PREFERENCES_CANDIDATE_MANIFEST" <<'PY'
+    "$GENERATED_IMAGE_BYTES" <<'PY'
 import hashlib
 import json
 import pathlib
-import plistlib
 import re
 import sys
 
-(
-    summary_path,
-    bundle,
-    identifier,
-    version,
-    bootstrap,
-    sileo,
-    repacked_sileo,
-    preference_loader,
-    trusted_sileo_app,
-    ellekit,
-    repacked_ellekit,
-    embedded_ellekit,
-    trusted_ellekit_root,
-    trustcache,
-    trustcache_dump,
-    entry_count,
-    sileo_system_entitlements,
-    sileo_pin,
-    embedded_sileo_pin,
-    default_sources,
-    embedded_default_sources,
-    repository_compat_config,
-    embedded_repository_compat_config,
-    sbinject_apt_config,
-    embedded_sbinject_apt_config,
-    apt_list_normalizer,
-    embedded_apt_list_normalizer,
-    ellekit_key,
-    embedded_ellekit_key,
-    ellekit_key_fingerprint,
-    bigboss_key,
-    embedded_bigboss_key,
-    bigboss_key_fingerprint,
-    trusted_runtime_cdhashes,
-    ellekit_compat_loader,
-    exec_worker,
-    customd_executable,
-    customctl_executable,
-    customd_registrar_executable,
-    customd_trace_reexec_executable,
-    customd_setexec_executable,
-    customd_job_plist_source,
-    embedded_customd_job_plist,
-    sbinject_package_validator,
-    sbinject_generalhook,
-    sbinject_lsd_registration_hook,
-    sbinject_preferences_bridge,
-    sbinject_launchdhook,
-    sbinject_jitterd,
-    embedded_sbinject_jitterd_plist,
-    springboard_candidate_generalhook,
-    springboard_candidate,
-    springboard_candidate_info,
-    springboard_candidate_entitlements,
-    springboard_candidate_manifest,
-    preferences_candidate_generalhook,
-    preferences_candidate,
-    preferences_candidate_info,
-    preferences_candidate_entitlements,
-    preferences_candidate_manifest,
-) = sys.argv[1:]
+summary_path, bundle, identifier, version, trustcache, dump, count, image_bytes = (
+    sys.argv[1:]
+)
 
 def sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
-expected_default_source_uris = [
-    "https://repo.chariz.com/",
-    "https://havoc.app/",
-    "http://apt.thebigboss.org/repofiles/cydia/",
-    "https://ellekit.space/",
-]
-default_source_lines = pathlib.Path(default_sources).read_text().splitlines()
-default_source_uris = [
-    line.removeprefix("URIs: ")
-    for line in default_source_lines
-    if line.startswith("URIs: ")
-]
-expected_default_source_signed_by = [
-    "3D32F8ECD0930A1BC4F2A4A817C6BB3FC4114BDF!",
-    "C101A4205F8616491D9B23BAB4532449E1E8AA68!",
-    "A9C96A37115894A23B894107694D17D38764B4F4!",
-    "71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370!",
-]
-default_source_signed_by = [
-    line.removeprefix("Signed-By: ")
-    for line in default_source_lines
-    if line.startswith("Signed-By: ")
-]
-if default_source_uris != expected_default_source_uris:
-    raise SystemExit(
-        "Dopamine default APT source list mismatch: "
-        f"expected {expected_default_source_uris}, got {default_source_uris}"
-    )
-if default_source_signed_by != expected_default_source_signed_by:
-    raise SystemExit(
-        "Dopamine default APT source keyring list mismatch: "
-        f"expected {expected_default_source_signed_by}, "
-        f"got {default_source_signed_by}"
-    )
-if any(line.startswith("Allow-Weak:") for line in default_source_lines):
-    raise SystemExit(
-        "default APT sources must keep signature verification enabled"
-    )
-if sha256(default_sources) != sha256(embedded_default_sources):
-    raise SystemExit("embedded default APT source payload mismatch")
-expected_repository_compat = (
-    '// BigBoss currently signs its Release metadata with a legacy DSA/SHA-1 key.\n'
-    '// Keep signature verification enabled while classifying SHA-1 as a warning.\n'
-    'APT::Hashes::SHA1::Weak "true";\n'
-    'APT::Key::Assert-Pubkey-Algo ">=rsa2048,ed25519,ed448,dsa1024";\n'
-    'APT::Update::Post-Invoke-Success { "/var/jb/bin/sh '
-    '/var/jb/usr/libexec/codex-normalize-apt-lists"; };\n'
+cdhashes = re.findall(
+    r"^([0-9a-f]{40})\s+", pathlib.Path(dump).read_text(), re.MULTILINE
 )
-repository_compat_text = pathlib.Path(repository_compat_config).read_text()
-if repository_compat_text != expected_repository_compat:
-    raise SystemExit("unexpected repository compatibility configuration")
-if sha256(repository_compat_config) != sha256(embedded_repository_compat_config):
-    raise SystemExit("embedded repository compatibility payload mismatch")
-if sha256(sbinject_apt_config) != sha256(embedded_sbinject_apt_config):
-    raise SystemExit("embedded SBInject APT package policy mismatch")
-sbinject_apt_text = pathlib.Path(sbinject_apt_config).read_text()
-if "sbinject-package-validator" not in sbinject_apt_text:
-    raise SystemExit("SBInject APT policy does not invoke its validator")
-if "runtime-trust" in sbinject_apt_text or "trust-cache" in sbinject_apt_text:
-    raise SystemExit("SBInject APT policy retains a runtime trust-cache path")
-if sha256(apt_list_normalizer) != sha256(embedded_apt_list_normalizer):
-    raise SystemExit("embedded APT package-list normalizer mismatch")
-lines = pathlib.Path(trustcache_dump).read_text().splitlines()
-cdhashes = [
-    match.group(1)
-    for line in lines
-    if (match := re.match(r"^([0-9a-f]{40})\s+", line))
-]
-if len(cdhashes) != int(entry_count):
-    raise SystemExit("trust-cache dump count mismatch")
-trusted_runtime_hashes = sorted(
-    set(pathlib.Path(trusted_runtime_cdhashes).read_text().splitlines())
-)
-missing_runtime_cdhashes = sorted(set(trusted_runtime_hashes) - set(cdhashes))
-if missing_runtime_cdhashes:
-    raise SystemExit(
-        "fixed control-plane cdhashes missing from trust cache: "
-        + ", ".join(missing_runtime_cdhashes)
-    )
-
-build_manifest = plistlib.loads(
-    pathlib.Path(bundle, "Restore", "BuildManifest.plist").read_bytes()
-)
-identities = build_manifest.get("BuildIdentities", [])
-if len(identities) != 1:
-    raise SystemExit(f"expected one Cryptex identity, got {len(identities)}")
-identity = identities[0]
-expected_identity = {
-    "Cryptex1,ChipID": "0xff10",
-    "Cryptex1,Type": 3,
-    "Cryptex1,SubType": 0,
-    "Cryptex1,ProductClass": "0xf2",
-    "Cryptex1,NonceDomain": 3,
-    "Cryptex1,UseProductClass": True,
-    "Cryptex1,Version": "999.999.999.999.999,999",
-    "Cryptex1,PreauthorizationVersion": "999.999.999.999.999,999",
-}
-mismatches = {
-    key: {"expected": value, "actual": identity.get(key)}
-    for key, value in expected_identity.items()
-    if identity.get(key) != value
-}
-if mismatches:
-    raise SystemExit(f"generic Cryptex identity mismatch: {mismatches}")
-
+if len(cdhashes) != int(count):
+    raise SystemExit("trust-cache count mismatch")
 summary = {
     "identifier": identifier,
     "version": version,
     "bundle": str(pathlib.Path(bundle).resolve()),
-    "cryptexIdentity": expected_identity,
-    "inputs": {
-        "bootstrap": {"path": bootstrap, "sha256": sha256(bootstrap)},
-        "sileo": {"path": sileo, "sha256": sha256(sileo)},
-        "repackedSileo": {
-            "path": repacked_sileo,
-            "sha256": sha256(repacked_sileo),
-        },
-        "preferenceLoader": {
-            "path": preference_loader,
-            "sha256": sha256(preference_loader),
-            "package": "preferenceloader",
-            "version": "2.3.3",
-            "source": "Yves000/preferenceloader release 2.3.3",
-        },
-        "sileoFixedTrust": {
-            "trustedPayloadRoot": trusted_sileo_app,
-            "admission": "fixed-cryptex-trust-cache",
-            "bundleIdentifier": "org.coolstar.SileoStore",
-            "installMode": "cryptex-system-app",
-            "provisioningProfile": False,
-            "entitlements": {
-                "path": sileo_system_entitlements,
-                "sha256": sha256(sileo_system_entitlements),
-            },
-            "machOs": [
-                {
-                    "path": str(pathlib.Path(trusted_sileo_app, relative)),
-                    "sha256": sha256(
-                        str(pathlib.Path(trusted_sileo_app, relative))
-                    ),
-                }
-                for relative in [
-                    "Sileo",
-                    "giveMeRoot",
-                    "F/libiosexec.1.dylib",
-                    "F/liblzma.5.dylib",
-                    "F/libcodex-sileo-broker.dylib",
-                    "F/libzstd.1.dylib",
-                    "F/libzstd.real.dylib",
-                ]
-            ],
-        },
-        "ellekitFixedTrustException": {
-            "upstreamPath": ellekit,
-            "upstreamSha256": sha256(ellekit),
-            "repackedPath": repacked_ellekit,
-            "repackedSha256": sha256(repacked_ellekit),
-            "embeddedPath": embedded_ellekit,
-            "embeddedSha256": sha256(embedded_ellekit),
-            "trustedPayloadRoot": trusted_ellekit_root,
-            "package": "ellekit",
-            "version": "1.2",
-            "admission": "fixed-cryptex-trust-cache",
-            "machOs": [
-                {
-                    "path": str(pathlib.Path(trusted_ellekit_root, relative)),
-                    "sha256": sha256(
-                        str(pathlib.Path(trusted_ellekit_root, relative))
-                    ),
-                }
-                for relative in [
-                    "var/jb/usr/lib/ellekit/MobileSafety.dylib",
-                    "var/jb/usr/lib/ellekit/libinjector.dylib",
-                    "var/jb/usr/lib/ellekit/pspawn.dylib",
-                    "var/jb/usr/lib/libellekit.dylib",
-                    "var/jb/usr/libexec/ellekit/loader",
-                ]
-            ],
-        },
-        "defaultAptSources": {
-            "path": default_sources,
-            "sha256": sha256(default_sources),
-            "embeddedPath": embedded_default_sources,
-            "embeddedSha256": sha256(embedded_default_sources),
-            "uris": default_source_uris,
-            "signedBy": default_source_signed_by,
-        },
-        "repositoryCompatibility": {
-            "path": repository_compat_config,
-            "sha256": sha256(repository_compat_config),
-            "embeddedPath": embedded_repository_compat_config,
-            "embeddedSha256": sha256(embedded_repository_compat_config),
-        },
-        "sbinjectAptPolicy": {
-            "path": sbinject_apt_config,
-            "sha256": sha256(sbinject_apt_config),
-            "embeddedPath": embedded_sbinject_apt_config,
-            "embeddedSha256": sha256(embedded_sbinject_apt_config),
-            "dynamicTrustCache": False,
-        },
-        "sileoVersionPin": {
-            "path": sileo_pin,
-            "sha256": sha256(sileo_pin),
-            "embeddedPath": embedded_sileo_pin,
-            "embeddedSha256": sha256(embedded_sileo_pin),
-            "package": "org.coolstar.sileo",
-            "version": "2.5.1+codex1",
-        },
-        "aptListNormalizer": {
-            "path": apt_list_normalizer,
-            "sha256": sha256(apt_list_normalizer),
-            "embeddedPath": embedded_apt_list_normalizer,
-            "embeddedSha256": sha256(embedded_apt_list_normalizer),
-        },
-        "repositoryKeyrings": {
-            "ellekit": {
-                "path": ellekit_key,
-                "sha256": sha256(ellekit_key),
-                "embeddedPath": embedded_ellekit_key,
-                "embeddedSha256": sha256(embedded_ellekit_key),
-                "fingerprint": ellekit_key_fingerprint,
-            },
-            "bigboss": {
-                "path": bigboss_key,
-                "sha256": sha256(bigboss_key),
-                "embeddedPath": embedded_bigboss_key,
-                "embeddedSha256": sha256(embedded_bigboss_key),
-                "fingerprint": bigboss_key_fingerprint,
-            },
-        },
-        "sileoPackages": {
-            "embeddedPayloadCopies": False,
-            "ellekitFixedTrustException": True,
-            "postBootTrustCache": False,
-            "springboardAdmission": "sbinject-jit-rw-to-rx",
-        },
-        "fixedControlPlane": {
-            "artifacts": [
-                {
-                    "name": "codex-ellekit-loader",
-                    "path": ellekit_compat_loader,
-                    "sha256": sha256(ellekit_compat_loader),
-                },
-                {
-                    "name": "codex-exec-worker",
-                    "path": exec_worker,
-                    "sha256": sha256(exec_worker),
-                },
-                {
-                    "name": "customd",
-                    "path": customd_executable,
-                    "sha256": sha256(customd_executable),
-                },
-                {
-                    "name": "customctl",
-                    "path": customctl_executable,
-                    "sha256": sha256(customctl_executable),
-                },
-                {
-                    "name": "customd-candidate-registrar",
-                    "path": customd_registrar_executable,
-                    "sha256": sha256(customd_registrar_executable),
-                },
-                {
-                    "name": "customd-trace-me-reexec-probe",
-                    "path": customd_trace_reexec_executable,
-                    "sha256": sha256(customd_trace_reexec_executable),
-                },
-                {
-                    "name": "customd-springboard-setexec",
-                    "path": customd_setexec_executable,
-                    "sha256": sha256(customd_setexec_executable),
-                },
-                {
-                    "name": "sbinject-package-validator",
-                    "path": sbinject_package_validator,
-                    "sha256": sha256(sbinject_package_validator),
-                },
-                {
-                    "name": "sbinject-generalhook.dylib",
-                    "path": sbinject_generalhook,
-                    "sha256": sha256(sbinject_generalhook),
-                },
-                {
-                    "name": "sbinject-lsd-registration-hook.dylib",
-                    "path": sbinject_lsd_registration_hook,
-                    "sha256": sha256(sbinject_lsd_registration_hook),
-                    "installedPath": (
-                        "/var/jb/usr/lib/sbinject/"
-                        "lsd-registration-hook.dylib"
-                    ),
-                    "target": "/usr/libexec/lsd",
-                },
-                {
-                    "name": "sbinject-preferences-bridge.dylib",
-                    "path": sbinject_preferences_bridge,
-                    "sha256": sha256(sbinject_preferences_bridge),
-                    "installedPath": (
-                        "/var/jb/usr/lib/sbinject/preferences-bridge.dylib"
-                    ),
-                    "target": "iOS 27 SettingsSidebarListState",
-                },
-                {
-                    "name": "sbinject-launchdhook-v3.dylib",
-                    "path": sbinject_launchdhook,
-                    "sha256": sha256(sbinject_launchdhook),
-                },
-                {
-                    "name": "sbinject-jitterd",
-                    "path": sbinject_jitterd,
-                    "sha256": sha256(sbinject_jitterd),
-                },
-                {
-                    "name": "codex-springboard-candidate",
-                    "path": springboard_candidate,
-                    "sha256": sha256(springboard_candidate),
-                },
-                {
-                    "name": "codex-preferences-candidate",
-                    "path": preferences_candidate,
-                    "sha256": sha256(preferences_candidate),
-                },
-            ],
-            "cdhashes": trusted_runtime_hashes,
-        },
-        "customd": {
-            "executable": {
-                "path": customd_executable,
-                "sha256": sha256(customd_executable),
-                "installedPath": "/var/jb/usr/libexec/customd",
-            },
-            "controlExecutable": {
-                "path": customctl_executable,
-                "sha256": sha256(customctl_executable),
-                "installedPath": "/var/jb/usr/libexec/customctl",
-            },
-            "candidateRegistrar": {
-                "path": customd_registrar_executable,
-                "sha256": sha256(customd_registrar_executable),
-                "installedPath": (
-                    "/var/jb/usr/libexec/customd-candidate-registrar"
-                ),
-            },
-            "traceReexecProbe": {
-                "path": customd_trace_reexec_executable,
-                "sha256": sha256(customd_trace_reexec_executable),
-                "installedPath": (
-                    "/var/jb/usr/libexec/customd-trace-me-reexec-probe"
-                ),
-            },
-            "springboardSetexecHelper": {
-                "path": customd_setexec_executable,
-                "sha256": sha256(customd_setexec_executable),
-                "installedPath": (
-                    "/var/jb/usr/libexec/customd-springboard-setexec"
-                ),
-            },
-            "jobPlist": {
-                "sourcePath": customd_job_plist_source,
-                "sourceSha256": sha256(customd_job_plist_source),
-                "embeddedPath": embedded_customd_job_plist,
-                "embeddedSha256": sha256(embedded_customd_job_plist),
-                "installedPath": (
-                    "/var/jb/Library/LaunchDaemons/com.openai.customd.plist"
-                ),
-            },
-            "launchMode": "system-launchdaemon-persistent-exec-worker",
-        },
-        "springboardCandidate": {
-            "artifact": {
-                "path": springboard_candidate,
-                "sha256": sha256(springboard_candidate),
-            },
-            "buildManifest": {
-                "path": springboard_candidate_manifest,
-                "sha256": sha256(springboard_candidate_manifest),
-                "value": json.loads(
-                    pathlib.Path(springboard_candidate_manifest).read_text()
-                ),
-            },
-            "infoPlist": {
-                "path": springboard_candidate_info,
-                "sha256": sha256(springboard_candidate_info),
-                "value": plistlib.loads(
-                    pathlib.Path(springboard_candidate_info).read_bytes()
-                ),
-            },
-            "entitlements": {
-                "path": springboard_candidate_entitlements,
-                "sha256": sha256(springboard_candidate_entitlements),
-            },
-            "preMainHook": {
-                "path": springboard_candidate_generalhook,
-                "sha256": sha256(springboard_candidate_generalhook),
-                "loadCommand": "@loader_path/g",
-            },
-            "installedPath": (
-                "/var/jb/System/Library/CoreServices/"
-                "SpringBoard.app/notSpringBoard"
-            ),
-            "executionMode": "sbinject-jit-rw-to-rx",
-            "dynamicTrustCache": False,
-        },
-        "preferencesCandidate": {
-            "artifact": {
-                "path": preferences_candidate,
-                "sha256": sha256(preferences_candidate),
-            },
-            "buildManifest": {
-                "path": preferences_candidate_manifest,
-                "sha256": sha256(preferences_candidate_manifest),
-                "value": json.loads(
-                    pathlib.Path(preferences_candidate_manifest).read_text()
-                ),
-            },
-            "infoPlist": {
-                "path": preferences_candidate_info,
-                "sha256": sha256(preferences_candidate_info),
-                "value": plistlib.loads(
-                    pathlib.Path(preferences_candidate_info).read_bytes()
-                ),
-            },
-            "entitlements": {
-                "path": preferences_candidate_entitlements,
-                "sha256": sha256(preferences_candidate_entitlements),
-            },
-            "preMainHook": {
-                "path": preferences_candidate_generalhook,
-                "sha256": sha256(preferences_candidate_generalhook),
-                "loadCommand": "@loader_path/g",
-            },
-            "installedPath": (
-                "/var/jb/Applications/Preferences.app/notPreferences"
-            ),
-            "executionMode": "sbinject-jit-rw-to-rx",
-            "dynamicTrustCache": False,
-        },
-        "sbinject": {
-            "jitterdLaunchDaemon": {
-                "path": embedded_sbinject_jitterd_plist,
-                "sha256": sha256(embedded_sbinject_jitterd_plist),
-                "installedPath": (
-                    "/var/jb/Library/LaunchDaemons/"
-                    "com.openai.codex.sbinject.jitterd.plist"
-                ),
-            },
-            "jitterdExecutable": {
-                "path": sbinject_jitterd,
-                "sha256": sha256(sbinject_jitterd),
-                "installedPath": "/var/jb/usr/libexec/sbinject-jitterd",
-            },
-            "launchdHook": {
-                "path": sbinject_launchdhook,
-                "sha256": sha256(sbinject_launchdhook),
-                "installedPath": (
-                    "/var/jb/usr/lib/sbinject/launchdhook-v3.dylib"
-                ),
-            },
-            "packageValidator": {
-                "path": sbinject_package_validator,
-                "sha256": sha256(sbinject_package_validator),
-                "installedPath": (
-                    "/var/jb/usr/libexec/sbinject-package-validator"
-                ),
-            },
-        },
-    },
-    "sileoSystemSigning": {
-        "kind": "adhoc-fixed-trust",
-        "bundleIdentifier": "org.coolstar.SileoStore",
-        "provisioningProfile": False,
-        "entitlements": {
-            "path": sileo_system_entitlements,
-            "sha256": sha256(sileo_system_entitlements),
-        },
-    },
+    "imageBytes": int(image_bytes),
     "trustCache": {
         "path": trustcache,
         "sha256": sha256(trustcache),
-        "entryCount": int(entry_count),
+        "entryCount": int(count),
         "cdhashes": cdhashes,
     },
 }
 pathlib.Path(summary_path).write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n"
 )
-print(json.dumps(summary, indent=2, sort_keys=True))
 PY
 
 print -- "unsignedBundle=$BUNDLE"

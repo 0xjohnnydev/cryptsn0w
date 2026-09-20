@@ -1,1 +1,0 @@
-phase=transition pid=2344 armed=1 samples=53403 baseline=0x36003005 transitionCsops=0 transitionErrno=0 transition=0x27003301 transitionDebugged=0 transitionHardKill=1 stop=0 stopErrno=0 stoppedCsops=0 stoppedErrno=0 stopped=0x27003301 stoppedDebugged=0 stoppedHardKill=1

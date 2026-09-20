@@ -1,9 +1,0 @@
-Package: com.openai.codex.springboard-live-canary
-Name: Codex SpringBoard Live Canary
-Version: 1.0.20260918.014837
-Architecture: iphoneos-arm64
-Description: Fresh no-TSS constructor canary for live SpringBoard injection verification
-Maintainer: Codex Runtime Verification
-Author: Codex Runtime Verification
-Section: Development
-Priority: optional

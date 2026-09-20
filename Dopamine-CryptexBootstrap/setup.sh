@@ -12,8 +12,6 @@ MANAGED_MARKER="$UPSTREAM_DIR/.codex-cryptex-bootstrap-managed"
 CRYPTEXCTL=/System/Library/SecurityResearch/usr/bin/cryptexctl.research
 ACTION=prepare
 DEVICE=
-ALLOW_UNVERIFIED=0
-NO_REPLACE=0
 NO_BREW=0
 
 die() {
@@ -32,10 +30,8 @@ containing fixed-trust system Sileo to the selected device.
 Options:
   --prepare                 Prepare and preflight only (default)
   --build                   Prepare and build a matched Cryptex/Sileo pair
-  --install                 Prepare, build, personalize, validate, and install
+  --install                 Run the two-stage SSH pull and final install
   --device UDID             Select a connected paired device
-  --allow-unverified-device Bypass the validated target-device guard
-  --no-replace              Refuse an older installed copy of this Cryptex
   --no-brew                 Report missing Homebrew tools without installing
   -h, --help                Show this help
 
@@ -57,12 +53,6 @@ while (( $# > 0 )); do
             (( $# >= 2 )) || die "--device requires a UDID"
             DEVICE=$2
             shift
-            ;;
-        --allow-unverified-device)
-            ALLOW_UNVERIFIED=1
-            ;;
-        --no-replace)
-            NO_REPLACE=1
             ;;
         --no-brew)
             NO_BREW=1
@@ -126,8 +116,8 @@ if (( ${#missing_formulas} > 0 )); then
 fi
 
 HOST_TOOLS=(
-    awk codesign curl ditto dpkg-deb file git gpg install_name_tool ldid lipo make nm
-    otool plutil python3 rsync security shasum sips tar xcrun zstd rg
+    awk codesign curl ditto dpkg-deb git gpg install_name_tool ldid lipo make
+    otool plutil python3 rsync scp shasum sips ssh ssh-keygen tar xcrun zstd rg
 )
 for tool in "${HOST_TOOLS[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required host tool: $tool"
@@ -192,21 +182,19 @@ rsync -a --delete \
 print -- "Preparing pinned Python environment..."
 make -C "$PROJECT_ROOT" python
 "$PROJECT_ROOT/.venv/bin/python" \
-    "$PROJECT_ROOT/tools/patch_pymobiledevice3_remotexpc.py"
+    "$SCRIPT_DIR/patch_pymobiledevice3_remotexpc.py"
 
 if [[ "$ACTION" == prepare ]]; then
     print -- ""
     print -- "Ready. Build with:"
     print -- "  ./Dopamine-CryptexBootstrap/setup.sh --build"
-    print -- "Install on the validated connected device with:"
+    print -- "Install on the connected device with:"
     print -- "  ./Dopamine-CryptexBootstrap/setup.sh --install"
     exit 0
 fi
 
 DEPLOY_ARGS=("$ACTION")
 [[ -z "$DEVICE" ]] || DEPLOY_ARGS+=(--device "$DEVICE")
-(( ALLOW_UNVERIFIED == 0 )) || DEPLOY_ARGS+=(--allow-unverified-device)
-(( NO_REPLACE == 0 )) || DEPLOY_ARGS+=(--no-replace)
 exec "$PROJECT_ROOT/.venv/bin/python" \
     "$UPSTREAM_DIR/CryptexBootstrap/deploy.py" \
     "${DEPLOY_ARGS[@]}"

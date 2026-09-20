@@ -107,32 +107,12 @@ extern char **environ;
 extern int csops(pid_t pid, unsigned int operation, void *address,
                  size_t size);
 extern int ptrace(int request, pid_t pid, caddr_t address, int data);
-extern kern_return_t mach_vm_allocate(vm_map_t target,
-                                      mach_vm_address_t *address,
-                                      mach_vm_size_t size, int flags);
-extern kern_return_t mach_vm_deallocate(vm_map_t target,
-                                        mach_vm_address_t address,
-                                        mach_vm_size_t size);
 extern kern_return_t mach_vm_protect(vm_map_t target,
                                      mach_vm_address_t address,
                                      mach_vm_size_t size,
                                      boolean_t setMaximum,
                                      vm_prot_t protection);
-extern kern_return_t mach_vm_write(vm_map_t target,
-                                   mach_vm_address_t address,
-                                   vm_offset_t data,
-                                   mach_msg_type_number_t size);
-
-enum codex_worker_mode {
-    CODEX_WORKER_SELF_TEST,
-    CODEX_WORKER_RAW,
-    CODEX_WORKER_DYLIB,
-    CODEX_WORKER_MACHO,
-};
-
 struct codex_child_report {
-    uint64_t address;
-    uint64_t size;
     int32_t status;
 };
 
@@ -141,12 +121,6 @@ struct codex_parent_reply {
 };
 
 static volatile sig_atomic_t gOwnedChild = -1;
-
-static const uint32_t kReturn42[] = {
-    0xd503245f, /* bti c */
-    0x52800540, /* mov w0, #42 */
-    0xd65f03c0, /* ret */
-};
 
 static bool write_all(int descriptor, const void *buffer, size_t size) {
     const uint8_t *cursor = buffer;
@@ -804,7 +778,7 @@ static bool attach_macho_signatures(const char *path) {
     return attached;
 }
 
-#if defined(__arm64__) && !defined(CODEX_WORKER_HOST_TEST)
+#if defined(__arm64__)
 
 /*
  * dyld normally asks the kernel to attach a CodeDirectory before it maps an
@@ -1121,123 +1095,8 @@ static void *find_main_entry(const struct mach_header_64 *header) {
     return NULL;
 }
 
-static int run_macho_inplace(const char *loadPath, int guestArgc,
-                             char **guestArgv) {
-    uint32_t flags = 0;
-    errno = 0;
-    int csStatus = csops(getpid(), CODEX_CS_OPS_STATUS, &flags,
-                         sizeof(flags));
-    int csError = csStatus == 0 ? 0 : errno;
-    bool debugged = csStatus == 0 &&
-                    (flags & CODEX_CS_DEBUGGED) != 0 &&
-                    (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
-    dprintf(debugged ? STDOUT_FILENO : STDERR_FILENO,
-            "codex-exec-worker pid=%d mode=macho-inplace "
-            "phase=debugged csops=%d errno=%d flags=0x%08x "
-            "debugged=%d\n",
-            getpid(), csStatus, csError, flags, debugged);
-    if (!debugged) {
-        return 96;
-    }
-
-    bool dyldBypassInstalled = install_dyld_validation_bypass();
-    bool signatureAttached =
-        !dyldBypassInstalled && attach_macho_signatures(loadPath);
-    dprintf(dyldBypassInstalled || signatureAttached ? STDOUT_FILENO
-                                                     : STDERR_FILENO,
-            "codex-exec-worker pid=%d mode=macho-inplace dyldBypass=%d "
-            "signatureAttached=%d path=%s\n",
-            getpid(), dyldBypassInstalled, signatureAttached, loadPath);
-
-    void *handle = dlopen(loadPath, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
-    if (handle == NULL) {
-        const char *error = dlerror();
-        dprintf(STDERR_FILENO,
-                "codex-exec-worker pid=%d mode=macho-inplace "
-                "dlopen=false path=%s error=%s\n",
-                getpid(), loadPath, error != NULL ? error : "unknown");
-        return 79;
-    }
-
-    const struct mach_header_64 *header = find_loaded_header(loadPath);
-    void *entry = find_main_entry(header);
-    if (entry == NULL) {
-        dprintf(STDERR_FILENO,
-                "codex-exec-worker pid=%d mode=macho-inplace "
-                "entry=false path=%s\n",
-                getpid(), loadPath);
-        return 83;
-    }
-    dprintf(STDOUT_FILENO,
-            "codex-exec-worker pid=%d mode=macho-inplace entry=%p "
-            "path=%s\n",
-            getpid(), entry, loadPath);
-    int result = ((int (*)(int, char **, char **))entry)(
-        guestArgc, guestArgv, environ);
-    return result & 0xff;
-}
-
-static int prepare_local_executable_pages(const uint8_t *payload,
-                                          size_t payloadSize,
-                                          mach_vm_address_t *address,
-                                          mach_vm_size_t *allocationSize) {
-    *address = 0;
-    *allocationSize = 0;
-    size_t pageSize = (size_t)getpagesize();
-    if (payload == NULL || payloadSize == 0 || pageSize == 0 ||
-        payloadSize > CODEX_MAX_PAYLOAD) {
-        return 77;
-    }
-    *allocationSize =
-        (mach_vm_size_t)((payloadSize + pageSize - 1U) & ~(pageSize - 1U));
-    if (*allocationSize == 0 || *allocationSize > CODEX_MAX_PAYLOAD) {
-        return 77;
-    }
-
-    mach_port_t task = mach_task_self();
-    kern_return_t allocateResult = mach_vm_allocate(
-        task, address, *allocationSize, VM_FLAGS_ANYWHERE);
-    kern_return_t writeResult = KERN_FAILURE;
-    kern_return_t flushResult = KERN_FAILURE;
-    kern_return_t executeResult = KERN_FAILURE;
-    if (allocateResult == KERN_SUCCESS) {
-        writeResult = mach_vm_write(
-            task, *address, (vm_offset_t)(uintptr_t)payload,
-            (mach_msg_type_number_t)payloadSize);
-    }
-    if (writeResult == KERN_SUCCESS) {
-        vm_machine_attribute_val_t value = MATTR_VAL_CACHE_FLUSH;
-        flushResult = vm_machine_attribute(
-            task, (vm_address_t)*address, (vm_size_t)*allocationSize,
-            MATTR_CACHE, &value);
-    }
-    if (writeResult == KERN_SUCCESS && flushResult == KERN_SUCCESS) {
-        executeResult = mach_vm_protect(
-            task, *address, *allocationSize, false,
-            VM_PROT_READ | VM_PROT_EXECUTE);
-    }
-    dprintf(STDOUT_FILENO,
-            "codex-exec-worker child=%d phase=prepare-local "
-            "allocateKr=%d writeKr=%d flushKr=%d executeKr=%d "
-            "address=0x%llx size=0x%llx\n",
-            getpid(), allocateResult, writeResult, flushResult, executeResult,
-            (unsigned long long)*address,
-            (unsigned long long)*allocationSize);
-    if (allocateResult == KERN_SUCCESS && writeResult == KERN_SUCCESS &&
-        flushResult == KERN_SUCCESS && executeResult == KERN_SUCCESS) {
-        return 0;
-    }
-    if (*address != 0) {
-        (void)mach_vm_deallocate(task, *address, *allocationSize);
-        *address = 0;
-        *allocationSize = 0;
-    }
-    return 78;
-}
-
-static int run_child(enum codex_worker_mode mode, int control,
-                     const uint8_t *payload, size_t payloadSize,
-                     const char *loadPath, int guestArgc, char **guestArgv) {
+static int run_child(int control, const char *loadPath, int guestArgc,
+                     char **guestArgv) {
     uint8_t ready = 1;
     if (!write_all(control, &ready, sizeof(ready))) {
         return 70;
@@ -1250,15 +1109,6 @@ static int run_child(enum codex_worker_mode mode, int control,
     struct codex_child_report report = {
         .status = start.status,
     };
-    if (report.status == 0 &&
-        (mode == CODEX_WORKER_SELF_TEST || mode == CODEX_WORKER_RAW)) {
-        mach_vm_address_t address = 0;
-        mach_vm_size_t size = 0;
-        report.status = prepare_local_executable_pages(
-            payload, payloadSize, &address, &size);
-        report.address = address;
-        report.size = size;
-    }
     if (!write_all(control, &report, sizeof(report))) {
         return 72;
     }
@@ -1278,44 +1128,22 @@ static int run_child(enum codex_worker_mode mode, int control,
         return report.status != 0 ? report.status : reply.status;
     }
 
-    if (mode == CODEX_WORKER_SELF_TEST || mode == CODEX_WORKER_RAW) {
-        if (report.address == 0) {
-            return 75;
-        }
-        int value = ((int (*)(void))(uintptr_t)report.address)();
-        dprintf(STDOUT_FILENO,
-                "codex-exec-worker child=%d mode=%s executeValue=%d\n",
-                getpid(),
-                mode == CODEX_WORKER_SELF_TEST ? "self-test" : "raw",
-                value);
-        return mode == CODEX_WORKER_SELF_TEST ? (value == 42 ? 0 : 76)
-                                               : (value & 0xff);
-    }
-
     bool dyldBypassInstalled = install_dyld_validation_bypass();
     bool signatureAttached =
         !dyldBypassInstalled && attach_macho_signatures(loadPath);
     dprintf(dyldBypassInstalled || signatureAttached ? STDOUT_FILENO
                                                      : STDERR_FILENO,
-            "codex-exec-worker child=%d mode=%s dyldBypass=%d "
+            "codex-exec-worker child=%d mode=macho dyldBypass=%d "
             "signatureAttached=%d path=%s\n",
-            getpid(), mode == CODEX_WORKER_DYLIB ? "dylib" : "macho",
-            dyldBypassInstalled, signatureAttached, loadPath);
+            getpid(), dyldBypassInstalled, signatureAttached, loadPath);
     void *handle = dlopen(loadPath, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
     if (handle == NULL) {
         const char *error = dlerror();
         dprintf(STDERR_FILENO,
-                "codex-exec-worker child=%d mode=%s dlopen=false path=%s "
+                "codex-exec-worker child=%d mode=macho dlopen=false path=%s "
                 "error=%s\n",
-                getpid(), mode == CODEX_WORKER_DYLIB ? "dylib" : "macho",
-                loadPath, error != NULL ? error : "unknown");
+                getpid(), loadPath, error != NULL ? error : "unknown");
         return 79;
-    }
-    if (mode == CODEX_WORKER_DYLIB) {
-        dprintf(STDOUT_FILENO,
-                "codex-exec-worker child=%d mode=dylib loaded=true path=%s\n",
-                getpid(), loadPath);
-        return 0;
     }
 
     const struct mach_header_64 *header = find_loaded_header(loadPath);
@@ -1394,80 +1222,6 @@ static bool wait_for_stop(pid_t child, int *status) {
     return false;
 }
 
-static int rewrite_executable_pages(pid_t child,
-                                    mach_vm_address_t remoteAddress,
-                                    mach_vm_size_t allocationSize,
-                                    const uint8_t *payload,
-                                    size_t payloadSize) {
-    if (remoteAddress == 0 || allocationSize == 0 ||
-        allocationSize > CODEX_MAX_PAYLOAD || payload == NULL ||
-        payloadSize == 0 || payloadSize > allocationSize) {
-        return 80;
-    }
-    mach_port_t task = MACH_PORT_NULL;
-    kern_return_t taskResult =
-        task_for_pid(mach_task_self(), child, &task);
-    if (taskResult != KERN_SUCCESS || !MACH_PORT_VALID(task)) {
-        dprintf(STDERR_FILENO,
-                "codex-exec-worker parent=%d child=%d phase=task-port "
-                "kr=%d task=0x%x\n",
-                getpid(), child, taskResult, task);
-        return 81;
-    }
-
-    kern_return_t protectResult = mach_vm_protect(
-        task, remoteAddress, allocationSize, false,
-        VM_PROT_READ | VM_PROT_WRITE);
-    bool usedCopy = false;
-    if (protectResult != KERN_SUCCESS) {
-        usedCopy = true;
-        protectResult = mach_vm_protect(
-            task, remoteAddress, allocationSize, false,
-            VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-    }
-
-    kern_return_t writeResult = protectResult;
-    size_t written = 0;
-    while (writeResult == KERN_SUCCESS && written < payloadSize) {
-        size_t amount = payloadSize - written;
-        if (amount > 64U * 1024U) {
-            amount = 64U * 1024U;
-        }
-        writeResult = mach_vm_write(
-            task, remoteAddress + written,
-            (vm_offset_t)(uintptr_t)(payload + written),
-            (mach_msg_type_number_t)amount);
-        written += amount;
-    }
-
-    kern_return_t flushResult = KERN_FAILURE;
-    if (writeResult == KERN_SUCCESS) {
-        vm_machine_attribute_val_t value = MATTR_VAL_CACHE_FLUSH;
-        flushResult = vm_machine_attribute(
-            task, (vm_address_t)remoteAddress, (vm_size_t)allocationSize,
-            MATTR_CACHE, &value);
-    }
-    kern_return_t executeResult = KERN_FAILURE;
-    if (protectResult == KERN_SUCCESS) {
-        executeResult = mach_vm_protect(
-            task, remoteAddress, allocationSize, false,
-            VM_PROT_READ | VM_PROT_EXECUTE);
-    }
-    dprintf(STDOUT_FILENO,
-            "codex-exec-worker parent=%d child=%d phase=page-broker "
-            "taskKr=%d protectKr=%d usedCopy=%d writeKr=%d flushKr=%d "
-            "executeKr=%d address=0x%llx size=0x%llx\n",
-            getpid(), child, taskResult, protectResult, usedCopy, writeResult,
-            flushResult, executeResult, (unsigned long long)remoteAddress,
-            (unsigned long long)allocationSize);
-    (void)mach_port_deallocate(mach_task_self(), task);
-    return protectResult == KERN_SUCCESS && writeResult == KERN_SUCCESS &&
-                   flushResult == KERN_SUCCESS &&
-                   executeResult == KERN_SUCCESS
-               ? 0
-               : 82;
-}
-
 static bool wait_for_resume_ack(int control) {
     struct pollfd descriptor = {
         .fd = control,
@@ -1484,9 +1238,7 @@ static bool wait_for_resume_ack(int control) {
            read_all(control, &resumed, sizeof(resumed)) && resumed == 1;
 }
 
-static int run_debugged_child(enum codex_worker_mode mode,
-                              const uint8_t *payload, size_t payloadSize,
-                              const char *loadPath, int guestArgc,
+static int run_debugged_child(const char *loadPath, int guestArgc,
                               char **guestArgv) {
     int control[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, control) != 0) {
@@ -1500,8 +1252,7 @@ static int run_debugged_child(enum codex_worker_mode mode,
     }
     if (child == 0) {
         close(control[0]);
-        int result = run_child(mode, control[1], payload, payloadSize,
-                               loadPath, guestArgc, guestArgv);
+        int result = run_child(control[1], loadPath, guestArgc, guestArgv);
         _exit(result);
     }
     close(control[1]);
@@ -1583,11 +1334,6 @@ static int run_debugged_child(enum codex_worker_mode mode,
     struct codex_parent_reply reply = {
         .status = report.status,
     };
-    if (reply.status == 0 &&
-        (mode == CODEX_WORKER_SELF_TEST || mode == CODEX_WORKER_RAW)) {
-        reply.status = rewrite_executable_pages(
-            child, report.address, report.size, payload, payloadSize);
-    }
     if (!write_all(control[0], &reply, sizeof(reply))) {
         close(control[0]);
         terminate_own_child(child);
@@ -1615,104 +1361,9 @@ static int run_debugged_child(enum codex_worker_mode mode,
     return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 103;
 }
 
-static int read_payload(const char *path, uint8_t **payload,
-                        size_t *payloadSize) {
-    char resolved[PATH_MAX];
-    if (!path_is_managed(path, resolved)) {
-        return 64;
-    }
-    int descriptor = open(resolved, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat status;
-    if (descriptor < 0 || fstat(descriptor, &status) != 0 ||
-        status.st_size <= 0 || status.st_size > CODEX_MAX_PAYLOAD) {
-        if (descriptor >= 0) {
-            close(descriptor);
-        }
-        return 65;
-    }
-    *payloadSize = (size_t)status.st_size;
-    *payload = malloc(*payloadSize);
-    if (*payload == NULL || !read_all(descriptor, *payload, *payloadSize)) {
-        free(*payload);
-        *payload = NULL;
-        close(descriptor);
-        return 66;
-    }
-    close(descriptor);
-    return 0;
-}
-
 int main(int argc, char *argv[]) {
     setlinebuf(stdout);
     setlinebuf(stderr);
-#ifdef CODEX_WORKER_HOST_TEST
-    if (argc == 4 && strcmp(argv[1], "--host-prepare-macho") == 0) {
-        if (!copy_file_exclusive(argv[2], argv[3]) ||
-            !patch_execute_copy(argv[3])) {
-            dprintf(STDERR_FILENO,
-                    "codex-exec-worker host-prepare=false errno=%d\n",
-                    errno);
-            return 67;
-        }
-        return 0;
-    }
-    if (argc == 3 && strcmp(argv[1], "--host-load-macho") == 0) {
-        char runtimeCopy[PATH_MAX] = {0};
-        if (!make_macho_copy(argv[2], runtimeCopy)) {
-            return 67;
-        }
-        bool signatureAttached = attach_macho_signatures(runtimeCopy);
-        dprintf(signatureAttached ? STDOUT_FILENO : STDERR_FILENO,
-                "host signature attach: path=%s attached=%d errno=%d\n",
-                runtimeCopy, signatureAttached, errno);
-        void *handle = dlopen(runtimeCopy, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
-        if (handle == NULL) {
-            dprintf(STDERR_FILENO, "host dlopen failed: %s\n", dlerror());
-            unlink(runtimeCopy);
-            return 79;
-        }
-        dprintf(STDOUT_FILENO, "host dlopen passed: %s\n", runtimeCopy);
-        unlink(runtimeCopy);
-        return 0;
-    }
-    if (argc == 3 && strcmp(argv[1], "--host-load-dylib") == 0) {
-        bool signatureAttached = attach_macho_signatures(argv[2]);
-        dprintf(signatureAttached ? STDOUT_FILENO : STDERR_FILENO,
-                "host signature attach: path=%s attached=%d errno=%d\n",
-                argv[2], signatureAttached, errno);
-        void *handle = dlopen(argv[2], RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
-        if (handle == NULL) {
-            dprintf(STDERR_FILENO, "host dlopen failed: %s\n", dlerror());
-            return 79;
-        }
-        dprintf(STDOUT_FILENO, "host dlopen passed: %s\n", argv[2]);
-        return 0;
-    }
-#endif
-    if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
-        return run_debugged_child(CODEX_WORKER_SELF_TEST,
-                                  (const uint8_t *)kReturn42,
-                                  sizeof(kReturn42), NULL, 0, NULL);
-    }
-    if (argc == 3 && strcmp(argv[1], "--raw") == 0) {
-        uint8_t *payload = NULL;
-        size_t payloadSize = 0;
-        int result = read_payload(argv[2], &payload, &payloadSize);
-        if (result == 0) {
-            result = run_debugged_child(CODEX_WORKER_RAW, payload,
-                                        payloadSize, NULL, 0, NULL);
-        }
-        free(payload);
-        return result;
-    }
-    if (argc == 3 && strcmp(argv[1], "--dylib") == 0) {
-        char resolved[PATH_MAX];
-        if (!path_is_managed(argv[2], resolved)) {
-            return 64;
-        }
-        return run_debugged_child(CODEX_WORKER_DYLIB, NULL, 0, resolved, 0,
-                                  NULL);
-    }
     if (argc >= 3 && strcmp(argv[1], "--macho") == 0) {
         char source[PATH_MAX];
         char runtimeCopy[PATH_MAX] = {0};
@@ -1725,36 +1376,12 @@ int main(int argc, char *argv[]) {
             return 67;
         }
         argv[2] = source;
-        int result = run_debugged_child(CODEX_WORKER_MACHO, NULL, 0,
-                                        runtimeCopy, argc - 2, argv + 2);
+        int result = run_debugged_child(runtimeCopy, argc - 2, argv + 2);
         unlink(runtimeCopy);
         return result;
     }
-    if (argc >= 3 && strcmp(argv[1], "--macho-inplace") == 0) {
-        char source[PATH_MAX];
-        char runtimeCopy[PATH_MAX] = {0};
-        if (!path_is_managed(argv[2], source) ||
-            !make_macho_copy(source, runtimeCopy)) {
-            dprintf(STDERR_FILENO,
-                    "codex-exec-worker mode=macho-inplace prepare=false "
-                    "path=%s errno=%d\n",
-                    argv[2], errno);
-            return 67;
-        }
-        argv[2] = source;
-        int result = run_macho_inplace(runtimeCopy, argc - 2, argv + 2);
-        if (unlink(runtimeCopy) != 0) {
-            dprintf(STDERR_FILENO,
-                    "codex-exec-worker mode=macho-inplace cleanup=false "
-                    "path=%s errno=%d\n",
-                    runtimeCopy, errno);
-        }
-        return result;
-    }
     dprintf(STDERR_FILENO,
-            "usage: %s --self-test|--raw file|--dylib file|"
-            "--macho executable [arguments...]|"
-            "--macho-inplace executable [arguments...]\n",
+            "usage: %s --macho executable [arguments...]\n",
             argv[0]);
     return 64;
 }

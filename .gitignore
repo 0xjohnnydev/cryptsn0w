@@ -2,9 +2,8 @@ build/
 cache/
 .venv/
 /out/
-/:-
 /Dopamine-upstream/
-/vendor/SileoBuild/
+/vendor/
 __pycache__/
 *.pyc
 .DS_Store
@@ -15,7 +14,6 @@ __pycache__/
 *.p12
 *.key
 *.ndjson
-/findings/cylinder-reborn-runtime-trust-20260916.log
 *.i64
 *.id0
 *.id1

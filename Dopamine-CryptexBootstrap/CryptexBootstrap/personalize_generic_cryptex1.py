@@ -19,17 +19,22 @@ import copy
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from pyimg4 import IM4M
+import requests
 
-from pymobiledevice3.restore.tss import TSSRequest, cryptex1_udid
+from pymobiledevice3.restore.tss import (
+    TSS_CONTROLLER_ACTION_URL,
+    TSSRequest,
+    cryptex1_udid,
+)
 from pymobiledevice3.services.cryptexd import unwrap_nonce
-
-from probe_cryptex1_tss import _json_value, _send
 
 
 SIGNED_COMPONENTS = {
@@ -38,6 +43,66 @@ SIGNED_COMPONENTS = {
     "Cryptex1,GenericVolume": "gtgv",
 }
 UNSIGNED_COMPONENT = "Cryptex1,GenericDmg"
+
+
+def _json_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"$hex": value.hex()}
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _parse_tss_envelope(
+    content: bytes,
+) -> tuple[int | None, str | None, bytes | None]:
+    status_match = re.search(rb"(?:^|&)STATUS=([^&]*)", content)
+    message_match = re.search(rb"(?:^|&)MESSAGE=([^&]*)", content)
+    status = None
+    if status_match is not None:
+        try:
+            status = int(status_match.group(1))
+        except ValueError:
+            pass
+    message = None
+    if message_match is not None:
+        message = unquote_to_bytes(message_match.group(1)).decode(
+            "utf-8", "replace"
+        )
+    marker = b"REQUEST_STRING="
+    response_plist = (
+        unquote_to_bytes(content.split(marker, 1)[1])
+        if marker in content
+        else None
+    )
+    return status, message, response_plist
+
+
+def _send(
+    request: dict[str, Any],
+) -> tuple[requests.Response, int | None, str | None, dict[str, Any] | None]:
+    response = requests.post(
+        TSS_CONTROLLER_ACTION_URL,
+        headers={
+            "Cache-Control": "no-cache",
+            "Content-type": 'text/xml; charset="utf-8"',
+            "User-Agent": "InetURL/1.0",
+            "Expect": "100-continue",
+        },
+        data=plistlib.dumps(request),
+        timeout=45,
+        verify=False,
+    )
+    status, message, raw_plist = _parse_tss_envelope(response.content)
+    parsed_plist = None
+    if raw_plist is not None:
+        try:
+            parsed_plist = plistlib.loads(raw_plist)
+        except Exception:
+            pass
+    return response, status, message, parsed_plist
 
 
 def _restore_dir(path: Path) -> tuple[Path, Path]:

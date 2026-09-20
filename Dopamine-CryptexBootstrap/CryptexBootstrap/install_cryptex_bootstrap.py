@@ -30,18 +30,9 @@ from pymobiledevice3.services.cryptexd import (
     DDI_PERSISTENCE,
     CryptexdService,
 )
-from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 
-WORKSPACE = Path(__file__).resolve().parents[2]
-HELPER_DIR = WORKSPACE / "tools" / "cryptexd-static"
-sys.path.insert(0, str(HELPER_DIR))
-
-from install_generic_cryptex1_canary import (  # noqa: E402
-    _read_payload,
-    _validate_identity,
-)
-from personalize_generic_cryptex1 import (  # noqa: E402
+from personalize_generic_cryptex1 import (
     _component_digests,
     _identity,
     _restore_dir,
@@ -58,8 +49,41 @@ ALLOWED_INFO_KEYS = {
     "Version",
 }
 MAX_IMAGE_SIZE = 128 * 1024 * 1024
+GENERIC_VERSION = "999.999.999.999.999,999"
 INSTALL_TIMEOUT_SECONDS = 90
 INSTALL_ATTEMPTS = 3
+
+
+def _read_payload(
+    restore_dir: Path, identity: dict[str, Any], key: str
+) -> bytes:
+    path = restore_dir / identity["Manifest"][key]["Info"]["Path"]
+    return path.read_bytes()
+
+
+def _validate_identity(identity: dict[str, Any]) -> None:
+    expected = {
+        "Cryptex1,ChipID": "0xff10",
+        "Cryptex1,Type": 3,
+        "Cryptex1,SubType": 0,
+        "Cryptex1,ProductClass": "0xf2",
+        "Cryptex1,UseProductClass": True,
+        "Cryptex1,NonceDomain": 3,
+        "Cryptex1,Version": GENERIC_VERSION,
+        "Cryptex1,PreauthorizationVersion": GENERIC_VERSION,
+    }
+    normalized = dict(identity)
+    normalized["Cryptex1,ChipID"] = str(identity["Cryptex1,ChipID"]).lower()
+    normalized["Cryptex1,ProductClass"] = str(
+        identity["Cryptex1,ProductClass"]
+    ).lower()
+    mismatches = {
+        key: {"expected": value, "actual": normalized.get(key)}
+        for key, value in expected.items()
+        if normalized.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(f"refusing unexpected Cryptex1 identity: {mismatches}")
 
 
 def _sha256(path: Path) -> str:
@@ -147,11 +171,6 @@ def _validate_bundle(
 
 
 async def _open_rsd(args: argparse.Namespace) -> tuple[Any, Any | None]:
-    if args.tunneld:
-        rsd = await get_tunneld_device_by_udid(args.udid)
-        if rsd is None:
-            raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
-        return rsd, None
     tunnel = UserspaceRsdTunnel(serial=args.udid, autopair=True)
     try:
         return await tunnel.aopen(), tunnel
@@ -230,9 +249,6 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 for item in before
             ],
         }
-        if args.validate_only:
-            return preflight | {"installed": False}
-
         if exact_version_installed:
             return preflight | {
                 "installed": {"identifier": identifier, "version": version},
@@ -381,13 +397,11 @@ def main() -> int:
     parser.add_argument("--build-summary", required=True, type=Path)
     parser.add_argument("--udid", required=True)
     parser.add_argument("--result-json", type=Path)
-    parser.add_argument("--validate-only", action="store_true")
     parser.add_argument(
         "--replace-installed",
         action="store_true",
         help="replace one older Cryptex with this exact identifier",
     )
-    parser.add_argument("--tunneld", action="store_true")
     args = parser.parse_args()
 
     result = asyncio.run(_install(args))

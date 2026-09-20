@@ -1,4 +1,4 @@
-// Hardened, target-pinned port of the supplied SBInject dyld bypass.
+// Runtime-discovered port of the supplied SBInject dyld bypass.
 #include "sbinject_dyld_bypass.h"
 
 #include <errno.h>
@@ -6,6 +6,7 @@
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
 #include <mach-o/dyld_images.h>
+#include <mach-o/loader.h>
 #include <ptrauth.h>
 #include <signal.h>
 #include <stdint.h>
@@ -26,9 +27,6 @@ static const uint8_t k_mmap_signature[] = {
 static const uint8_t k_fcntl_signature[] = {
     0x90, 0x0b, 0x80, 0xd2, 0x01, 0x10, 0x00, 0xd4,
 };
-static const size_t k_mmap_offset = 0x147d4U;
-static const size_t k_fcntl_offset = 0x0b6ccU;
-static const size_t k_dyld_scan_size = 0x80000U;
 static const uintptr_t k_user_pointer_mask = 0x0000FFFFFFFFFFFFULL;
 
 extern void *__mmap(void *address, size_t length, int protection, int flags,
@@ -76,7 +74,7 @@ static bool write_absolute_jump(void *location, void *replacement) {
                           VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS;
 }
 
-static void *dyld_base(void) {
+static const struct mach_header_64 *dyld_header(void) {
     task_dyld_info_data_t information = {0};
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_DYLD_INFO,
@@ -86,23 +84,79 @@ static void *dyld_base(void) {
     }
     const struct dyld_all_image_infos *images =
         (const struct dyld_all_image_infos *)information.all_image_info_addr;
-    return (void *)((uintptr_t)images->dyldImageLoadAddress &
-                    k_user_pointer_mask);
+    return (const struct mach_header_64 *)(
+        (uintptr_t)images->dyldImageLoadAddress & k_user_pointer_mask);
 }
 
-static bool signature_is_unique(const uint8_t *base, const uint8_t *signature,
-                                size_t signature_size, size_t expected_offset) {
-    size_t matches = 0;
-    size_t observed = 0;
-    for (size_t offset = 0;
-         offset + signature_size <= k_dyld_scan_size; offset += 4U) {
-        if (base[offset] == signature[0] &&
-            memcmp(base + offset, signature, signature_size) == 0) {
-            ++matches;
-            observed = offset;
-        }
+static bool find_unique_signature(const struct mach_header_64 *header,
+                                  const uint8_t *signature,
+                                  size_t signature_size,
+                                  uint8_t **match_out) {
+    if (header == NULL || header->magic != MH_MAGIC_64 ||
+        header->ncmds == 0 || header->ncmds > 1024U ||
+        header->sizeofcmds > 16U * 1024U * 1024U || match_out == NULL) {
+        return false;
     }
-    return matches == 1U && observed == expected_offset;
+    const uint8_t *commands = (const uint8_t *)(header + 1);
+    const uint8_t *commands_end = commands + header->sizeofcmds;
+    const uint8_t *cursor = commands;
+    uint64_t text_vmaddr = 0;
+    bool found_text = false;
+    for (uint32_t index = 0; index < header->ncmds; ++index) {
+        if ((size_t)(commands_end - cursor) < sizeof(struct load_command)) {
+            return false;
+        }
+        const struct load_command *command =
+            (const struct load_command *)cursor;
+        if (command->cmdsize < sizeof(*command) ||
+            command->cmdsize > (uint32_t)(commands_end - cursor)) {
+            return false;
+        }
+        if (command->cmd == LC_SEGMENT_64 &&
+            command->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *segment =
+                (const struct segment_command_64 *)cursor;
+            if (segment->fileoff == 0 &&
+                strncmp(segment->segname, SEG_TEXT, sizeof(segment->segname)) ==
+                    0) {
+                text_vmaddr = segment->vmaddr;
+                found_text = true;
+                break;
+            }
+        }
+        cursor += command->cmdsize;
+    }
+    if (!found_text || (uintptr_t)header < text_vmaddr) return false;
+    uintptr_t slide = (uintptr_t)header - (uintptr_t)text_vmaddr;
+
+    size_t matches = 0;
+    uint8_t *observed = NULL;
+    cursor = commands;
+    for (uint32_t index = 0; index < header->ncmds; ++index) {
+        const struct load_command *command =
+            (const struct load_command *)cursor;
+        if (command->cmd == LC_SEGMENT_64 &&
+            command->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *segment =
+                (const struct segment_command_64 *)cursor;
+            if ((segment->initprot & VM_PROT_EXECUTE) != 0 &&
+                segment->filesize <= 64U * 1024U * 1024U) {
+                uint8_t *start = (uint8_t *)(slide + segment->vmaddr);
+                size_t size = (size_t)segment->filesize;
+                for (size_t offset = 0;
+                     offset + signature_size <= size; offset += 4U) {
+                    if (start[offset] == signature[0] &&
+                        memcmp(start + offset, signature, signature_size) == 0) {
+                        ++matches;
+                        observed = start + offset;
+                    }
+                }
+            }
+        }
+        cursor += command->cmdsize;
+    }
+    *match_out = observed;
+    return matches == 1U;
 }
 
 static void *bypass_mmap(void *address, size_t length, int protection,
@@ -168,12 +222,13 @@ bool sbinject_install_dyld_validation_bypass(void) {
         return installed;
     }
     attempted = true;
-    uint8_t *base = dyld_base();
-    if (base == NULL ||
-        !signature_is_unique(base, k_mmap_signature,
-                             sizeof(k_mmap_signature), k_mmap_offset) ||
-        !signature_is_unique(base, k_fcntl_signature,
-                             sizeof(k_fcntl_signature), k_fcntl_offset)) {
+    const struct mach_header_64 *header = dyld_header();
+    uint8_t *mmap_site = NULL;
+    uint8_t *fcntl_site = NULL;
+    if (!find_unique_signature(header, k_mmap_signature,
+                               sizeof(k_mmap_signature), &mmap_site) ||
+        !find_unique_signature(header, k_fcntl_signature,
+                               sizeof(k_fcntl_signature), &fcntl_site)) {
         return false;
     }
     original_fcntl = __fcntl;
@@ -182,10 +237,9 @@ bool sbinject_install_dyld_validation_bypass(void) {
     ignored.sa_handler = SIG_IGN;
     sigemptyset(&ignored.sa_mask);
     (void)sigaction(SIGBUS, &ignored, &prior);
-    bool mmap_ready = write_absolute_jump(base + k_mmap_offset, bypass_mmap);
+    bool mmap_ready = write_absolute_jump(mmap_site, bypass_mmap);
     bool fcntl_ready =
-        mmap_ready &&
-        write_absolute_jump(base + k_fcntl_offset, bypass_fcntl);
+        mmap_ready && write_absolute_jump(fcntl_site, bypass_fcntl);
     (void)sigaction(SIGBUS, &prior, NULL);
     installed = mmap_ready && fcntl_ready;
     return installed;

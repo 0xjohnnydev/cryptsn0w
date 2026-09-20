@@ -1,26 +1,25 @@
 PYTHON := .venv/bin/python
+OVERLAY := Dopamine-CryptexBootstrap/CryptexBootstrap
+PYMOBILEDEVICE_PATCH := Dopamine-CryptexBootstrap/patch_pymobiledevice3_remotexpc.py
 
-.PHONY: all clean payload python verify
-
-all: python payload
+.PHONY: python validate build install
 
 python: .venv/.ready
 
-.venv/.ready: requirements.txt tools/patch_pymobiledevice3_remotexpc.py
+.venv/.ready: requirements.txt $(PYMOBILEDEVICE_PATCH)
 	python3 -m venv .venv
-	.venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
-	.venv/bin/python tools/patch_pymobiledevice3_remotexpc.py
+	$(PYTHON) -m pip install --disable-pip-version-check -r requirements.txt
+	$(PYTHON) $(PYMOBILEDEVICE_PATCH)
 	touch $@
 
-payload: build/build-summary.json
+validate:
+	python3 -m py_compile $(OVERLAY)/*.py $(PYMOBILEDEVICE_PATCH)
+	zsh -n Dopamine-CryptexBootstrap/setup.sh $(OVERLAY)/build_cryptex.sh
+	sh -n $(OVERLAY)/normalize_apt_lists.sh
+	plutil -lint $(OVERLAY)/*.plist $(OVERLAY)/SBInject/*.plist >/dev/null
 
-build/build-summary.json: build.sh Sources/rootd.m Sources/runtime-entitlements.plist Sources/rootd.plist Sources/sshd_config Sources/debugger-cow-probe.c Sources/debugger-cow-probe-entitlements.plist
-	./build.sh
+build: validate
+	./Dopamine-CryptexBootstrap/setup.sh --build
 
-verify: all
-	$(PYTHON) -m py_compile untitled.py
-	plutil -lint Sources/rootd.plist Sources/runtime-entitlements.plist
-	/System/Library/SecurityResearch/usr/bin/cryptexctl.research dump-trust-cache $$(find build/unsigned/com.0xjohnnydev.untitled.cxbd/Restore/Cryptex -name gtcd -type f -print -quit) >/dev/null
-
-clean:
-	rm -rf build .venv
+install: validate
+	./Dopamine-CryptexBootstrap/setup.sh --install
