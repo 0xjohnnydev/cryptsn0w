@@ -26,6 +26,13 @@ struct CryptexSn0wApp: App {
                 .disabled(model.state == .running)
 
                 Button(
+                    "Show Install Log",
+                    systemImage: "doc.text",
+                    action: model.showLog
+                )
+                .disabled(!model.canShowLog)
+
+                Button(
                     "Choose Repository…",
                     systemImage: "folder",
                     action: model.chooseRepository
