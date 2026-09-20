@@ -4,12 +4,12 @@ struct DeviceInstallView: View {
     @Bindable var model: InstallerModel
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: AppTheme.spacing) {
             Text("Connect your device and click Jailbreak to begin.")
                 .font(.body)
                 .multilineTextAlignment(.center)
 
-            HStack(spacing: 10) {
+            HStack(spacing: AppTheme.compactSpacing) {
                 Picker(
                     "Connected device",
                     selection: $model.selectedDeviceIdentifier
@@ -24,7 +24,6 @@ struct DeviceInstallView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: .infinity)
                 .disabled(model.state == .running || model.isDiscoveringDevices)
                 .accessibilityLabel("Connected device")
                 .onChange(of: model.selectedDeviceIdentifier) {
@@ -40,12 +39,9 @@ struct DeviceInstallView: View {
                 .frame(minWidth: 32, minHeight: 32)
                 .disabled(model.state == .running || model.isDiscoveringDevices)
                 .help("Refresh connected devices")
-
-                Button(model.actionTitle, action: model.startInstall)
-                    .buttonStyle(CryptexPrimaryButtonStyle())
-                    .disabled(!model.canStart)
-                    .accessibilityInputLabels(["Jailbreak", "Install"])
             }
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: .infinity)
 
             Toggle(
                 "Enable root SSH access for this Mac",
@@ -57,6 +53,15 @@ struct DeviceInstallView: View {
             .accessibilityHint(
                 "When enabled, the installer keeps a device-specific key so the SSH Shell menu can connect as root."
             )
+
+            HStack(spacing: AppTheme.spacing) {
+                PanguProgressBar(progress: model.progress, state: model.state)
+
+                Button(model.actionTitle, action: model.startInstall)
+                    .buttonStyle(CryptexPrimaryButtonStyle())
+                    .disabled(!model.canStart)
+                    .accessibilityInputLabels(["Jailbreak", "Install"])
+            }
         }
     }
 }

@@ -68,14 +68,16 @@ final class InstallerModel {
         }
     }
 
-    var sshStatusText: String {
-        if sshShellIsAvailable {
-            "SSH Shell is available from the Device menu."
-        } else if enableHostSSH {
-            "This install will authorize this Mac for root SSH."
-        } else {
-            "Root SSH remains off unless you explicitly enable it."
+    var progress: Double {
+        switch state {
+        case .idle: 0
+        case .running, .failed: currentStep.progress
+        case .complete: 1
         }
+    }
+
+    var progressText: String {
+        progress.formatted(.percent.precision(.fractionLength(0)))
     }
 
     var actionTitle: String {

@@ -11,13 +11,12 @@ struct ContentView: View {
                 VStack(spacing: AppTheme.spacing) {
                     DeviceInstallView(model: model)
                     InstallStatusView(model: model)
-                    InstallerNoteView()
                     Spacer(minLength: 0)
                     BrandFooterView()
                 }
-                .padding(.horizontal, 26)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
+                .padding(.horizontal, AppTheme.contentHorizontalPadding)
+                .padding(.top, AppTheme.contentTopPadding)
+                .padding(.bottom, AppTheme.contentBottomPadding)
             }
         }
         .frame(width: AppTheme.windowWidth, height: AppTheme.windowHeight)

@@ -4,29 +4,43 @@ struct InstallStatusView: View {
     @Bindable var model: InstallerModel
 
     var body: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 7) {
-                if model.state == .running || model.isDiscoveringDevices {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: statusSymbol)
-                        .foregroundStyle(statusColor)
-                }
+        HStack(spacing: 11) {
+            if model.state == .running || model.isDiscoveringDevices {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: statusSymbol)
+                    .font(.title3)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(statusColor)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
                 Text(model.statusTitle)
                     .font(.headline)
+                Text(model.statusDetail)
+                    .font(.callout)
+                    .foregroundStyle(AppTheme.mutedInk)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
-            Text(model.statusDetail)
-                .font(.callout)
-                .foregroundStyle(AppTheme.mutedInk)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Text(model.sshStatusText)
-                .font(.callout)
-                .foregroundStyle(AppTheme.mutedInk)
-                .lineLimit(1)
+
+            Spacer(minLength: AppTheme.compactSpacing)
+
+            if model.state != .idle {
+                Text(model.progressText)
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(statusColor)
+            }
         }
-        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius)
+                .fill(AppTheme.surface)
+                .stroke(AppTheme.divider, lineWidth: 1)
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Status")
     }
@@ -43,8 +57,8 @@ struct InstallStatusView: View {
     private var statusColor: Color {
         switch model.state {
         case .idle, .running: AppTheme.accent
-        case .complete: .green
-        case .failed: .red
+        case .complete: AppTheme.success
+        case .failed: AppTheme.failure
         }
     }
 }
