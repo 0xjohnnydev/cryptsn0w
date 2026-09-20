@@ -18,6 +18,7 @@ FAT_CIGAM_64 = 0xBFBAFECA
 
 LC_SEGMENT_64 = 0x19
 LC_LOAD_DYLIB = 0x0C
+LC_RPATH = 0x1C | 0x80000000
 DYLIB_COMMANDS = {
     LC_LOAD_DYLIB,
     0x18 | 0x80000000,  # LC_LOAD_WEAK_DYLIB
@@ -82,11 +83,17 @@ def slice_endian(data: bytearray, offset: int) -> str:
     raise MachOError(f"unsupported Mach-O magic at {offset:#x}: {magic:#x}")
 
 
-def command_name(data: bytearray, cursor: int, size: int, endian: str) -> str | None:
-    if size < DYLIB_COMMAND_PREFIX_SIZE:
+def command_name(
+    data: bytearray,
+    cursor: int,
+    size: int,
+    endian: str,
+    minimum_offset: int = DYLIB_COMMAND_PREFIX_SIZE,
+) -> str | None:
+    if size < minimum_offset:
         return None
     name_offset = struct.unpack_from(f"{endian}I", data, cursor + 8)[0]
-    if name_offset < DYLIB_COMMAND_PREFIX_SIZE or name_offset >= size:
+    if name_offset < minimum_offset or name_offset >= size:
         raise MachOError("invalid dylib load-command name offset")
     start = cursor + name_offset
     limit = cursor + size
@@ -97,6 +104,49 @@ def command_name(data: bytearray, cursor: int, size: int, endian: str) -> str | 
         return bytes(data[start:terminator]).decode("utf-8")
     except UnicodeDecodeError as error:
         raise MachOError("non-UTF-8 dylib load-command name") from error
+
+
+def replace_unused_rpath(
+    data: bytearray,
+    rpaths: list[tuple[int, int, str]],
+    dylib_names: list[str],
+    dylib: str,
+    endian: str,
+) -> bool:
+    """Reuse the target's fixed 40-byte, otherwise-unused LC_RPATH slot.
+
+    The iOS 27 SpringBoard launcher has only sixteen bytes between its load
+    commands and __text, but it carries `@executable_path/Frameworks` despite
+    having no @rpath dependency.  SBInject's compact `@loader_path/g` load fits
+    that command exactly.  Refuse the transformation for every other layout.
+    """
+    if any(name.startswith("@rpath/") for name in dylib_names):
+        raise MachOError("cannot reuse LC_RPATH while @rpath dependencies exist")
+    candidates = [
+        (cursor, size)
+        for cursor, size, path in rpaths
+        if path == "@executable_path/Frameworks"
+    ]
+    encoded = dylib.encode("utf-8") + b"\0"
+    required = aligned(DYLIB_COMMAND_PREFIX_SIZE + len(encoded), 8)
+    if len(candidates) != 1 or required > candidates[0][1]:
+        return False
+    cursor, command_size = candidates[0]
+    data[cursor:cursor + command_size] = b"\0" * command_size
+    struct.pack_into(
+        f"{endian}IIIIII",
+        data,
+        cursor,
+        LC_LOAD_DYLIB,
+        command_size,
+        DYLIB_COMMAND_PREFIX_SIZE,
+        0,
+        0,
+        0,
+    )
+    start = cursor + DYLIB_COMMAND_PREFIX_SIZE
+    data[start:start + len(encoded)] = encoded
+    return True
 
 
 def patch_slice(data: bytearray, offset: int, size: int, dylib: str) -> bool:
@@ -117,6 +167,8 @@ def patch_slice(data: bytearray, offset: int, size: int, dylib: str) -> bool:
     cursor = commands_start
     first_file_data = slice_end
     already_loaded = False
+    rpaths: list[tuple[int, int, str]] = []
+    dylib_names: list[str] = []
     for _ in range(command_count):
         if cursor + 8 > commands_end:
             raise MachOError("Mach-O load-command header is truncated")
@@ -124,9 +176,14 @@ def patch_slice(data: bytearray, offset: int, size: int, dylib: str) -> bool:
         if command_size < 8 or command_size > commands_end - cursor:
             raise MachOError("invalid Mach-O load-command size")
         if command in DYLIB_COMMANDS:
-            already_loaded |= command_name(
-                data, cursor, command_size, endian
-            ) == dylib
+            name = command_name(data, cursor, command_size, endian)
+            if name is not None:
+                dylib_names.append(name)
+                already_loaded |= name == dylib
+        elif command == LC_RPATH:
+            name = command_name(data, cursor, command_size, endian, 12)
+            if name is not None:
+                rpaths.append((cursor, command_size, name))
         if command == LC_SEGMENT_64:
             if command_size < SEGMENT_COMMAND_64_SIZE:
                 raise MachOError("LC_SEGMENT_64 is truncated")
@@ -161,6 +218,8 @@ def patch_slice(data: bytearray, offset: int, size: int, dylib: str) -> bool:
     command_size = aligned(DYLIB_COMMAND_PREFIX_SIZE + len(encoded), 8)
     new_end = commands_end + command_size
     if new_end > first_file_data or new_end > slice_end:
+        if replace_unused_rpath(data, rpaths, dylib_names, dylib, endian):
+            return True
         raise MachOError(
             f"insufficient load-command padding: need {command_size} bytes"
         )
@@ -232,13 +291,18 @@ def main() -> int:
     parser.add_argument("binary", type=pathlib.Path)
     parser.add_argument("dylib")
     arguments = parser.parse_args()
-    if not arguments.dylib.startswith("/") or "\0" in arguments.dylib:
-        raise SystemExit("dylib install name must be an absolute path")
+    if (
+        not arguments.dylib.startswith("/")
+        and not arguments.dylib.startswith("@loader_path/")
+    ) or "\0" in arguments.dylib:
+        raise SystemExit(
+            "dylib install name must be absolute or use @loader_path"
+        )
     try:
         changed = patch_binary(arguments.binary, arguments.dylib)
     except (OSError, MachOError) as error:
         raise SystemExit(f"{arguments.binary}: {error}") from error
-    print(f"runtime interposer dependency {'added' if changed else 'current'}: "
+    print(f"Mach-O load dependency {'added' if changed else 'current'}: "
           f"{arguments.binary}")
     return 0
 

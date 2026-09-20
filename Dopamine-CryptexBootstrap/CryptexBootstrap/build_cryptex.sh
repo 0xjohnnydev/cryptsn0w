@@ -10,14 +10,6 @@ BOOTSTRAP_SHA256=8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9c
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
 ELLEKIT_URL=https://ellekit.space/pool/ellekit_1.2_iphoneos-arm64.deb
 ELLEKIT_SHA256=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
-PREFERENCELOADER_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/preferenceloader_2.2.8_iphoneos-arm64.deb
-PREFERENCELOADER_SHA256=b8b934b4c1d2da649044997f01b7bf995afbdb732e653b2b35368deb354e1882
-CHOICY_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/choicy_1.5.4-2_iphoneos-arm64.deb
-CHOICY_SHA256=de7a5cdcbd35fa99d97a20650ff6415da43ef3dd359c68ed6ed3e7f1b54dc1bb
-ALTLIST_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/altlist_1.0.11_iphoneos-arm64.deb
-ALTLIST_SHA256=26718f617288f93b91f961d8a363d04c11d295f0de76acda4f5df057a5189975
-UIKITTOOLS_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/uikittools/uikittools_2.1.8_iphoneos-arm64.deb
-UIKITTOOLS_SHA256=5e634f0c7fb67f6344a6646583a9f1662cc9299a3d51817c1814bab4ecb3ecfb
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
@@ -27,20 +19,17 @@ TARGET_UDID=${CODEX_TARGET_UDID:-}
 SILEO_DEVELOPMENT_IDENTITY=${CODEX_SILEO_DEVELOPMENT_IDENTITY:-}
 SILEO_PROVISIONING_PROFILE=${CODEX_SILEO_PROVISIONING_PROFILE:-}
 SILEO_DEVELOPMENT_ENTITLEMENTS=${CODEX_SILEO_DEVELOPMENT_ENTITLEMENTS:-}
+FORCE_CLEAN_INSTALL=${CODEX_FORCE_CLEAN_INSTALL:-0}
 
 CACHE_DIR="$SCRIPT_DIR/cache"
 WORK_DIR="$SCRIPT_DIR/work"
 OUT_DIR="$SCRIPT_DIR/out"
 BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_1900.tar.zst"
-SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
 ELLEKIT_DEB="$CACHE_DIR/ellekit_1.2_iphoneos-arm64.deb"
-PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.2.8_iphoneos-arm64.deb"
-CHOICY_DEB="$CACHE_DIR/choicy_1.5.4-2_iphoneos-arm64.deb"
-ALTLIST_DEB="$CACHE_DIR/altlist_1.0.11_iphoneos-arm64.deb"
-UIKITTOOLS_DEB="$CACHE_DIR/uikittools_2.1.8_iphoneos-arm64.deb"
+SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
-RUNTIME_TRUST_APT_CONFIG="$SCRIPT_DIR/runtime-trust.conf"
+SBINJECT_APT_CONFIG="$SCRIPT_DIR/sbinject-package.conf"
 APT_LIST_NORMALIZER="$SCRIPT_DIR/normalize_apt_lists.sh"
 ELLEKIT_KEY="$SCRIPT_DIR/keyrings/ellekit.asc"
 BIGBOSS_KEY="$SCRIPT_DIR/keyrings/bigboss.asc"
@@ -49,22 +38,17 @@ IMAGE_ROOT="$WORK_DIR/image-root"
 EMBEDDED_DEFAULT_SOURCES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/dopamine-default.sources"
 EMBEDDED_APT_CONFIG_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/apt"
 EMBEDDED_REPOSITORY_COMPAT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/99dopamine-repository-compat"
-EMBEDDED_RUNTIME_TRUST_APT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/98codex-runtime-trust"
+EMBEDDED_SBINJECT_APT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/98sbinject-packages"
 EMBEDDED_APT_LIST_NORMALIZER="$IMAGE_ROOT/usr/local/share/codex-bootstrap/normalize-apt-lists.sh"
-EMBEDDED_BASE_CDHASHES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/base-cdhashes.txt"
-EMBEDDED_PROCURSUS_RUNTIME_BASELINE="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus-runtime-baseline.plist"
+EMBEDDED_CLEAN_INSTALL_TOKEN="$IMAGE_ROOT/usr/local/share/codex-bootstrap/clean-install-token.txt"
 EMBEDDED_KEYRING_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/keyrings"
 EMBEDDED_ELLEKIT_KEY="$EMBEDDED_KEYRING_DIR/ellekit.gpg"
 EMBEDDED_BIGBOSS_KEY="$EMBEDDED_KEYRING_DIR/bigboss.gpg"
-ORIGINAL_TRUSTED_PACKAGE_ROOT="$WORK_DIR/trusted-packages-original"
-TRUSTED_PACKAGE_ROOT="$WORK_DIR/trusted-packages-normalized"
-EMBEDDED_ORIGINAL_TRUSTED_PACKAGES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted-packages-original"
-EMBEDDED_TRUSTED_PACKAGES="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted-packages"
-TRUSTED_PACKAGE_CDHASHES="$WORK_DIR/trusted-package-cdhashes.txt"
+EMBEDDED_ELLEKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ellekit.deb"
+TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
-EXEC_INTERPOSER="$IMAGE_ROOT/usr/local/lib/codex-exec-interposer.dylib"
 CUSTOMD_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd.sh"
 CUSTOMD_TRACE_REEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_trace_me_reexec_probe.sh"
 CUSTOMD_SETEXEC_BUILDER="$SCRIPT_DIR/../../Scripts/build_customd_springboard_setexec.sh"
@@ -81,45 +65,48 @@ CUSTOMD_TRACE_REEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-trace-me-reex
 CUSTOMD_SETEXEC_EXECUTABLE="$IMAGE_ROOT/usr/local/bin/customd-springboard-setexec"
 CUSTOMD_JOB_PLIST_SOURCE="$SCRIPT_DIR/../../Sources/com.openai.customd.plist"
 EMBEDDED_CUSTOMD_JOB_PLIST="$IMAGE_ROOT/usr/local/share/codex-bootstrap/com.openai.customd.plist"
-DYLD_JB_ADMISSION_HOOK_SOURCE="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.c"
-DYLD_JB_ADMISSION_HOOK_HEADER="$SCRIPT_DIR/../../Sources/codex-dyld-jb-admission-hook.h"
-DYLD_JB_ADMISSION_HOOK="$IMAGE_ROOT/usr/local/lib/codex-dyld-jb-admission-hook.dylib"
-DYLD_24A437_REFERENCE=${CODEX_DYLD_24A437_REFERENCE:-"$SCRIPT_DIR/../../build/dyld-24A437"}
-DYLD_24A437_SHA256=ab9887ed96c9c08ad68d4c6a5c27e8289fb0c9e55ec3e134547292a1ec579608
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
-RUNTIME_TRUST_SOURCE=${CODEX_RUNTIME_TRUST_HELPER:-"$SCRIPT_DIR/../../build/appregistrard-srd-trust-derived/Build/Products/Release-iphoneos/appregistrard"}
-RUNTIME_TRUST_HELPER="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust"
-RUNTIME_TRUST_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-runtime-trust-client"
+SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
+SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
+SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook.dylib"
+SBINJECT_JITTERD="$IMAGE_ROOT/usr/local/bin/sbinject-jitterd"
+SBINJECT_JITTERD_ENTITLEMENTS="$SBINJECT_SOURCE_DIR/jitterd-entitlements.plist"
+SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.jitterd.plist"
+EMBEDDED_SBINJECT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/sbinject"
+EMBEDDED_SBINJECT_JITTERD_PLIST="$EMBEDDED_SBINJECT_ROOT/com.openai.codex.sbinject.jitterd.plist"
 SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/../../Scripts/build_springboard_candidate.py"
-SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/springboard-24A437/24A437__iPhone13,1/System/Library/CoreServices/SpringBoard.app/SpringBoard"}
-SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/springboard-candidate-24A437/Info.plist"}
-SPRINGBOARD_CANDIDATE_DIRECTORY="$IMAGE_ROOT/usr/local/libexec/codex-springboard-candidate"
-SPRINGBOARD_CANDIDATE="$SPRINGBOARD_CANDIDATE_DIRECTORY/SpringBoard"
+SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/SpringBoard.app/SpringBoard"}
+SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$SCRIPT_DIR/../../build/iphone13-24A435/SpringBoard.app/Info.plist"}
+SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE:-${SPRINGBOARD_CANDIDATE_SOURCE:h}}
+SPRINGBOARD_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/SpringBoard.app"
+SPRINGBOARD_CANDIDATE="$SPRINGBOARD_CANDIDATE_DIRECTORY/notSpringBoard"
 SPRINGBOARD_CANDIDATE_INFO="$SPRINGBOARD_CANDIDATE_DIRECTORY/Info.plist"
 SPRINGBOARD_CANDIDATE_ENTITLEMENTS="$SPRINGBOARD_CANDIDATE_DIRECTORY/entitlements.plist"
 SPRINGBOARD_CANDIDATE_MANIFEST="$SPRINGBOARD_CANDIDATE_DIRECTORY/build-manifest.json"
+SPRINGBOARD_CANDIDATE_GENERALHOOK="$SPRINGBOARD_CANDIDATE_DIRECTORY/g"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
 PATCHED_OPAINJECT_THREAD_UTILS="$PATCHED_OPAINJECT_DIR/thread_utils.m"
 PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
+ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
+REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
 SIGNING_DIR="$WORK_DIR/signing"
 SIGNING_CONFIG="$SIGNING_DIR/config.json"
 GENERATED_ENTITLEMENTS="$SIGNING_DIR/sileo-development-entitlements.plist"
-PROCURSUS_RUNTIME_ENTITLEMENTS="$SIGNING_DIR/procursus-runtime-entitlements.plist"
-PROCURSUS_RUNTIME_BASELINE_INPUT="$WORK_DIR/procursus-runtime-baseline.tsv"
-PROCURSUS_RUNTIME_HISTORY_INPUT="$CACHE_DIR/procursus-runtime-history.tsv"
-RUNTIME_INTERPOSER_INSTALL_NAME=/var/jb/usr/lib/codex-exec-interposer.dylib
-DYLD_JB_ADMISSION_HOOK_INSTALL_NAME=/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib
 
 die() {
     print -u2 -- "error: $*"
     exit 1
 }
+
+[[ "$FORCE_CLEAN_INSTALL" == 0 || "$FORCE_CLEAN_INSTALL" == 1 ]] || \
+    die "CODEX_FORCE_CLEAN_INSTALL must be 0 or 1"
 
 sha256_of() {
     shasum -a 256 "$1" | awk '{print $1}'
@@ -139,24 +126,6 @@ fetch_pinned() {
     fi
     [[ "$(sha256_of "$destination")" == "$expected" ]] || \
         die "cached hash mismatch: ${destination:t}"
-}
-
-verify_deb_identity() {
-    local archive=$1
-    local expected_package=$2
-    local expected_version=$3
-    local package
-    local version
-    local architecture
-    package=$(dpkg-deb -f "$archive" Package)
-    version=$(dpkg-deb -f "$archive" Version)
-    architecture=$(dpkg-deb -f "$archive" Architecture)
-    [[ "$package" == "$expected_package" ]] || \
-        die "unexpected package in ${archive:t}: $package"
-    [[ "$version" == "$expected_version" ]] || \
-        die "unexpected version in ${archive:t}: $version"
-    [[ "$architecture" == iphoneos-arm64 ]] || \
-        die "unexpected architecture in ${archive:t}: $architecture"
 }
 
 verify_keyring() {
@@ -193,59 +162,6 @@ require_true_entitlement() {
         die "required entitlement $display_name is not true in ${plist:t}"
 }
 
-enable_procursus_runtime_admission() {
-    local candidate=$1
-    local identifier
-    local entitlement_key_path='com\.apple\.security\.cs\.allow-dyld-environment-variables'
-    local skip_validation_key_path='com\.apple\.private\.skip-library-validation'
-    local -a architectures
-
-    architectures=($(lipo -archs "$candidate"))
-    (( ${#architectures} > 0 )) || \
-        die "Procursus executable has no architectures: $candidate"
-    identifier=$(codesign -d --arch "${architectures[1]}" -vvv \
-        "$candidate" 2>&1 | sed -n 's/^Identifier=//p')
-    [[ -n "$identifier" ]] || \
-        die "Procursus executable has no code identifier: $candidate"
-    ldid -arch "${architectures[1]}" -e "$candidate" \
-        >"$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    [[ -s "$PROCURSUS_RUNTIME_ENTITLEMENTS" ]] || \
-        die "Procursus executable has no entitlements: $candidate"
-    plutil -lint "$PROCURSUS_RUNTIME_ENTITLEMENTS" >/dev/null || \
-        die "invalid Procursus entitlements: $candidate"
-    python3 "$SCRIPT_DIR/patch_load_dylib.py" "$candidate" \
-        "$RUNTIME_INTERPOSER_INSTALL_NAME" >/dev/null
-    if plutil -extract "$entitlement_key_path" raw -o - \
-        "$PROCURSUS_RUNTIME_ENTITLEMENTS" >/dev/null 2>&1; then
-        plutil -replace "$entitlement_key_path" -bool true \
-            "$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    else
-        plutil -insert "$entitlement_key_path" -bool true \
-            "$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    fi
-    if plutil -extract "$skip_validation_key_path" raw -o - \
-        "$PROCURSUS_RUNTIME_ENTITLEMENTS" >/dev/null 2>&1; then
-        plutil -replace "$skip_validation_key_path" -bool true \
-            "$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    else
-        plutil -insert "$skip_validation_key_path" -bool true \
-            "$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    fi
-    codesign --force --sign - --timestamp=none --pagesize 4096 \
-        --generate-entitlement-der --identifier "$identifier" \
-        --entitlements "$PROCURSUS_RUNTIME_ENTITLEMENTS" "$candidate"
-    codesign --verify --strict --all-architectures "$candidate" || \
-        die "runtime-admission signature is invalid: $candidate"
-    ldid -arch "${architectures[1]}" -e "$candidate" \
-        >"$PROCURSUS_RUNTIME_ENTITLEMENTS"
-    [[ "$(plutil -extract "$entitlement_key_path" raw -o - \
-        "$PROCURSUS_RUNTIME_ENTITLEMENTS")" == true ]] || \
-        die "runtime-admission entitlement is missing: $candidate"
-    [[ "$(plutil -extract "$skip_validation_key_path" raw -o - \
-        "$PROCURSUS_RUNTIME_ENTITLEMENTS")" == true ]] || \
-        die "library-validation entitlement is missing: $candidate"
-}
-
 for tool in awk codesign curl dpkg-deb dwarfdump file find gpg ldid lipo nm plutil python3 rg security shasum tar xcrun zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
@@ -267,14 +183,18 @@ require_true_entitlement "$EXEC_WORKER_ENTITLEMENTS" 'get-task-allow' \
 [[ -f "$DEFAULT_SOURCES" ]] || die "missing Dopamine default APT sources"
 [[ -f "$REPOSITORY_COMPAT_CONFIG" ]] || \
     die "missing Dopamine repository compatibility configuration"
+[[ -f "$SBINJECT_APT_CONFIG" ]] || \
+    die "missing SBInject APT package configuration"
 [[ -f "$APT_LIST_NORMALIZER" ]] || \
     die "missing APT package-list normalizer"
 [[ -f "$SPRINGBOARD_CANDIDATE_BUILDER" ]] || \
     die "missing SpringBoard candidate builder"
 [[ -f "$SPRINGBOARD_CANDIDATE_SOURCE" ]] || \
-    die "missing pinned 24A437 SpringBoard source"
+    die "missing pinned iPhone 13 SpringBoard source"
 [[ -f "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" ]] || \
-    die "missing pinned 24A437 SpringBoard Info.plist source"
+    die "missing pinned iPhone 13 SpringBoard Info.plist source"
+[[ -d "$SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE" ]] || \
+    die "missing pinned iPhone 13 SpringBoard.app source"
 [[ -x "$CUSTOMD_BUILDER" ]] || die "missing customd builder"
 [[ -x "$CUSTOMD_TRACE_REEXEC_BUILDER" ]] || \
     die "missing customd trace/re-exec builder"
@@ -293,22 +213,24 @@ verify_keyring "$ELLEKIT_KEY" "$ELLEKIT_KEY_FINGERPRINT"
 verify_keyring "$BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
 [[ -f "$SCRIPT_DIR/patch_sileo_postinst.py" ]] || \
     die "missing Sileo maintainer-script compatibility patch"
-[[ -f "$SCRIPT_DIR/runtime_trust_client.c" ]] || \
-    die "missing runtime trust broker client source"
-[[ -f "$SCRIPT_DIR/codex_exec_interposer.c" ]] || \
-    die "missing runtime execution interposer source"
-[[ -f "$DYLD_JB_ADMISSION_HOOK_SOURCE" ]] || \
-    die "missing dyld /var/jb admission hook source"
-[[ -f "$DYLD_JB_ADMISSION_HOOK_HEADER" ]] || \
-    die "missing dyld /var/jb admission hook header"
-[[ -f "$DYLD_24A437_REFERENCE" ]] || \
-    die "missing exact 24A437 dyld reference"
-[[ "$(sha256_of "$DYLD_24A437_REFERENCE")" == "$DYLD_24A437_SHA256" ]] || \
-    die "exact 24A437 dyld reference hash mismatch"
+[[ -f "$SCRIPT_DIR/sbinject_package_validator.c" ]] || \
+    die "missing SBInject package validator source"
+for source in \
+    sbinject_protocol.h \
+    litehook_rebind.h litehook_rebind.c \
+    sbinject_launchdhook.c \
+    sbinject_dyld_bypass.h sbinject_dyld_bypass.c \
+    sbinject_generalhook.c sbinject_jitterd.m; do
+    [[ -f "$SBINJECT_SOURCE_DIR/$source" ]] || \
+        die "missing supplied SBInject integration source: $source"
+done
+for plist in "$SBINJECT_JITTERD_ENTITLEMENTS" \
+             "$SBINJECT_JITTERD_PLIST_SOURCE"; do
+    [[ -f "$plist" ]] || die "missing SBInject plist: $plist"
+    plutil -lint "$plist" >/dev/null || die "invalid SBInject plist: $plist"
+done
 [[ -f "$SCRIPT_DIR/patch_load_dylib.py" ]] || \
-    die "missing runtime interposer load-command patch"
-[[ -f "$SCRIPT_DIR/prepare_runtime_baseline_history.py" ]] || \
-    die "missing Procursus runtime baseline history helper"
+    die "missing SpringBoard load-command patch"
 for source in dyld.m rop_inject.m thread_utils.m task_utils.m arm64.m; do
     [[ -f "$OPAINJECT_DIR/$source" ]] || \
         die "missing pinned opa334/opainject source: $source"
@@ -343,53 +265,147 @@ security find-identity -v -p codesigning | \
     die "Sileo development identity is unavailable: $SILEO_DEVELOPMENT_IDENTITY"
 fetch_pinned "$BOOTSTRAP_URL" "$BOOTSTRAP_SHA256" "$BOOTSTRAP_ARCHIVE"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
-fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
-    "$PREFERENCELOADER_DEB"
-fetch_pinned "$CHOICY_URL" "$CHOICY_SHA256" "$CHOICY_DEB"
-fetch_pinned "$ALTLIST_URL" "$ALTLIST_SHA256" "$ALTLIST_DEB"
-fetch_pinned "$UIKITTOOLS_URL" "$UIKITTOOLS_SHA256" "$UIKITTOOLS_DEB"
-verify_deb_identity "$ELLEKIT_DEB" ellekit 1.2
-verify_deb_identity "$PREFERENCELOADER_DEB" preferenceloader 2.2.8
-verify_deb_identity "$CHOICY_DEB" com.opa334.choicy 1.5.4-2
-verify_deb_identity "$ALTLIST_DEB" com.opa334.altlist 1.0.11
-verify_deb_identity "$UIKITTOOLS_DEB" uikittools 2.1.8
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
-PREVIOUS_PROCURSUS_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
-PREVIOUS_PROCURSUS_RUNTIME_BASELINE="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus-runtime-baseline.plist"
-python3 "$SCRIPT_DIR/prepare_runtime_baseline_history.py" \
-    "$PREVIOUS_PROCURSUS_ROOT" \
-    "$PREVIOUS_PROCURSUS_RUNTIME_BASELINE" \
-    "$PROCURSUS_RUNTIME_HISTORY_INPUT"
-
-rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ORIGINAL_TRUSTED_PACKAGE_ROOT" \
-    "$TRUSTED_PACKAGE_ROOT" "$CUSTOMD_BUILD_DIRECTORY" \
-    "$UNSIGNED_OUT" "$REPACKED_SILEO" "$TRUSTED_PACKAGE_CDHASHES" \
-    "$TRUSTED_RUNTIME_CDHASHES" "$PROCURSUS_RUNTIME_BASELINE_INPUT"
+rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
+    "$CUSTOMD_BUILD_DIRECTORY" "$UNSIGNED_OUT" "$REPACKED_SILEO" \
+    "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES"
 mkdir -p \
     "$IMAGE_ROOT/Library/LaunchDaemons" \
     "$IMAGE_ROOT/usr/local/bin" \
     "$IMAGE_ROOT/usr/local/lib" \
+    "$IMAGE_ROOT/usr/local/lib/sbinject" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap" \
+    "$EMBEDDED_SBINJECT_ROOT" \
     "$EMBEDDED_APT_CONFIG_DIR" \
     "$EMBEDDED_KEYRING_DIR" \
+    "$TRUSTED_ELLEKIT_ROOT" \
     "$PACKAGE_ROOT" \
-    "$ORIGINAL_TRUSTED_PACKAGE_ROOT" \
-    "$TRUSTED_PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
 
-# Build a fixed SpringBoard replacement from the exact extracted 24A437
-# arm64e executable.  The helper pins the source hash/UUID/identifier,
-# preserves every original entitlement, adds only the explicit debugging and
-# runtime-code policy, regenerates XML+DER entitlement slots, and proves that
-# the ad-hoc result is byte-for-byte deterministic.  It performs no device,
-# TSS, personalization, or installation operation.
+SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+
+# ElleKit is the one package-level fixed-trust exception.  Re-sign every
+# universal Mach-O in the pinned upstream package so both arm64 slices have a
+# valid ad-hoc CodeDirectory, while preserving the loader's task-port
+# entitlements.  The package installed into /var/jb and the extracted copy
+# scanned by cryptexctl are then byte-identical.
+dpkg-deb -R "$ELLEKIT_DEB" "$ELLEKIT_PACKAGE_ROOT"
+typeset -a ellekit_package_machos=(
+    "$ELLEKIT_PACKAGE_ROOT/var/jb/usr/lib/ellekit/MobileSafety.dylib"
+    "$ELLEKIT_PACKAGE_ROOT/var/jb/usr/lib/ellekit/libinjector.dylib"
+    "$ELLEKIT_PACKAGE_ROOT/var/jb/usr/lib/ellekit/pspawn.dylib"
+    "$ELLEKIT_PACKAGE_ROOT/var/jb/usr/lib/libellekit.dylib"
+    "$ELLEKIT_PACKAGE_ROOT/var/jb/usr/libexec/ellekit/loader"
+)
+for candidate in "${ellekit_package_machos[@]}"; do
+    [[ -f "$candidate" ]] || \
+        die "pinned ElleKit package is missing ${candidate:t}"
+    codesign --force --sign - --timestamp=none --pagesize 4096 \
+        --generate-entitlement-der --preserve-metadata=entitlements \
+        "$candidate"
+    codesign --verify --strict --all-architectures "$candidate" || \
+        die "fixed ElleKit signature is invalid: ${candidate:t}"
+done
+[[ "$(dpkg-deb -f "$ELLEKIT_DEB" Package)" == ellekit && \
+   "$(dpkg-deb -f "$ELLEKIT_DEB" Version)" == 1.2 && \
+   "$(dpkg-deb -f "$ELLEKIT_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned ElleKit package identity changed"
+dpkg-deb --root-owner-group -b "$ELLEKIT_PACKAGE_ROOT" \
+    "$REPACKED_ELLEKIT" >/dev/null
+cp "$REPACKED_ELLEKIT" "$EMBEDDED_ELLEKIT_DEB"
+dpkg-deb -x "$REPACKED_ELLEKIT" "$TRUSTED_ELLEKIT_ROOT"
+typeset -a trusted_ellekit_machos=(
+    "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/lib/ellekit/MobileSafety.dylib"
+    "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/lib/ellekit/libinjector.dylib"
+    "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/lib/ellekit/pspawn.dylib"
+    "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/lib/libellekit.dylib"
+    "$TRUSTED_ELLEKIT_ROOT/var/jb/usr/libexec/ellekit/loader"
+)
+for (( index = 1; index <= ${#ellekit_package_machos}; ++index )); do
+    [[ "$(sha256_of "${ellekit_package_machos[$index]}")" == \
+       "$(sha256_of "${trusted_ellekit_machos[$index]}")" ]] || \
+        die "embedded ElleKit payload changed after repacking"
+done
+
+# Build the supplied SBInject chain as thin arm64e artifacts.  The launchd
+# component contains only SpringBoard path redirection, jitterd accepts only a
+# self-request from the exact replacement path, and generalhook performs the
+# pre-main JIT/dyld-bypass/ElleKit handoff.
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -Os -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
+    "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook.dylib \
+    -o "$SBINJECT_LAUNCHDHOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_LAUNCHDHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -Os -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    "$SBINJECT_SOURCE_DIR/sbinject_generalhook.c" \
+    "$SBINJECT_SOURCE_DIR/sbinject_dyld_bypass.c" \
+    -lsandbox \
+    -install_name /var/jb/usr/lib/sbinject/generalhook.dylib \
+    -o "$SBINJECT_GENERALHOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_GENERALHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -fno-objc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    "$SBINJECT_SOURCE_DIR/sbinject_jitterd.m" \
+    -framework Foundation \
+    -o "$SBINJECT_JITTERD"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --generate-entitlement-der \
+    --entitlements "$SBINJECT_JITTERD_ENTITLEMENTS" \
+    "$SBINJECT_JITTERD"
+for artifact in "$SBINJECT_LAUNCHDHOOK" "$SBINJECT_GENERALHOOK" \
+                "$SBINJECT_JITTERD"; do
+    codesign --verify --strict --all-architectures "$artifact" || \
+        die "SBInject artifact signature is invalid: ${artifact:t}"
+    [[ "$(lipo -archs "$artifact")" == arm64e ]] || \
+        die "SBInject artifact is not exactly arm64e: ${artifact:t}"
+done
+cp "$SBINJECT_JITTERD_PLIST_SOURCE" "$EMBEDDED_SBINJECT_JITTERD_PLIST"
+chmod 0644 "$EMBEDDED_SBINJECT_JITTERD_PLIST"
+
+# Preserve the exact target SpringBoard bundle resources, replace only its
+# tiny launcher executable, and put the one signed pre-main dylib beside it.
+# The launcher has only sixteen bytes of header padding, so the pinned patcher
+# safely converts its otherwise-unused 40-byte LC_RPATH into
+# `LC_LOAD_DYLIB @loader_path/g` before deterministic ad-hoc signing.
+ditto --noqtn "$SPRINGBOARD_CANDIDATE_BUNDLE_SOURCE" \
+    "$SPRINGBOARD_CANDIDATE_DIRECTORY"
+rm -f "$SPRINGBOARD_CANDIDATE_DIRECTORY/SpringBoard"
+rm -rf "$SPRINGBOARD_CANDIDATE_DIRECTORY/_CodeSignature"
+cp "$SBINJECT_GENERALHOOK" "$SPRINGBOARD_CANDIDATE_GENERALHOOK"
+chmod 0755 "$SPRINGBOARD_CANDIDATE_GENERALHOOK"
 python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     "$SPRINGBOARD_CANDIDATE_SOURCE" \
     "$SPRINGBOARD_CANDIDATE_DIRECTORY" \
-    --info-plist "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" >/dev/null
+    --info-plist "$SPRINGBOARD_CANDIDATE_INFO_SOURCE" \
+    --executable-name notSpringBoard \
+    --bundle-executable notSpringBoard \
+    --load-dylib @loader_path/g \
+    --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
 [[ -x "$SPRINGBOARD_CANDIDATE" ]] || \
     die "SpringBoard candidate was not produced"
 [[ -f "$SPRINGBOARD_CANDIDATE_INFO" ]] || \
@@ -398,9 +414,17 @@ python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     die "SpringBoard candidate entitlements were not produced"
 [[ -f "$SPRINGBOARD_CANDIDATE_MANIFEST" ]] || \
     die "SpringBoard candidate manifest was not produced"
+[[ -x "$SPRINGBOARD_CANDIDATE_GENERALHOOK" ]] || \
+    die "SpringBoard candidate generalhook was not produced"
 codesign --verify --strict --all-architectures --ignore-resources \
     "$SPRINGBOARD_CANDIDATE" || \
     die "SpringBoard candidate signature is invalid"
+otool -L "$SPRINGBOARD_CANDIDATE" | rg -q \
+    '^\s+@loader_path/g ' || \
+    die "SpringBoard candidate does not preload the SBInject generalhook"
+[[ "$(sha256_of "$SPRINGBOARD_CANDIDATE_GENERALHOOK")" == \
+   "$(sha256_of "$SBINJECT_GENERALHOOK")" ]] || \
+    die "SpringBoard bundle generalhook changed while copying"
 
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
@@ -427,76 +451,6 @@ ldid -e "$LAUNCHCTL" | \
     rg -q '<key>com.apple.private.xpc.launchd.enable-disable-system-services</key>' || \
     die "launchctl lost its launchd-control entitlement"
 
-# Give every fixed Procursus executable a strong dependency on the fixed,
-# trust-cached execution interposer. This avoids depending on dyld environment
-# variables, which iOS can discard for platformized tools, while still routing
-# only nonbaseline package payloads through the JIT worker. Preserve the
-# bootstrap's existing platform/root policy; package-installed Mach-Os remain
-# absent from the immutable Cryptex cache.
-typeset -i procursus_runtime_executables=0
-cp "$PROCURSUS_RUNTIME_HISTORY_INPUT" \
-    "$PROCURSUS_RUNTIME_BASELINE_INPUT"
-PROCURSUS_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
-for candidate in \
-    "$PROCURSUS_ROOT"/**/*(.); do
-    file -b "$candidate" | rg -q '^Mach-O .*executable' || continue
-    relative=${candidate#"$PROCURSUS_ROOT/"}
-    original_sha256=$(sha256_of "$candidate")
-    printf '%s\t%s\n' "$original_sha256" "$relative" \
-        >>"$PROCURSUS_RUNTIME_BASELINE_INPUT"
-    enable_procursus_runtime_admission "$candidate"
-    normalized_sha256=$(sha256_of "$candidate")
-    printf '%s\t%s\n' "$normalized_sha256" "$relative" \
-        >>"$PROCURSUS_RUNTIME_BASELINE_INPUT"
-    (( ++procursus_runtime_executables ))
-done
-(( procursus_runtime_executables > 0 )) || \
-    die "Procursus runtime-admission executable set is empty"
-python3 - "$PROCURSUS_RUNTIME_BASELINE_INPUT" \
-    "$EMBEDDED_PROCURSUS_RUNTIME_BASELINE" \
-    "$procursus_runtime_executables" <<'PY'
-import pathlib
-import plistlib
-import re
-import sys
-
-source, destination, expected_count = sys.argv[1:]
-entries = {}
-for line in pathlib.Path(source).read_text().splitlines():
-    digest, separator, relative = line.partition("\t")
-    path = pathlib.PurePosixPath(relative)
-    if (
-        not separator
-        or not re.fullmatch(r"[0-9a-f]{64}", digest)
-        or path.is_absolute()
-        or not relative
-        or any(component in {"", ".", ".."} for component in path.parts)
-    ):
-        raise SystemExit(f"invalid Procursus runtime baseline entry: {line!r}")
-    entries.setdefault(relative, set()).add(digest)
-if len(entries) != int(expected_count):
-    raise SystemExit(
-        f"Procursus runtime baseline count mismatch: {len(entries)} != "
-        f"{expected_count}"
-    )
-with pathlib.Path(destination).open("wb") as stream:
-    plistlib.dump(
-        {
-            "Version": 2,
-            "Executables": {
-                relative: sorted(digests)
-                for relative, digests in sorted(entries.items())
-            },
-        },
-        stream,
-        fmt=plistlib.FMT_BINARY,
-        sort_keys=True,
-    )
-PY
-rm -f "$PROCURSUS_RUNTIME_ENTITLEMENTS"
-print -r -- \
-    "enabled runtime admission for $procursus_runtime_executables Procursus executables"
-
 dpkg-deb -R "$SILEO_DEB" "$PACKAGE_ROOT"
 python3 "$SCRIPT_DIR/patch_sileo_postinst.py" \
     "$PACKAGE_ROOT/DEBIAN/postinst"
@@ -506,7 +460,6 @@ APP_DIR="$PACKAGE_ROOT/var/jb/Applications/Sileo.app"
 plutil -replace CFBundleIdentifier -string "$SILEO_BUNDLE_IDENTIFIER" \
     "$APP_DIR/Info.plist"
 
-SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
@@ -540,56 +493,6 @@ cp "$REPACKED_SILEO" \
 # untouched in its MobileInstallation container.
 ditto --noqtn "$APP_DIR" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/Sileo.app"
-
-# A Cryptex trust cache is immutable after personalization. Embed exact copies
-# of the default tweak stack's package payloads so their later /var/jb copies
-# carry code directories already represented by this Cryptex.
-dpkg-deb -x "$ELLEKIT_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/ellekit"
-dpkg-deb -x "$PREFERENCELOADER_DEB" \
-    "$ORIGINAL_TRUSTED_PACKAGE_ROOT/preferenceloader"
-dpkg-deb -x "$CHOICY_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/choicy"
-dpkg-deb -x "$ALTLIST_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/altlist"
-dpkg-deb -x "$UIKITTOOLS_DEB" "$ORIGINAL_TRUSTED_PACKAGE_ROOT/uikittools"
-ditto --noqtn "$ORIGINAL_TRUSTED_PACKAGE_ROOT" "$TRUSTED_PACKAGE_ROOT"
-
-# These jailbreak packages use legacy signatures that iOS 27 rejects even
-# when the old cdhash is present in a Cryptex trust cache. Re-sign exact copies
-# with a current ad-hoc CodeDirectory, retaining any declared entitlements.
-for candidate in "$TRUSTED_PACKAGE_ROOT"/**/*(.); do
-    file -b "$candidate" | rg -q '^Mach-O' || continue
-    if [[ "$candidate" == "$TRUSTED_PACKAGE_ROOT/uikittools/"* ]]; then
-        codesign --verify --strict --all-architectures "$candidate" || \
-            die "pinned uikittools signature is invalid: $candidate"
-        continue
-    fi
-    architectures=($(lipo -archs "$candidate"))
-    (( ${#architectures} > 0 )) || die "Mach-O has no architectures: $candidate"
-    identifier=$(codesign -d --arch "${architectures[1]}" -vvv "$candidate" \
-        2>&1 | sed -n 's/^Identifier=//p')
-    [[ -n "$identifier" ]] || die "Mach-O has no code identifier: $candidate"
-    entitlements="$SIGNING_DIR/trusted-package-entitlements.plist"
-    ldid -arch "${architectures[1]}" -e "$candidate" >"$entitlements"
-    signing_args=(
-        --force
-        --sign -
-        --timestamp=none
-        --pagesize 4096
-        --identifier "$identifier"
-    )
-    if [[ -s "$entitlements" ]]; then
-        plutil -lint "$entitlements" >/dev/null || \
-            die "invalid package entitlements: $candidate"
-        signing_args+=(--entitlements "$entitlements")
-    fi
-    codesign "${signing_args[@]}" "$candidate"
-    codesign --verify --strict --all-architectures "$candidate" || \
-        die "normalized package signature is invalid: $candidate"
-done
-rm -f "$SIGNING_DIR/trusted-package-entitlements.plist"
-
-ditto --noqtn "$ORIGINAL_TRUSTED_PACKAGE_ROOT" \
-    "$EMBEDDED_ORIGINAL_TRUSTED_PACKAGES"
-ditto --noqtn "$TRUSTED_PACKAGE_ROOT" "$EMBEDDED_TRUSTED_PACKAGES"
 
 python3 "$SCRIPT_DIR/patch_opainject_dyld.py" \
     "$OPAINJECT_DIR/dyld.m" "$PATCHED_OPAINJECT_DYLD"
@@ -703,80 +606,35 @@ plutil -lint "$EMBEDDED_CUSTOMD_JOB_PLIST" >/dev/null || \
 
 xcrun --sdk iphoneos clang \
     -arch arm64 \
-    -arch arm64e \
-    -miphoneos-version-min=17.0 \
-    -isysroot "$SDKROOT" \
-    -dynamiclib \
-    -install_name /var/jb/usr/lib/codex-exec-interposer.dylib \
-    -Os -Wall -Wextra -Werror \
-    "$SCRIPT_DIR/codex_exec_interposer.c" \
-    -o "$EXEC_INTERPOSER"
-codesign --force --sign - --timestamp=none --pagesize 4096 \
-    "$EXEC_INTERPOSER"
-codesign --verify --strict --all-architectures "$EXEC_INTERPOSER" || \
-    die "execution interposer signature is invalid"
-
-xcrun --sdk iphoneos clang \
-    -arch arm64e \
-    -miphoneos-version-min=17.0 \
-    -isysroot "$SDKROOT" \
-    -dynamiclib \
-    -install_name "$DYLD_JB_ADMISSION_HOOK_INSTALL_NAME" \
-    -Os -fvisibility=hidden -Wall -Wextra -Werror \
-    "$DYLD_JB_ADMISSION_HOOK_SOURCE" \
-    -o "$DYLD_JB_ADMISSION_HOOK"
-codesign --force --sign - --timestamp=none --pagesize 4096 \
-    "$DYLD_JB_ADMISSION_HOOK"
-codesign --verify --strict --all-architectures \
-    "$DYLD_JB_ADMISSION_HOOK" || \
-    die "dyld /var/jb admission hook signature is invalid"
-[[ "$(lipo -archs "$DYLD_JB_ADMISSION_HOOK")" == arm64e ]] || \
-    die "dyld /var/jb admission hook is not exactly arm64e"
-[[ "$(otool -D "$DYLD_JB_ADMISSION_HOOK" | tail -n 1)" == \
-   "$DYLD_JB_ADMISSION_HOOK_INSTALL_NAME" ]] || \
-    die "dyld /var/jb admission hook install name is invalid"
-
-xcrun --sdk iphoneos clang \
-    -arch arm64 \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
     -fblocks \
     -Wall -Wextra -Werror \
     -I "$SCRIPT_DIR" \
-    "$SCRIPT_DIR/runtime_trust_client.c" \
-    -o "$RUNTIME_TRUST_CLIENT"
+    "$SCRIPT_DIR/sbinject_package_validator.c" \
+    -o "$SBINJECT_PACKAGE_VALIDATOR"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
-    "$RUNTIME_TRUST_CLIENT"
-codesign --verify --strict --all-architectures "$RUNTIME_TRUST_CLIENT" || \
-    die "runtime trust broker client signature is invalid"
-
-[[ -x "$RUNTIME_TRUST_SOURCE" ]] || \
-    die "runtime trust helper is unavailable: $RUNTIME_TRUST_SOURCE"
-cp "$RUNTIME_TRUST_SOURCE" "$RUNTIME_TRUST_HELPER"
-chmod 0755 "$RUNTIME_TRUST_HELPER"
-codesign --verify --strict --all-architectures "$RUNTIME_TRUST_HELPER" || \
-    die "runtime trust helper signature is invalid"
-ldid -e "$RUNTIME_TRUST_HELPER" | rg -q \
-    '<key>com.apple.private.amfi.can-load-trust-cache</key>' || \
-    die "runtime trust helper lacks AMFI trust-cache entitlement"
-ldid -e "$RUNTIME_TRUST_HELPER" | rg -q \
-    '<key>com.apple.security.network.client</key>' || \
-    die "runtime trust helper lacks TSS network entitlement"
+    "$SBINJECT_PACKAGE_VALIDATOR"
+codesign --verify --strict --all-architectures \
+    "$SBINJECT_PACKAGE_VALIDATOR" || \
+    die "SBInject package validator signature is invalid"
 
 typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
-    "$EXEC_INTERPOSER" \
     "$CUSTOMD_EXECUTABLE" \
     "$CUSTOMCTL_EXECUTABLE" \
     "$CUSTOMD_REGISTRAR_EXECUTABLE" \
     "$CUSTOMD_TRACE_REEXEC_EXECUTABLE" \
     "$CUSTOMD_SETEXEC_EXECUTABLE" \
-    "$DYLD_JB_ADMISSION_HOOK" \
-    "$RUNTIME_TRUST_CLIENT" \
-    "$RUNTIME_TRUST_HELPER" \
-    "$SPRINGBOARD_CANDIDATE"; do
+    "$SBINJECT_PACKAGE_VALIDATOR" \
+    "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_LAUNCHDHOOK" \
+    "$SBINJECT_JITTERD" \
+    "$SPRINGBOARD_CANDIDATE_GENERALHOOK" \
+    "$SPRINGBOARD_CANDIDATE" \
+    "${trusted_ellekit_machos[@]}"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
             2>&1 | sed -n 's/^CDHash=//p')
@@ -788,26 +646,11 @@ done
 printf '%s\n' "${trusted_runtime_cdhashes[@]}" | sort -u \
     >"$TRUSTED_RUNTIME_CDHASHES"
 
-typeset -a trusted_cdhashes
-for candidate in "$TRUSTED_PACKAGE_ROOT"/**/*(.); do
-    file -b "$candidate" | rg -q '^Mach-O' || continue
-    for architecture in $(lipo -archs "$candidate"); do
-        cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
-            2>&1 | sed -n 's/^CDHash=//p')
-        print -r -- "$cdhash" | rg -q '^[0-9a-f]{40}$' || \
-            die "could not derive $architecture cdhash for $candidate"
-        trusted_cdhashes+=("$cdhash")
-    done
-done
-(( ${#trusted_cdhashes} > 0 )) || die "trusted package set has no Mach-O inputs"
-printf '%s\n' "${trusted_cdhashes[@]}" | sort -u \
-    >"$TRUSTED_PACKAGE_CDHASHES"
-
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
-    -fobjc-arc \
+    -fobjc-arc -fblocks \
     -Wall -Wextra -Werror \
     "-DCODEX_SILEO_BUNDLE_IDENTIFIER=@\"$SILEO_BUNDLE_IDENTIFIER\"" \
     -framework Foundation \
@@ -823,38 +666,21 @@ cp "$DEFAULT_SOURCES" \
     "$EMBEDDED_DEFAULT_SOURCES"
 cp "$REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG"
-cp "$RUNTIME_TRUST_APT_CONFIG" \
-    "$EMBEDDED_RUNTIME_TRUST_APT_CONFIG"
+cp "$SBINJECT_APT_CONFIG" "$EMBEDDED_SBINJECT_APT_CONFIG"
 cp "$APT_LIST_NORMALIZER" "$EMBEDDED_APT_LIST_NORMALIZER"
 chmod 0644 "$EMBEDDED_DEFAULT_SOURCES" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG" \
-    "$EMBEDDED_RUNTIME_TRUST_APT_CONFIG" \
+    "$EMBEDDED_SBINJECT_APT_CONFIG" \
     "$EMBEDDED_APT_LIST_NORMALIZER"
+if [[ "$FORCE_CLEAN_INSTALL" == 1 ]]; then
+    print -r -- "$VERSION" >"$EMBEDDED_CLEAN_INSTALL_TOKEN"
+    chmod 0400 "$EMBEDDED_CLEAN_INSTALL_TOKEN"
+fi
 gpg --batch --yes --dearmor --output "$EMBEDDED_ELLEKIT_KEY" "$ELLEKIT_KEY"
 gpg --batch --yes --dearmor --output "$EMBEDDED_BIGBOSS_KEY" "$BIGBOSS_KEY"
 chmod 0644 "$EMBEDDED_ELLEKIT_KEY" "$EMBEDDED_BIGBOSS_KEY"
 verify_keyring "$EMBEDDED_ELLEKIT_KEY" "$ELLEKIT_KEY_FINGERPRINT"
 verify_keyring "$EMBEDDED_BIGBOSS_KEY" "$BIGBOSS_KEY_FINGERPRINT"
-
-# Generate the admission baseline from every Mach-O that will be present when
-# cryptexctl creates the static trust cache.  Package-installed binaries are
-# deliberately absent from this immutable set and therefore take the runtime
-# worker path without rebuilding the Cryptex.
-typeset -a base_cdhashes
-for candidate in "$IMAGE_ROOT"/**/*(.); do
-    file -b "$candidate" | rg -q '^Mach-O' || continue
-    for architecture in $(lipo -archs "$candidate"); do
-        cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
-            2>&1 | sed -n 's/^CDHash=//p')
-        print -r -- "$cdhash" | rg -q '^[0-9a-f]{40}$' || \
-            die "could not derive baseline $architecture cdhash for $candidate"
-        base_cdhashes+=("$cdhash")
-    done
-done
-(( ${#base_cdhashes} > 0 )) || die "runtime admission baseline is empty"
-printf '%s\n' "${base_cdhashes[@]}" | sort -u \
-    >"$EMBEDDED_BASE_CDHASHES"
-chmod 0644 "$EMBEDDED_BASE_CDHASHES"
 
 # [REDACTED] Packaging, payload selection, and validation details omitted.
 printf '%s\n' 'TSS/Cryptex personalization and installation details are redacted from this educational source release.' >&2
