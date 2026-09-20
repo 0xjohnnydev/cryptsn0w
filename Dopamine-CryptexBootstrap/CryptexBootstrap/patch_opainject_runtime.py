@@ -99,6 +99,7 @@ struct codex_cached_injection_primitives {
 };
 
 static struct codex_cached_injection_primitives codexPrimitives;
+static struct codex_cached_injection_primitives codexTargetPrimitives;
 
 static uint64_t codexCanonicalAddress(uint64_t address)
 {
@@ -123,15 +124,25 @@ static bool codexUUIDNonzero(const uint8_t uuid[16])
 	return aggregate != 0;
 }
 
-static bool codexTaskBytesMatchSelf(task_t target, vm_address_t address,
-	size_t size)
+static bool codexTaskBytesMatchSelf(task_t target,
+	vm_address_t targetAddress, vm_address_t selfAddress, size_t size)
 {
 	uint8_t targetBytes[16] = { 0 };
 	uint8_t selfBytes[16] = { 0 };
 	return size != 0 && size <= sizeof(targetBytes) &&
-		codexTaskReadExact(target, address, targetBytes, size) &&
-		codexTaskReadExact(mach_task_self(), address, selfBytes, size) &&
+		codexTaskReadExact(target, targetAddress, targetBytes, size) &&
+		codexTaskReadExact(mach_task_self(), selfAddress, selfBytes, size) &&
 		memcmp(targetBytes, selfBytes, size) == 0;
+}
+
+static uint64_t codexRelocatedCacheAddress(uint64_t sourceBase,
+	uint64_t targetBase, uint64_t sourceAddress)
+{
+	if (sourceBase == 0 || targetBase == 0 || sourceAddress < sourceBase)
+		return 0;
+	uint64_t offset = sourceAddress - sourceBase;
+	if (offset > UINT64_MAX - targetBase) return 0;
+	return targetBase + offset;
 }
 
 bool codexPrewarmInjectionPrimitives(task_t task,
@@ -183,7 +194,7 @@ vm_address_t writeStringToTask''',
 \tuint64_t mainThread = 0;
 \tif (@available(iOS 12, *)) {
 \t\tuint64_t pthread_main_thread_np =
-\t\t\tcodexPrimitives.pthreadMainThreadNP;
+\t\t\tcodexTargetPrimitives.pthreadMainThreadNP;
 \t\tuint32_t instructions[2] = { 0 };
 \t\tkr = task_read(task, pthread_main_thread_np, &instructions[0], sizeof(instructions));
 \t\tif (kr != KERN_SUCCESS) {
@@ -204,7 +215,7 @@ vm_address_t writeStringToTask''',
 \t\t\treturn kr;
 \t\t}
 \t}
-\tuint64_t _pthread_set_self = codexPrimitives.pthreadSetSelf;
+\tuint64_t _pthread_set_self = codexTargetPrimitives.pthreadSetSelf;
 ''',
         "cached pthread primitives",
     )
@@ -405,6 +416,7 @@ bool codexPrewarmInjectionPrimitives(task_t task,
 bool codexValidateInjectionPrimitives(task_t task,
 	vm_address_t allImageInfoAddr)
 {
+	memset(&codexTargetPrimitives, 0, sizeof(codexTargetPrimitives));
 	if (!codexPrimitives.ready) {
 		printf("[codexValidate] stage=prewarm ready=0\n");
 		return false;
@@ -412,38 +424,72 @@ bool codexValidateInjectionPrimitives(task_t task,
 	struct dyld_all_image_infos imageInfos = { 0 };
 	bool infosRead = codexTaskReadExact(
 		task, allImageInfoAddr, &imageInfos, sizeof(imageInfos));
-	bool cacheExact = infosRead && imageInfos.version >= 15 &&
+	uint64_t targetCacheBase = codexCanonicalAddress(
+		(uint64_t)imageInfos.sharedCacheBaseAddress);
+	bool cacheCompatible = infosRead && imageInfos.version >= 15 &&
 		imageInfos.libSystemInitialized && imageInfos.infoArrayCount != 0 &&
-		codexCanonicalAddress((uint64_t)imageInfos.sharedCacheBaseAddress) ==
-			codexPrimitives.sharedCacheBase &&
+		targetCacheBase != 0 &&
 		memcmp(imageInfos.sharedCacheUUID, codexPrimitives.sharedCacheUUID,
 			sizeof(codexPrimitives.sharedCacheUUID)) == 0;
-	if (!cacheExact) {
+	if (!cacheCompatible) {
 		printf("[codexValidate] stage=cache infosRead=%d version=%u "
-			"libSystem=%d count=%u base=0x%llX expected=0x%llX uuid=%d\n",
+			"libSystem=%d count=%u base=0x%llX source=0x%llX uuid=%d\n",
 			infosRead, imageInfos.version, imageInfos.libSystemInitialized,
 			imageInfos.infoArrayCount,
-			(unsigned long long)codexCanonicalAddress(
-				(uint64_t)imageInfos.sharedCacheBaseAddress),
+			(unsigned long long)targetCacheBase,
 			(unsigned long long)codexPrimitives.sharedCacheBase,
 			memcmp(imageInfos.sharedCacheUUID, codexPrimitives.sharedCacheUUID,
 				sizeof(codexPrimitives.sharedCacheUUID)) == 0);
 		return false;
 	}
 
-	// Matching UUID+base makes cache VM addresses boot-global. Validate the
-	// exact cached addresses directly so repeat remote calls stay bounded.
-	vm_address_t targetLibDyld = codexPrimitives.libDyld;
-	vm_address_t targetLibPthread = codexPrimitives.libPthread;
-	vm_address_t targetLibSandbox = codexPrimitives.libSandbox;
+	// iOS may map the same shared-cache UUID at a different base in another
+	// process. Relocate the already-resolved offsets, then compare the exact
+	// target bytes with their source-process counterparts before remote calls.
+	codexTargetPrimitives = codexPrimitives;
+	codexTargetPrimitives.sharedCacheBase = targetCacheBase;
+#define CODEX_RELOCATE_PRIMITIVE(field) \
+	codexTargetPrimitives.field = codexRelocatedCacheAddress( \
+		codexPrimitives.sharedCacheBase, targetCacheBase, \
+		codexPrimitives.field)
+	CODEX_RELOCATE_PRIMITIVE(libDyld);
+	CODEX_RELOCATE_PRIMITIVE(libPthread);
+	CODEX_RELOCATE_PRIMITIVE(libSandbox);
+	CODEX_RELOCATE_PRIMITIVE(ropLoop);
+	CODEX_RELOCATE_PRIMITIVE(pthreadMainThreadNP);
+	CODEX_RELOCATE_PRIMITIVE(pthreadSetSelf);
+	CODEX_RELOCATE_PRIMITIVE(sandboxExtensionConsume);
+	CODEX_RELOCATE_PRIMITIVE(dlopenAddress);
+	CODEX_RELOCATE_PRIMITIVE(dlerrorAddress);
+#undef CODEX_RELOCATE_PRIMITIVE
+	if (codexTargetPrimitives.libDyld == 0 ||
+		codexTargetPrimitives.libPthread == 0 ||
+		codexTargetPrimitives.libSandbox == 0 ||
+		codexTargetPrimitives.ropLoop == 0 ||
+		codexTargetPrimitives.pthreadMainThreadNP == 0 ||
+		codexTargetPrimitives.pthreadSetSelf == 0 ||
+		codexTargetPrimitives.sandboxExtensionConsume == 0 ||
+		codexTargetPrimitives.dlopenAddress == 0 ||
+		codexTargetPrimitives.dlerrorAddress == 0) {
+		printf("[codexValidate] stage=relocate source=0x%llX "
+			"target=0x%llX ready=0\n",
+			(unsigned long long)codexPrimitives.sharedCacheBase,
+			(unsigned long long)targetCacheBase);
+		memset(&codexTargetPrimitives, 0,
+			sizeof(codexTargetPrimitives));
+		return false;
+	}
 
 	uint32_t dyldMagic = 0, pthreadMagic = 0, sandboxMagic = 0;
 	bool dyldRead = codexTaskReadExact(
-		task, targetLibDyld, &dyldMagic, sizeof(dyldMagic));
+		task, codexTargetPrimitives.libDyld, &dyldMagic,
+		sizeof(dyldMagic));
 	bool pthreadRead = codexTaskReadExact(
-		task, targetLibPthread, &pthreadMagic, sizeof(pthreadMagic));
+		task, codexTargetPrimitives.libPthread, &pthreadMagic,
+		sizeof(pthreadMagic));
 	bool sandboxRead = codexTaskReadExact(
-		task, targetLibSandbox, &sandboxMagic, sizeof(sandboxMagic));
+		task, codexTargetPrimitives.libSandbox, &sandboxMagic,
+		sizeof(sandboxMagic));
 	if (!dyldRead || dyldMagic != MH_MAGIC_64 ||
 		!pthreadRead || pthreadMagic != MH_MAGIC_64 ||
 		!sandboxRead || sandboxMagic != MH_MAGIC_64) {
@@ -451,26 +497,33 @@ bool codexValidateInjectionPrimitives(task_t task,
 			"pthread=%d/0x%08X sandbox=%d/0x%08X\n",
 			dyldRead, dyldMagic, pthreadRead, pthreadMagic,
 			sandboxRead, sandboxMagic);
+		memset(&codexTargetPrimitives, 0,
+			sizeof(codexTargetPrimitives));
 		return false;
 	}
 
 	uint32_t loopInstruction = 0;
 	uint32_t expectedLoopInstruction = CFSwapInt32(0x00000014);
 	bool loopRead = codexTaskReadExact(
-		task, codexPrimitives.ropLoop, &loopInstruction,
+		task, codexTargetPrimitives.ropLoop, &loopInstruction,
 		sizeof(loopInstruction));
 	bool loopSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.ropLoop, 4);
+		task, codexTargetPrimitives.ropLoop, codexPrimitives.ropLoop, 4);
 	bool pthreadMainSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.pthreadMainThreadNP, 8);
+		task, codexTargetPrimitives.pthreadMainThreadNP,
+		codexPrimitives.pthreadMainThreadNP, 8);
 	bool pthreadSetSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.pthreadSetSelf, 16);
+		task, codexTargetPrimitives.pthreadSetSelf,
+		codexPrimitives.pthreadSetSelf, 16);
 	bool sandboxSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.sandboxExtensionConsume, 16);
+		task, codexTargetPrimitives.sandboxExtensionConsume,
+		codexPrimitives.sandboxExtensionConsume, 16);
 	bool dlopenSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.dlopenAddress, 16);
+		task, codexTargetPrimitives.dlopenAddress,
+		codexPrimitives.dlopenAddress, 16);
 	bool dlerrorSelf = codexTaskBytesMatchSelf(
-		task, codexPrimitives.dlerrorAddress, 16);
+		task, codexTargetPrimitives.dlerrorAddress,
+		codexPrimitives.dlerrorAddress, 16);
 	bool valid = loopRead && loopInstruction == expectedLoopInstruction &&
 		loopSelf && pthreadMainSelf && pthreadSetSelf && sandboxSelf &&
 		dlopenSelf && dlerrorSelf;
@@ -481,7 +534,14 @@ bool codexValidateInjectionPrimitives(task_t task,
 		pthreadMainSelf, pthreadSetSelf, sandboxSelf, dlopenSelf,
 		dlerrorSelf, valid);
 	if (valid) {
-		printf("[codexValidate] exact shared-cache primitives ready\n");
+		ropLoop = codexTargetPrimitives.ropLoop;
+		printf("[codexValidate] relocated shared-cache primitives ready "
+			"source=0x%llX target=0x%llX\n",
+			(unsigned long long)codexPrimitives.sharedCacheBase,
+			(unsigned long long)targetCacheBase);
+	} else {
+		memset(&codexTargetPrimitives, 0,
+			sizeof(codexTargetPrimitives));
 	}
 	return valid;
 }
@@ -557,7 +617,7 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
 	}
 
 	(void)allImageInfoAddr;
-	uint64_t consumeAddress = codexPrimitives.sandboxExtensionConsume;
+	uint64_t consumeAddress = codexTargetPrimitives.sandboxExtensionConsume;
 	if (consumeAddress == 0) {
 		printf("[sandboxFixup] sandbox_extension_consume unavailable\n");
 		return false;
@@ -613,10 +673,10 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
 \tuint64_t dlopenAddr = remoteDlSym(task, libDyldAddr, "_dlopen");
 \tuint64_t dlerrorAddr = remoteDlSym(task, libDyldAddr, "_dlerror");
 ''',
-        '''\t// These were resolved in the loader's identical boot-global
-\t// shared cache and byte-validated against this target before thread work.
-\tuint64_t dlopenAddr = codexPrimitives.dlopenAddress;
-\tuint64_t dlerrorAddr = codexPrimitives.dlerrorAddress;
+        '''\t// These are relocated from the same shared-cache UUID and
+\t// byte-validated against this exact target before thread work.
+\tuint64_t dlopenAddr = codexTargetPrimitives.dlopenAddress;
+\tuint64_t dlerrorAddr = codexTargetPrimitives.dlerrorAddress;
 \tif (dlopenAddr == 0 || dlerrorAddr == 0) {
 \t\tprintf("[injectDylibViaRop] cached dyld primitives unavailable\\n");
 \t\tthread_terminate(pthread);
