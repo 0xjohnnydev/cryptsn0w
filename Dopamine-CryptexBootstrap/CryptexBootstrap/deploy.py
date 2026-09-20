@@ -628,6 +628,22 @@ def finish_install(
     stage_install: Path,
     enable_host_ssh: bool,
 ) -> dict[str, Any]:
+    # Resume is intentionally idempotent: a prior final build/install failure
+    # may leave generated context and personalization outputs in this run.
+    # Device-pulled target bundles and the installed stage/key remain valid.
+    for stale_directory in (
+        run_dir / "final-context",
+        run_dir / "final-personalized",
+    ):
+        if stale_directory.exists():
+            shutil.rmtree(stale_directory)
+    for stale_file in (
+        run_dir / "final-install.json",
+        run_dir / "flow-summary.json",
+        run_dir / "system-sileo-icon.png",
+    ):
+        stale_file.unlink(missing_ok=True)
+
     pull_target_bundles(device, private_key)
     forward, handoff = start_stage_handoff(device, private_key)
 

@@ -109,11 +109,16 @@ def main() -> int:
         merged[entitlement] = True
 
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".candidate.", dir=output) as raw_temp:
+    with tempfile.TemporaryDirectory(
+        prefix=f".{output.name}.candidate.", dir=output.parent
+    ) as raw_temp:
         temporary = pathlib.Path(raw_temp)
         candidate = temporary / executable_name
         entitlements = temporary / "entitlements.plist"
-        info_path = temporary / "Info.plist"
+        # Do not name this Info.plist until it reaches the output bundle.
+        # codesign otherwise treats the temporary directory as a bundle while
+        # verifying its standalone executable and expects sealed resources.
+        info_path = temporary / "CandidateInfo.plist"
         shutil.copyfile(source, candidate)
         candidate.chmod(0o755)
         entitlements.write_bytes(
@@ -131,22 +136,25 @@ def main() -> int:
             os.fspath(candidate),
             args.load_dylib,
         )
+        # Remove Apple's bundle-bound resource slot before ldid creates the
+        # standalone platform CodeDirectory. Otherwise strict verification of
+        # this renamed executable expects the source bundle's CodeResources.
+        run("ldid", "-r", os.fspath(candidate))
         run(
-            "codesign",
-            "--force",
-            "--sign",
-            "-",
-            "--timestamp=none",
-            "--pagesize",
-            "4096",
-            "--generate-entitlement-der",
-            "--identifier",
-            identifier,
-            "--entitlements",
-            os.fspath(entitlements),
+            "ldid",
+            f"-S{entitlements}",
+            "-P13",
+            "-Cadhoc",
+            "-Hsha256",
+            f"-I{identifier}",
             os.fspath(candidate),
         )
         run("codesign", "--verify", "--strict", os.fspath(candidate))
+        signature_details = run(
+            "codesign", "--display", "--verbose=3", os.fspath(candidate)
+        ).stderr
+        if b"Platform identifier=13" not in signature_details:
+            raise BuildError("candidate signature lost platform identifier 13")
         signed = read_entitlements(candidate)
         if any(signed.get(key) is not True for key in added_entitlements):
             raise BuildError("candidate signature lost required entitlements")
