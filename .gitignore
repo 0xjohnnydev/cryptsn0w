@@ -1,4 +1,6 @@
 build/
+dist/
+MacApp/.build/
 cache/
 .venv/
 /out/
