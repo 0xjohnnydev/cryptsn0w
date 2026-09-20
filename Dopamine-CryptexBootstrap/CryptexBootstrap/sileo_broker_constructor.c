@@ -951,8 +951,8 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
                              char *const envp[restrict]) {
     bool helperSpawn = path_is_registered_helper(path);
     // Sileo 2.x uses a root persona on iOS 13 and later and directly spawns
-    // commands from the jailbreak root.  A provisioned app cannot perform
-    // that persona transition, so route only attributed spawns whose exact
+    // commands from the jailbreak root. Mobile Sileo cannot perform that
+    // persona transition, so route only attributed spawns whose exact
     // executable resolves below the managed root through the same broker.
     char brokerCommand[PATH_MAX] = {0};
     bool compatibilityMapped = false;
@@ -987,7 +987,7 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
         resolve_managed_spawn_command(path, brokerCommand,
                                       &compatibilityMapped);
     // Sileo's dependency preview intentionally invokes apt-get without a root
-    // persona. A provisioned app is denied that exec even though the Cryptex
+    // persona. Mobile Sileo is denied that exec even though the Cryptex
     // trust cache covers apt-get. Route only Sileo's exact read-only JSON
     // simulation shape; package installation continues to use the attributed
     // root path above.

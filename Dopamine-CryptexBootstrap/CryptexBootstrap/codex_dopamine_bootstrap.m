@@ -130,8 +130,13 @@ static NSString *const kInstallerIdentifier =
 #define CODEX_SILEO_BUNDLE_IDENTIFIER @"org.coolstar.SileoStore"
 #endif
 static NSString *const kSileoIdentifier = CODEX_SILEO_BUNDLE_IDENTIFIER;
+static NSString *const kSileoPackageVersion = @"2.5.1+codex1";
+static NSString *const kSystemSileoDataRoot = @"/var/mobile";
 static NSString *const kBundleContainerRoot =
     @"/var/containers/Bundle/Application";
+static NSString *const kSystemSileoBundlePath =
+    @"/var/containers/Bundle/Application/"
+     "D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app";
 static NSString *const kRootBrokerLabel =
     @"com.openai.codex.dopamine.sileo-root-broker";
 static NSString *const kRootBrokerExecutable =
@@ -139,6 +144,7 @@ static NSString *const kRootBrokerExecutable =
 static NSString *const kRootBrokerPlist =
     @"/var/jb/Library/LaunchDaemons/com.openai.codex.dopamine."
      "sileo-root-broker.plist";
+static NSString *const kRootlessUicache = @"/var/jb/usr/bin/uicache";
 static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
 static NSString *const kCustomdLabel = @"com.openai.customd";
@@ -170,6 +176,10 @@ static NSString *const kSBInjectPreferencesBridge =
     @"/var/jb/usr/lib/sbinject/preferences-bridge.dylib";
 static NSString *const kSBInjectLaunchdHook =
     @"/var/jb/usr/lib/sbinject/launchdhook-v3.dylib";
+static NSString *const kSBInjectLsdRegistrationHook =
+    @"/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
+static NSString *const kSBInjectLsdRegistrationMarker =
+    @"/var/mobile/.sbinject-lsd-registration-ready";
 static NSString *const kSBInjectBundle =
     @"/var/jb/System/Library/CoreServices/SpringBoard.app";
 static NSString *const kSBInjectBundleHook =
@@ -212,8 +222,14 @@ static NSString *const kElleKitInjectorDylib =
 
 @interface NSObject (CodexLaunchServices)
 + (id)applicationProxyForIdentifier:(NSString *)identifier;
++ (id)defaultWorkspace;
+- (id)registerContainerizedApplicationWithInfoDictionaries:(NSArray *)infos
+                                              operationUUID:(NSUUID *)uuid
+                                             requestContext:(id)context
+                                               saveObserver:(id)observer
+                                          registrationError:(NSError **)error;
 - (NSURL *)bundleURL;
-- (NSURL *)dataContainerURL;
+- (NSString *)applicationType;
 @end
 
 static int gLog = STDERR_FILENO;
@@ -237,6 +253,7 @@ static bool prepare_sbinject_redirect(const char *reason);
 static bool activate_sbinject_springboard(void);
 static bool activate_sbinject_preferences(void);
 static bool respring_sbinject_springboard(const char *reason);
+static bool prepare_lsd_registration_hook(const char *reason);
 
 static void log_message(const char *format, ...) {
     va_list arguments;
@@ -638,15 +655,6 @@ static NSString *registered_application_path(NSString *identifier) {
     return [[proxy bundleURL] path];
 }
 
-static NSString *registered_application_data_path(NSString *identifier) {
-    id proxy = registered_application_proxy(identifier);
-    if (proxy == nil ||
-        ![proxy respondsToSelector:@selector(dataContainerURL)]) {
-        return nil;
-    }
-    return [[proxy dataContainerURL] path];
-}
-
 static bool is_sileo_bundle_container_path(NSString *path) {
     if (path.length == 0 ||
         ![[path lastPathComponent] isEqual:@"Sileo.app"]) {
@@ -667,11 +675,57 @@ static bool is_sileo_bundle_container_path(NSString *path) {
     return [info[@"CFBundleIdentifier"] isEqual:kSileoIdentifier];
 }
 
+static bool is_sileo_system_bundle_path(NSString *path) {
+    if (path.length == 0 ||
+        ![[path lastPathComponent] isEqual:@"Sileo.app"]) return false;
+    NSString *standardized = [path stringByStandardizingPath];
+    bool stableSystemPath = [standardized isEqual:@"/Applications/Sileo.app"];
+    static NSString *const privateCryptexPrefix =
+        @"/private/var/run/com.apple.security.cryptexd/mnt/"
+         "com.openai.codex.dopamine.bootstrap.";
+    static NSString *const cryptexPrefix =
+        @"/var/run/com.apple.security.cryptexd/mnt/"
+         "com.openai.codex.dopamine.bootstrap.";
+    bool cryptexPath =
+        ([standardized hasPrefix:privateCryptexPrefix] ||
+         [standardized hasPrefix:cryptexPrefix]) &&
+        [standardized hasSuffix:@"/Applications/Sileo.app"];
+    bool managedContainerPath =
+        [standardized isEqual:[kSystemSileoBundlePath stringByStandardizingPath]];
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+        [standardized stringByAppendingPathComponent:@"Info.plist"]];
+    bool identifier =
+        [info[@"CFBundleIdentifier"] isEqual:@"org.coolstar.SileoStore"];
+    bool executable = [info[@"CFBundleExecutable"] isEqual:@"Sileo"];
+    bool profile = [[NSFileManager defaultManager] fileExistsAtPath:
+        [standardized stringByAppendingPathComponent:
+            @"embedded.mobileprovision"]];
+    bool valid = (stableSystemPath || cryptexPath || managedContainerPath) && identifier &&
+                 executable && !profile;
+    log_message("sileoSystemPathValidation valid=%s path=%s stable=%s "
+                "cryptex=%s managedContainer=%s identifier=%s executable=%s "
+                "profile=%s",
+                valid ? "true" : "false", [standardized UTF8String],
+                stableSystemPath ? "true" : "false",
+                cryptexPath ? "true" : "false",
+                managedContainerPath ? "true" : "false",
+                identifier ? "true" : "false",
+                executable ? "true" : "false",
+                profile ? "true" : "false");
+    return valid;
+}
+
+static bool is_sileo_client_bundle_path(NSString *path) {
+    return is_sileo_system_bundle_path(path) ||
+           is_sileo_bundle_container_path(path);
+}
+
 static bool is_sileo_data_container_path(NSString *path) {
     if (path.length == 0) {
         return false;
     }
     NSString *standardized = [path stringByStandardizingPath];
+    if ([standardized isEqual:kSystemSileoDataRoot]) return true;
     NSString *base = [standardized stringByDeletingLastPathComponent];
     if (![base isEqual:@"/var/mobile/Containers/Data/Application"] &&
         ![base isEqual:@"/private/var/mobile/Containers/Data/Application"]) {
@@ -685,6 +739,128 @@ static bool is_sileo_data_container_path(NSString *path) {
     return [[NSFileManager defaultManager] fileExistsAtPath:standardized
                                                isDirectory:&isDirectory] &&
            isDirectory;
+}
+
+static bool register_sileo_system_application(NSString *bundlePath,
+                                              NSString **errorText) {
+    if (!is_sileo_system_bundle_path(bundlePath)) {
+        if (errorText != NULL) {
+            *errorText = @"Cryptex Sileo system bundle is invalid";
+        }
+        return false;
+    }
+    if (!prepare_lsd_registration_hook("system-sileo-registration")) {
+        if (errorText != NULL) {
+            *errorText = @"iOS 27 lsd registration hook is unavailable";
+        }
+        return false;
+    }
+    // registered_application_proxy() performs the one-time MobileCoreServices
+    // load that publishes LSApplicationWorkspace into this process.
+    (void)registered_application_proxy(kSileoIdentifier);
+    id workspace = [NSClassFromString(@"LSApplicationWorkspace")
+        defaultWorkspace];
+    SEL registrationSelector = @selector(
+        registerContainerizedApplicationWithInfoDictionaries:operationUUID:
+        requestContext:saveObserver:registrationError:);
+    if (workspace == nil ||
+        ![workspace respondsToSelector:registrationSelector]) {
+        if (errorText != NULL) {
+            *errorText = @"iOS 27 containerized registration API is unavailable";
+        }
+        return false;
+    }
+    NSDictionary *bundleInfo = [NSDictionary dictionaryWithContentsOfFile:
+        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+    NSDictionary *registrationEntitlements =
+        [NSDictionary dictionaryWithContentsOfFile:
+            [bundlePath stringByAppendingPathComponent:
+                            @"CodexSystemEntitlements.plist"]];
+    if (bundleInfo == nil || bundleInfo[@"CFBundleIcons"] == nil ||
+        bundleInfo[@"CFBundleDisplayName"] == nil ||
+        ![registrationEntitlements[
+            @"com.apple.private.security.no-container"] boolValue] ||
+        ![registrationEntitlements[
+            @"com.apple.private.security.no-sandbox"] boolValue]) {
+        if (errorText != NULL) {
+            *errorText = @"Cryptex Sileo icon metadata is unavailable";
+        }
+        return false;
+    }
+    NSMutableDictionary *registration = [bundleInfo mutableCopy];
+    [registration addEntriesFromDictionary:@{
+        @"Path" : [bundlePath stringByStandardizingPath],
+        @"CFBundleIdentifier" : @"org.coolstar.SileoStore",
+        @"CodeInfoIdentifier" : @"org.coolstar.SileoStore",
+        @"ApplicationType" : @"System",
+        @"BundleNameIsLocalized" : @YES,
+        @"CompatibilityState" : @0,
+        @"Entitlements" : registrationEntitlements,
+        @"IsContainerized" : @NO,
+        @"SignerIdentity" : @"Apple iPhone OS Application Signing",
+        @"SignerOrganization" : @"Apple Inc.",
+        @"IsAdHocSigned" : @YES,
+        @"SignatureVersion" : @132352,
+        @"IsDeletable" : @NO,
+        @"LSInstallType" : @1,
+        @"HasMIDBasedSINF" : @NO,
+        @"MissingSINF" : @NO,
+        @"FamilyID" : @0,
+        @"IsOnDemandInstallCapable" : @NO,
+    }];
+    Class requestContextClass = NSClassFromString(@"LSOperationRequestContext");
+    id requestContext = requestContextClass != Nil
+        ? [[requestContextClass alloc] init] : nil;
+    if (requestContext == nil) {
+        if (errorText != NULL) {
+            *errorText = @"iOS 27 LaunchServices request context is unavailable";
+        }
+        return false;
+    }
+    [requestContext setValue:@501 forKey:@"targetUserID"];
+    NSError *registrationError = nil;
+    id registrationResult = [workspace
+        registerContainerizedApplicationWithInfoDictionaries:@[registration]
+        operationUUID:[NSUUID UUID]
+        requestContext:requestContext
+        saveObserver:nil
+        registrationError:&registrationError];
+    (void)notify_post("com.apple.mobile.application_installed");
+    (void)notify_post("com.apple.itunesstored.application_installed");
+    bool registered = false;
+    NSString *observedPath = nil;
+    NSString *applicationType = nil;
+    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+        id proxy = registered_application_proxy(kSileoIdentifier);
+        observedPath = [proxy respondsToSelector:@selector(bundleURL)]
+            ? [[proxy bundleURL] path] : nil;
+        applicationType =
+            [proxy respondsToSelector:@selector(applicationType)]
+                ? [proxy applicationType] : nil;
+        if (executable_paths_match(bundlePath, observedPath) &&
+            [applicationType isEqualToString:@"System"]) {
+            registered = true;
+            break;
+        }
+        usleep(25 * 1000);
+    }
+    log_message("sileoSystemRegistration transport=%s error=%s registered=%s "
+                "path=%s observed=%s type=%s profile=false bundleId=%s",
+                registrationResult != nil ? "true" : "false",
+                registrationError != nil
+                    ? [[registrationError description] UTF8String] : "none",
+                registered ? "true" : "false",
+                [bundlePath UTF8String],
+                observedPath != nil ? [observedPath UTF8String] : "none",
+                applicationType != nil ? [applicationType UTF8String] : "none",
+                [kSileoIdentifier UTF8String]);
+    if (!registered && errorText != NULL) {
+        *errorText = [NSString stringWithFormat:
+            @"Cryptex Sileo system registration failed (error=%@ path=%@ "
+             "type=%@)", registrationError ?: @"none",
+            observedPath ?: @"none", applicationType ?: @"none"];
+    }
+    return registered;
 }
 
 static bool write_sileo_sandbox_extensions(NSString *dataContainer,
@@ -2340,6 +2516,63 @@ static pid_t current_preferences_process(bool *candidateOut) {
     return result;
 }
 
+static pid_t current_lsd_process(void) {
+    int capacity = proc_listallpids(NULL, 0);
+    if (capacity <= 0 || capacity > 1024 * 1024) return -1;
+    capacity += 32;
+    pid_t *processes = calloc((size_t)capacity, sizeof(*processes));
+    if (processes == NULL) return -1;
+    int count = proc_listallpids(processes,
+                                 capacity * (int)sizeof(*processes));
+    if (count > capacity) count = capacity;
+    pid_t result = -1;
+    for (int index = 0; index < count; ++index) {
+        pid_t pid = processes[index];
+        if (pid <= 1) continue;
+        char path[CODEX_PROC_PIDPATH_MAX] = {0};
+        if (proc_pidpath(pid, path, sizeof(path)) > 0 &&
+            strcmp(path, "/usr/libexec/lsd") == 0) {
+            result = pid;
+            break;
+        }
+    }
+    free(processes);
+    return result;
+}
+
+static bool lsd_registration_marker_matches_process(pid_t expectedPid) {
+    struct timeval bootTime = {0};
+    size_t bootTimeSize = sizeof(bootTime);
+    if (expectedPid <= 1 ||
+        sysctlbyname("kern.boottime", &bootTime, &bootTimeSize, NULL, 0) != 0 ||
+        bootTimeSize != sizeof(bootTime)) {
+        return false;
+    }
+    int descriptor = open(
+        [kSBInjectLsdRegistrationMarker fileSystemRepresentation],
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat status = {0};
+    char contents[32] = {0};
+    ssize_t amount = descriptor >= 0
+        ? read(descriptor, contents, sizeof(contents) - 1U) : -1;
+    bool shape = descriptor >= 0 && fstat(descriptor, &status) == 0 &&
+                 S_ISREG(status.st_mode) && status.st_nlink == 1 &&
+                 status.st_uid == 501 && status.st_gid == 501 &&
+                 status.st_size > 1 &&
+                 status.st_size < (off_t)sizeof(contents) &&
+                 (status.st_mode & 07777) == 0600 &&
+                 status.st_mtimespec.tv_sec >= bootTime.tv_sec &&
+                 amount == status.st_size;
+    if (descriptor >= 0) close(descriptor);
+    if (!shape) return false;
+    contents[amount] = '\0';
+    errno = 0;
+    char *end = NULL;
+    long markerPid = strtol(contents, &end, 10);
+    return errno == 0 && end != contents && end[0] == '\n' && end[1] == '\0' &&
+           markerPid == expectedPid;
+}
+
 static bool finish_sbinject_package_transaction(pid_t springBoardBefore,
                                                 int commandStatus,
                                                 const char *command) {
@@ -3005,6 +3238,64 @@ static bool sbinject_managed_file(NSString *path, mode_t mode) {
            S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
            status.st_nlink == 1 && status.st_uid == 0 && status.st_gid == 0 &&
            (status.st_mode & 07777) == mode;
+}
+
+static bool immutable_payload_file(NSString *path, mode_t mode) {
+    struct stat status;
+    return lstat([path fileSystemRepresentation], &status) == 0 &&
+           S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
+           status.st_nlink == 1 && (status.st_mode & 07777) == mode;
+}
+
+static bool prepare_lsd_registration_hook(const char *reason) {
+    pid_t existingLsd = current_lsd_process();
+    if (lsd_registration_marker_matches_process(existingLsd)) {
+        log_message("sileoLsdRegistrationHook=true reason=%s reused=true",
+                    reason);
+        return true;
+    }
+    if (!sbinject_managed_file(kElleKitInjectorExecutable, 0755) ||
+        !sbinject_managed_file(kSBInjectLsdRegistrationHook, 0755)) {
+        log_message("sileoLsdRegistrationHook=false reason=%s "
+                    "phase=artifacts",
+                    reason);
+        return false;
+    }
+    (void)unlink(
+        [kSBInjectLsdRegistrationMarker fileSystemRepresentation]);
+    for (NSUInteger attempt = 0; attempt < 3; ++attempt) {
+        pid_t lsd = current_lsd_process();
+        if (lsd <= 1) {
+            usleep(100 * 1000);
+            continue;
+        }
+        char pidText[32];
+        int pidLength = snprintf(pidText, sizeof(pidText), "%d", lsd);
+        if (pidLength <= 0 || (size_t)pidLength >= sizeof(pidText)) return false;
+        char *arguments[] = {
+            (char *)[kElleKitInjectorExecutable fileSystemRepresentation],
+            "--inject-pid", pidText,
+            (char *)[kSBInjectLsdRegistrationHook fileSystemRepresentation],
+            NULL,
+        };
+        int status = run_and_wait_bounded(arguments[0], arguments, 30000);
+        bool ready = false;
+        for (NSUInteger markerAttempt = 0; markerAttempt < 200;
+             ++markerAttempt) {
+            if (lsd_registration_marker_matches_process(lsd) &&
+                current_lsd_process() == lsd) {
+                ready = true;
+                break;
+            }
+            usleep(10 * 1000);
+        }
+        log_message("sileoLsdRegistrationHook=%s reason=%s pid=%d "
+                    "attempt=%lu status=%d reused=false",
+                    ready ? "true" : "false", reason, lsd,
+                    (unsigned long)(attempt + 1U), status);
+        if (ready) return true;
+    }
+    return false;
 }
 
 static bool prepare_sbinject_redirect(const char *reason) {
@@ -4643,6 +4934,122 @@ static bool bundle_trees_are_equal(NSString *source, NSString *destination) {
     return true;
 }
 
+static bool install_sileo_system_bundle_copy(NSString *source,
+                                             bool *didUpdate,
+                                             NSString **errorText) {
+    if (didUpdate != NULL) *didUpdate = false;
+    if (!is_sileo_system_bundle_path(source) ||
+        validated_bundle_entries(source, false) == nil) {
+        if (errorText != NULL) {
+            *errorText = @"Cryptex Sileo source bundle is invalid";
+        }
+        return false;
+    }
+    NSString *destination = kSystemSileoBundlePath;
+    NSString *parent = [destination stringByDeletingLastPathComponent];
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSDictionary *directoryAttributes = @{
+        NSFilePosixPermissions : @0755,
+        NSFileOwnerAccountID : @0,
+        NSFileGroupOwnerAccountID : @0,
+    };
+    NSError *error = nil;
+    if (![manager createDirectoryAtPath:parent
+             withIntermediateDirectories:YES
+                              attributes:directoryAttributes
+                                   error:&error] ||
+        ![manager setAttributes:directoryAttributes
+                   ofItemAtPath:parent
+                          error:&error]) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"system Sileo container preparation failed: %@", error];
+        }
+        return false;
+    }
+    if (bundle_trees_are_equal(source, destination)) {
+        log_message("sileoSystemBundleCopy=current path=%s",
+                    [destination UTF8String]);
+        return true;
+    }
+
+    NSString *temporary = [parent stringByAppendingPathComponent:
+        [NSString stringWithFormat:@".Sileo.app.new-%@",
+                                   [[NSUUID UUID] UUIDString]]];
+    if (![manager copyItemAtPath:source toPath:temporary error:&error] ||
+        !normalize_bundle_tree(source, temporary) ||
+        !bundle_trees_are_equal(source, temporary)) {
+        [manager removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"system Sileo bundle staging failed: %@", error];
+        }
+        return false;
+    }
+
+    NSString *backup = nil;
+    struct stat existing = {0};
+    if (lstat([destination fileSystemRepresentation], &existing) == 0) {
+        bool safeExisting = S_ISDIR(existing.st_mode) &&
+                            !S_ISLNK(existing.st_mode) &&
+                            existing.st_uid == 0 && existing.st_gid == 0 &&
+                            (existing.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+        if (!safeExisting) {
+            [manager removeItemAtPath:temporary error:nil];
+            if (errorText != NULL) {
+                *errorText = @"refusing unsafe existing system Sileo bundle";
+            }
+            return false;
+        }
+        backup = [parent stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".Sileo.app.previous-%@",
+                                       [[NSUUID UUID] UUIDString]]];
+        if (![manager moveItemAtPath:destination toPath:backup error:&error]) {
+            [manager removeItemAtPath:temporary error:nil];
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"system Sileo old bundle staging failed: %@", error];
+            }
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        [manager removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = @"system Sileo destination status failed";
+        }
+        return false;
+    }
+
+    bool activated = rename([temporary fileSystemRepresentation],
+                            [destination fileSystemRepresentation]) == 0 &&
+                     bundle_trees_are_equal(source, destination);
+    if (!activated) {
+        int savedError = errno;
+        [manager removeItemAtPath:temporary error:nil];
+        [manager removeItemAtPath:destination error:nil];
+        if (backup != nil) {
+            [manager moveItemAtPath:backup toPath:destination error:nil];
+        }
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"system Sileo bundle activation failed: %s",
+                strerror(savedError)];
+        }
+        return false;
+    }
+    if (backup != nil && ![manager removeItemAtPath:backup error:&error]) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"system Sileo old bundle cleanup failed: %@", error];
+        }
+        return false;
+    }
+    if (didUpdate != NULL) *didUpdate = true;
+    log_message("sileoSystemBundleCopy=updated path=%s",
+                [destination UTF8String]);
+    return true;
+}
+
 static bool install_sbinject_bundle(NSString *source, NSString *destination,
                                     NSString *enableMarker,
                                     NSString *bundleStem, bool *didUpdate,
@@ -4894,25 +5301,6 @@ static bool replace_file_with_backup(NSString *source, NSString *destination,
         }
         return false;
     }
-    return true;
-}
-
-static bool restore_replaced_file(NSString *destination, NSString *backup) {
-    NSString *failed = [[destination stringByDeletingLastPathComponent]
-        stringByAppendingPathComponent:
-            [NSString stringWithFormat:@".codex-failed-%@",
-                                       [[NSUUID UUID] UUIDString]]];
-    if (rename([destination fileSystemRepresentation],
-               [failed fileSystemRepresentation]) != 0) {
-        return false;
-    }
-    if (rename([backup fileSystemRepresentation],
-               [destination fileSystemRepresentation]) != 0) {
-        (void)rename([failed fileSystemRepresentation],
-                     [destination fileSystemRepresentation]);
-        return false;
-    }
-    [[NSFileManager defaultManager] removeItemAtPath:failed error:nil];
     return true;
 }
 
@@ -5998,7 +6386,7 @@ int main(int argc, char *argv[]) {
                 [NSString stringWithUTF8String:argv[3]];
             NSString *managedRoot = managed_jailbreak_root();
             if (geteuid() != 0 ||
-                !is_sileo_bundle_container_path(registeredPath) ||
+                !is_sileo_client_bundle_path(registeredPath) ||
                 managedRoot == nil ||
                 ![managedRoot isEqual:jailbreakRoot]) {
                 log_message("sileoRootBrokerModeValidation=false");
@@ -6109,7 +6497,7 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:
                              @"preferenceloader.deb"];
         NSString *sourceTrustedSileo =
-            [payloadRoot stringByAppendingPathComponent:@"trusted/Sileo.app"];
+            [mountRoot stringByAppendingPathComponent:@"Applications/Sileo.app"];
         NSString *sourceTrustedElleKitRoot =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ellekit-root/var/jb"];
@@ -6117,6 +6505,8 @@ int main(int argc, char *argv[]) {
             [sourceProcursus stringByAppendingPathComponent:@"usr/bin/launchctl"];
         NSString *sourceTrustedUiopen =
             [sourceProcursus stringByAppendingPathComponent:@"usr/bin/uiopen"];
+        NSString *sourceTrustedUicache =
+            [sourceProcursus stringByAppendingPathComponent:@"usr/bin/uicache"];
         NSString *sourceDefaultSources =
             [payloadRoot stringByAppendingPathComponent:
                              @"dopamine-default.sources"];
@@ -6129,6 +6519,9 @@ int main(int argc, char *argv[]) {
         NSString *sourcePreferenceLoaderPin =
             [payloadRoot stringByAppendingPathComponent:
                              @"apt/99preferenceloader"];
+        NSString *sourceSileoPin =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"apt/99codex-system-sileo"];
         NSString *sourceAptListNormalizer =
             [payloadRoot stringByAppendingPathComponent:
                              @"normalize-apt-lists.sh"];
@@ -6168,6 +6561,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/launchdhook-v3.dylib"];
+        NSString *sourceSBInjectLsdRegistrationHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/lsd-registration-hook.dylib"];
         NSString *sourceSBInjectJitterd =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/sbinject-jitterd"];
@@ -6212,7 +6608,10 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedLaunchctl] ||
             ![[NSFileManager defaultManager]
-                fileExistsAtPath:sourceTrustedUiopen]) {
+                fileExistsAtPath:sourceTrustedUiopen] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedUicache] ||
+            !is_sileo_system_bundle_path(sourceTrustedSileo)) {
             return fail(@"cryptex payload is incomplete", nil);
         }
         struct stat defaultSourcesStatus;
@@ -6236,6 +6635,11 @@ int main(int argc, char *argv[]) {
                   &repositoryCompatibilityStatus) != 0 ||
             !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
             return fail(@"PreferenceLoader APT pin is missing", nil);
+        }
+        if (lstat([sourceSileoPin fileSystemRepresentation],
+                  &repositoryCompatibilityStatus) != 0 ||
+            !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
+            return fail(@"system Sileo APT pin is missing", nil);
         }
         struct stat aptListNormalizerStatus;
         if (lstat([sourceAptListNormalizer fileSystemRepresentation],
@@ -6282,6 +6686,9 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLaunchdHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSBInjectLsdRegistrationHook fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectJitterd fileSystemRepresentation],
@@ -6616,6 +7023,50 @@ int main(int argc, char *argv[]) {
                         ? [rootlessUiopenBackup UTF8String]
                         : "not-needed");
 
+        NSString *rootlessUicacheBackup = nil;
+        BOOL uicacheMatches =
+            files_are_equal(sourceTrustedUicache, kRootlessUicache);
+        log_message("rootlessUicacheMatches=%s",
+                    uicacheMatches ? "true" : "false");
+        if (!uicacheMatches) {
+            NSString *cacheDirectory = [destinationProcursus
+                stringByAppendingPathComponent:@".codex-cache"];
+            NSError *cacheError = nil;
+            if (![[NSFileManager defaultManager]
+                    createDirectoryAtPath:cacheDirectory
+              withIntermediateDirectories:YES
+                               attributes:@{
+                                   NSFilePosixPermissions : @0700,
+                                   NSFileOwnerAccountID : @0,
+                                   NSFileGroupOwnerAccountID : @0,
+                               }
+                                    error:&cacheError]) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"uicache backup directory failed: %@",
+                                  cacheError], nil);
+            }
+            rootlessUicacheBackup = [cacheDirectory
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"uicache-backup-%@",
+                                               [[NSUUID UUID] UUIDString]]];
+            NSString *replacementError = nil;
+            if (!replace_file_with_backup(sourceTrustedUicache,
+                                          kRootlessUicache,
+                                          rootlessUicacheBackup,
+                                          &replacementError)) {
+                return fail(replacementError, nil);
+            }
+        }
+        if (!files_are_equal(sourceTrustedUicache, kRootlessUicache)) {
+            return fail(@"rootless uicache refresh did not match the Cryptex "
+                         "trust-cache input", nil);
+        }
+        log_message("rootlessUicacheTrusted=true backup=%s",
+                    rootlessUicacheBackup != nil
+                        ? [rootlessUicacheBackup UTF8String]
+                        : "not-needed");
+
         setenv("PATH",
                "/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:"
                "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -6631,6 +7082,14 @@ int main(int argc, char *argv[]) {
         }
         log_message("dopamineMarkerReady=true path=/var/jb/.installed_dopamine");
 
+        bool systemSileoBundleUpdated = false;
+        NSString *systemSileoBundleError = nil;
+        if (!install_sileo_system_bundle_copy(
+                sourceTrustedSileo, &systemSileoBundleUpdated,
+                &systemSileoBundleError)) {
+            return fail(systemSileoBundleError, nil);
+        }
+
         // The Cryptex launch daemon runs again after every reboot.  When its
         // immutable payload is already installed byte-for-byte, bring up the
         // local control plane immediately instead of reinstalling packages or
@@ -6643,10 +7102,26 @@ int main(int argc, char *argv[]) {
                     @".codex-cryptex-bootstrap.plist"];
             NSDictionary *installedManifest = [NSDictionary
                 dictionaryWithContentsOfFile:installedManifestPath];
-            NSString *fastRegisteredPath =
-                installedManifest[@"SileoBundlePath"];
-            NSString *fastDataContainer =
-                installedManifest[@"SileoDataContainer"];
+            NSString *fastRegisteredPath = kSystemSileoBundlePath;
+            NSString *fastDataContainer = kSystemSileoDataRoot;
+            NSString *fastRegistrationError = nil;
+            bool fastSystemMode =
+                [installedManifest[@"SileoInstallMode"]
+                    isEqual:@"cryptex-system-app"];
+            bool fastRegistrationArtifactsExact =
+                files_are_equal(sourceElleKitCompatLoader,
+                                kElleKitInjectorExecutable) &&
+                files_are_equal(sourceSBInjectLsdRegistrationHook,
+                                kSBInjectLsdRegistrationHook);
+            bool fastSystemRegistered = false;
+            if (fastSystemMode && fastRegistrationArtifactsExact) {
+                fastSystemRegistered = register_sileo_system_application(
+                    fastRegisteredPath, &fastRegistrationError);
+            } else {
+                fastRegistrationError = fastSystemMode
+                    ? @"installed lsd registration artifacts are stale"
+                    : @"migration from provisioned Sileo requires full repair";
+            }
             NSArray<NSDictionary *> *fastPairs = @[
                 @{@"source" : executable,
                   @"installed" : kRootBrokerExecutable},
@@ -6672,6 +7147,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kSBInjectPreferencesBridge},
                 @{@"source" : sourceSBInjectLaunchdHook,
                   @"installed" : kSBInjectLaunchdHook},
+                @{@"source" : sourceSBInjectLsdRegistrationHook,
+                  @"installed" : kSBInjectLsdRegistrationHook},
                 @{@"source" : sourceSBInjectJitterd,
                   @"installed" : kSBInjectJitterdExecutable},
                 @{@"source" : sourceSBInjectJitterdPlist,
@@ -6697,27 +7174,27 @@ int main(int argc, char *argv[]) {
                 [installedManifest[@"Installer"] isEqual:kInstallerIdentifier] &&
                 [installedManifest[@"JailbreakRoot"]
                     isEqual:destinationProcursus] &&
-                is_sileo_bundle_container_path(fastRegisteredPath) &&
+                fastSystemMode &&
+                fastSystemRegistered &&
+                is_sileo_system_bundle_path(fastRegisteredPath) &&
                 dpkg_package_version_is_installed(@"ellekit", @"1.2") &&
                 dpkg_package_version_is_installed(@"preferenceloader",
                                                   @"2.3.3") &&
                 dpkg_package_version_is_installed(@"org.coolstar.sileo",
-                                                  @"2.5.1");
+                                                  kSileoPackageVersion);
             for (NSDictionary *pair in fastPairs) {
                 fastPayloadExact &= files_are_equal(pair[@"source"],
                                                      pair[@"installed"]);
             }
             NSArray<NSString *> *fastSileoExecutables = @[
                 @"Sileo", @"giveMeRoot", @"F/libiosexec.1.dylib",
-                @"F/liblzma.5.dylib", @"F/libzstd.1.dylib",
+                @"F/liblzma.5.dylib", @"F/libcodex-sileo-broker.dylib",
+                @"F/libzstd.1.dylib",
                 @"F/libzstd.real.dylib",
             ];
             for (NSString *relativePath in fastSileoExecutables) {
                 NSString *sourcePath = [sourceTrustedSileo
                     stringByAppendingPathComponent:relativePath];
-                fastPayloadExact &= files_are_equal(
-                    sourcePath, [@"/var/jb/Applications/Sileo.app"
-                                    stringByAppendingPathComponent:relativePath]);
                 fastPayloadExact &= files_are_equal(
                     sourcePath, [fastRegisteredPath
                                     stringByAppendingPathComponent:relativePath]);
@@ -6736,12 +7213,20 @@ int main(int argc, char *argv[]) {
                     [@"/var/jb" stringByAppendingPathComponent:relativePath]);
             }
             log_message("fastBootPayloadExact=%s registeredPath=%s "
-                        "dataContainer=%s networkRequired=false",
+                        "dataContainer=%s systemSileoUpdated=%s "
+                        "networkRequired=false",
                         fastPayloadExact ? "true" : "false",
                         fastRegisteredPath != nil
                             ? [fastRegisteredPath UTF8String] : "none",
                         fastDataContainer != nil
-                            ? [fastDataContainer UTF8String] : "none");
+                            ? [fastDataContainer UTF8String] : "none",
+                        systemSileoBundleUpdated ? "true" : "false");
+            if (!fastSystemRegistered) {
+                log_message("fastBootSystemSileoRegistration=false error=%s",
+                            fastRegistrationError != nil
+                                ? [[fastRegistrationError description] UTF8String]
+                                : "unknown");
+            }
             if (fastPayloadExact) {
                 NSString *fastError = nil;
                 NSString *fastTokenPath = nil;
@@ -6768,48 +7253,22 @@ int main(int argc, char *argv[]) {
                             fastError != nil
                                 ? [[fastError description] UTF8String] : "none");
                 if (fastCustomd) {
-                    // The data container may still be protected before the
-                    // first unlock.  SpringBoard/Settings activation does not
-                    // depend on it, so keep the root broker live and wait
-                    // locally instead of falling into a network repair.
-                    for (NSUInteger attempt = 0; fastBroker < 0; ++attempt) {
-                        @autoreleasepool {
-                            if (!is_sileo_data_container_path(
-                                    fastDataContainer)) {
-                                NSString *observed =
-                                    registered_application_data_path(
-                                        kSileoIdentifier);
-                                if (is_sileo_data_container_path(observed)) {
-                                    fastDataContainer = observed;
-                                }
-                            }
-                            fastError = nil;
-                            bool fastExtensions =
-                                is_sileo_data_container_path(
-                                    fastDataContainer) &&
-                                write_sileo_sandbox_extensions(
-                                    fastDataContainer, destinationProcursus,
-                                    &fastTokenPath, &fastError);
-                            if (fastExtensions) {
-                                fastBroker = create_sileo_broker_socket(
-                                    fastDataContainer, &fastBrokerPath,
-                                    &fastError);
-                            }
-                            if (fastBroker < 0 &&
-                                (attempt == 0 || attempt % 20U == 0)) {
-                                log_message(
-                                    "fastBootSileoDataPending attempt=%lu "
-                                    "container=%s error=%s",
-                                    (unsigned long)attempt,
-                                    fastDataContainer != nil
-                                        ? [fastDataContainer UTF8String]
-                                        : "none",
+                    fastError = nil;
+                    bool fastExtensions =
+                        write_sileo_sandbox_extensions(
+                            fastDataContainer, destinationProcursus,
+                            &fastTokenPath, &fastError);
+                    if (fastExtensions) {
+                        fastBroker = create_sileo_broker_socket(
+                            fastDataContainer, &fastBrokerPath, &fastError);
+                    }
+                    if (fastBroker < 0) {
+                        log_message("fastBootSileoData=false error=%s",
                                     fastError != nil
                                         ? [[fastError description] UTF8String]
-                                        : "data-protected");
-                            }
-                        }
-                        if (fastBroker < 0) usleep(250 * 1000);
+                                        : "unknown");
+                        return fail(@"system Sileo file broker failed",
+                                    nil);
                     }
                     log_message("fastBootSileoDataReady token=%s socket=%s",
                                 fastTokenPath != nil
@@ -6831,7 +7290,8 @@ int main(int argc, char *argv[]) {
                          "jailbreakRoot=%@\nsileo=%@\nlaunchServicesPath=%@\n"
                          "customd=system/%@\n",
                         geteuid(), destinationProcursus,
-                        @"/var/jb/Applications/Sileo.app/Sileo",
+                        [fastRegisteredPath
+                            stringByAppendingPathComponent:@"Sileo"],
                         fastRegisteredPath, kCustomdLabel];
                     (void)write_marker(kDonePath, done);
                     log_message("result=success mode=fast-boot "
@@ -6950,6 +7410,7 @@ int main(int argc, char *argv[]) {
         bool repositoryCompatibilityUpdated = false;
         bool sbinjectAptConfigUpdated = false;
         bool preferenceLoaderPinUpdated = false;
+        bool sileoPinUpdated = false;
         NSString *repositoryMetadataError = nil;
         if (!install_managed_apt_file(
                 sourceElleKitKey, @"/var/jb/etc/apt/trusted.gpg.d",
@@ -6983,6 +7444,11 @@ int main(int argc, char *argv[]) {
                 @"/var/jb/etc/apt/preferences.d",
                 @"99codex-preferenceloader", 64 * 1024, 0644,
                 "preferenceLoaderPin", &preferenceLoaderPinUpdated,
+                &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceSileoPin, @"/var/jb/etc/apt/preferences.d",
+                @"99codex-system-sileo", 64 * 1024, 0644,
+                "sileoPin", &sileoPinUpdated,
                 &repositoryMetadataError)) {
             return fail(repositoryMetadataError, nil);
         }
@@ -7006,6 +7472,7 @@ int main(int argc, char *argv[]) {
         bool sbinjectGeneralHookUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
+        bool sbinjectLsdRegistrationHookUpdated = false;
         bool sbinjectJitterdUpdated = false;
         bool sbinjectJitterdPlistUpdated = false;
         bool sbinjectPackageValidatorUpdated = false;
@@ -7066,6 +7533,13 @@ int main(int argc, char *argv[]) {
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
+                sourceSBInjectLsdRegistrationHook,
+                @"/var/jb/usr/lib/sbinject",
+                @"lsd-registration-hook.dylib", 4 * 1024 * 1024, 0755,
+                "sbinjectLsdRegistrationHook",
+                &sbinjectLsdRegistrationHookUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
                 sourceSBInjectJitterd, @"/var/jb/usr/libexec",
                 @"sbinject-jitterd", 16 * 1024 * 1024, 0755,
                 "sbinjectJitterd", &sbinjectJitterdUpdated,
@@ -7118,6 +7592,7 @@ int main(int argc, char *argv[]) {
             sbinjectGeneralHookUpdated ||
             sbinjectPreferencesBridgeUpdated ||
             sbinjectLaunchdHookUpdated ||
+            sbinjectLsdRegistrationHookUpdated ||
             sbinjectJitterdUpdated || sbinjectJitterdPlistUpdated ||
             sbinjectPackageValidatorUpdated || sbinjectBundleUpdated ||
             sbinjectPreferencesBundleUpdated;
@@ -7177,9 +7652,9 @@ int main(int argc, char *argv[]) {
         log_message("elleKitInjectionMode=per-process "
                     "launchdInjection=false pid1Guard=true");
 
-        // Repair runs must refresh dpkg's installed maintainer-script copy as
-        // well as the provisioned application. Reinstall the matched package
-        // after the SBInject package policy and broker are refreshed.
+        // Repair runs must refresh dpkg's metadata-only maintainer-script copy
+        // after the SBInject package policy and broker are refreshed. The
+        // immutable application itself remains in the Cryptex.
         if (repairMode) {
             char *sileoRepairArguments[] = {
                 "/var/jb/usr/bin/dpkg", "-i",
@@ -7195,12 +7670,11 @@ int main(int argc, char *argv[]) {
                     [sourceTrustedSileo
                         stringByAppendingPathComponent:@"giveMeRoot"];
                 BOOL repairPayloadInstalled =
-                    files_are_equal(
-                        repairTrustedMain,
-                        @"/var/jb/Applications/Sileo.app/Sileo") &&
-                    files_are_equal(
-                        repairTrustedHelper,
-                        @"/var/jb/Applications/Sileo.app/giveMeRoot");
+                    is_sileo_system_bundle_path(sourceTrustedSileo) &&
+                    immutable_payload_file(repairTrustedMain, 0755) &&
+                    immutable_payload_file(repairTrustedHelper, 0755) &&
+                    dpkg_package_version_is_installed(@"org.coolstar.sileo",
+                                                      kSileoPackageVersion);
                 if (!repairPayloadInstalled) {
                     return fail(
                         [NSString stringWithFormat:
@@ -7243,7 +7717,8 @@ int main(int argc, char *argv[]) {
         bool repositoryMetadataChanged =
             elleKitKeyUpdated || bigBossKeyUpdated ||
             aptListNormalizerUpdated || repositoryCompatibilityUpdated ||
-            sbinjectAptConfigUpdated || defaultSourcesUpdated;
+            sbinjectAptConfigUpdated || preferenceLoaderPinUpdated ||
+            sileoPinUpdated || defaultSourcesUpdated;
         // A populated Packages file does not prove that APT retained the
         // authenticated Release/InRelease state.  Sileo otherwise reports an
         // opaque exit 100 before the SBInject validator can run.  Refresh the
@@ -7300,134 +7775,45 @@ int main(int argc, char *argv[]) {
                         apt_check_status);
         }
 
-        const char *sileoBinary =
-            "/var/jb/Applications/Sileo.app/Sileo";
-        if (access(sileoBinary, X_OK) != 0) {
-            return fail(@"Sileo executable missing after dpkg", nil);
-        }
-
-        NSString *registeredPath =
-            registered_application_path(kSileoIdentifier);
-        log_message("launchServicesPath=%s",
-                    registeredPath != nil ? [registeredPath UTF8String]
-                                          : "none");
-        if (!is_sileo_bundle_container_path(registeredPath) ||
-            ![[NSFileManager defaultManager]
-                fileExistsAtPath:[registeredPath
-                                     stringByAppendingPathComponent:
-                                         @"embedded.mobileprovision"]]) {
-            return fail(
-                @"a provisioned Sileo placeholder is not registered in a "
-                 "standard bundle container",
-                nil);
-        }
         NSString *trustedMain =
             [sourceTrustedSileo stringByAppendingPathComponent:@"Sileo"];
         NSString *trustedHelper =
             [sourceTrustedSileo stringByAppendingPathComponent:@"giveMeRoot"];
-        NSString *rootlessMain =
-            @"/var/jb/Applications/Sileo.app/Sileo";
-        NSString *rootlessHelper =
-            @"/var/jb/Applications/Sileo.app/giveMeRoot";
-        NSString *rootlessBackupRoot = nil;
-        NSString *rootlessMainBackup = nil;
-        NSString *rootlessHelperBackup = nil;
-        log_message("rootlessSileoVerification=start");
-        BOOL mainMatches = files_are_equal(trustedMain, rootlessMain);
-        log_message("rootlessSileoMainMatches=%s",
-                    mainMatches ? "true" : "false");
-        BOOL helperMatches = files_are_equal(trustedHelper, rootlessHelper);
-        log_message("rootlessSileoHelperMatches=%s",
-                    helperMatches ? "true" : "false");
-        if (!mainMatches || !helperMatches) {
-            rootlessBackupRoot = [destinationProcursus
-                stringByAppendingPathComponent:
-                    [NSString stringWithFormat:
-                                  @".codex-cache/executable-backup-%@",
-                                  [[NSUUID UUID] UUIDString]]];
-            NSError *backupError = nil;
-            if (![[NSFileManager defaultManager]
-                    createDirectoryAtPath:rootlessBackupRoot
-              withIntermediateDirectories:NO
-                               attributes:@{
-                                   NSFilePosixPermissions : @0700,
-                                   NSFileOwnerAccountID : @0,
-                                   NSFileGroupOwnerAccountID : @0,
-                               }
-                                    error:&backupError]) {
-                return fail(
-                    [NSString
-                        stringWithFormat:
-                            @"could not create rootless executable backup: %@",
-                            backupError],
-                    nil);
-            }
-            NSString *replacementError = nil;
-            if (!mainMatches) {
-                rootlessMainBackup = [rootlessBackupRoot
-                    stringByAppendingPathComponent:@"Sileo"];
-                if (!replace_file_with_backup(trustedMain, rootlessMain,
-                                              rootlessMainBackup,
-                                              &replacementError)) {
-                    [[NSFileManager defaultManager]
-                        removeItemAtPath:rootlessBackupRoot
-                                  error:nil];
-                    return fail(replacementError, nil);
-                }
-            }
-            if (!helperMatches) {
-                rootlessHelperBackup = [rootlessBackupRoot
-                    stringByAppendingPathComponent:@"giveMeRoot"];
-                if (!replace_file_with_backup(trustedHelper, rootlessHelper,
-                                              rootlessHelperBackup,
-                                              &replacementError)) {
-                    BOOL restored = rootlessMainBackup == nil ||
-                                    restore_replaced_file(
-                                        rootlessMain, rootlessMainBackup);
-                    log_message("rootlessMainRollback=%s",
-                                restored ? "complete" : "failed");
-                    if (restored) {
-                        [[NSFileManager defaultManager]
-                            removeItemAtPath:rootlessBackupRoot
-                                      error:nil];
-                    }
-                    return fail(replacementError, nil);
-                }
-            }
+        if (access([trustedMain fileSystemRepresentation], X_OK) != 0 ||
+            access([trustedHelper fileSystemRepresentation], X_OK) != 0) {
+            return fail(@"Cryptex Sileo executables are unavailable", nil);
         }
-        if (!files_are_equal(trustedMain, rootlessMain) ||
-            !files_are_equal(trustedHelper, rootlessHelper)) {
-            return fail(@"rootless Sileo executable refresh did not match "
-                         "the Cryptex trust-cache inputs",
-                        nil);
+        NSString *systemRegistrationError = nil;
+        if (!register_sileo_system_application(
+                kSystemSileoBundlePath, &systemRegistrationError)) {
+            return fail(systemRegistrationError, nil);
         }
-        log_message("rootlessSileoTrusted=true backup=%s",
-                    rootlessBackupRoot != nil
-                        ? [rootlessBackupRoot UTF8String]
-                        : "not-needed");
+        NSString *registeredPath = registered_application_path(
+            @"org.coolstar.SileoStore");
+        log_message("launchServicesPath=%s",
+                    registeredPath != nil ? [registeredPath UTF8String]
+                                          : "none");
+        if (!is_sileo_system_bundle_path(registeredPath) ||
+            !executable_paths_match(kSystemSileoBundlePath, registeredPath) ||
+            !bundle_trees_are_equal(sourceTrustedSileo, registeredPath)) {
+            return fail(@"LaunchServices did not retain the managed fixed-trust "
+                         "Sileo system path", nil);
+        }
 
         NSArray<NSString *> *trustedSileoExecutables = @[
             @"Sileo",
             @"giveMeRoot",
             @"F/libiosexec.1.dylib",
             @"F/liblzma.5.dylib",
+            @"F/libcodex-sileo-broker.dylib",
             @"F/libzstd.1.dylib",
             @"F/libzstd.real.dylib",
         ];
         for (NSString *relativePath in trustedSileoExecutables) {
             NSString *trustedPath =
                 [sourceTrustedSileo stringByAppendingPathComponent:relativePath];
-            NSString *rootlessPath = [@"/var/jb/Applications/Sileo.app"
-                stringByAppendingPathComponent:relativePath];
             NSString *registeredExecutable =
                 [registeredPath stringByAppendingPathComponent:relativePath];
-            if (!files_are_equal(trustedPath, rootlessPath)) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"rootless Sileo fixed-trust mismatch: %@",
-                                  relativePath],
-                    nil);
-            }
             if (!files_are_equal(trustedPath, registeredExecutable)) {
                 return fail(
                     [NSString stringWithFormat:
@@ -7463,25 +7849,18 @@ int main(int argc, char *argv[]) {
                               strerror(savedError)],
                 nil);
         }
-        if (fchown(registeredHelperFile, 0, 0) != 0 ||
-            fchmod(registeredHelperFile, 0755) != 0) {
-            int savedError = errno;
-            close(registeredHelperFile);
-            return fail(
-                [NSString stringWithFormat:
-                              @"could not prepare registered giveMeRoot: %s",
-                              strerror(savedError)],
-                nil);
-        }
         struct stat registeredHelperAfter;
         bool registeredHelperReady =
-            fstat(registeredHelperFile, &registeredHelperAfter) == 0;
+            fstat(registeredHelperFile, &registeredHelperAfter) == 0 &&
+            S_ISREG(registeredHelperAfter.st_mode) &&
+            registeredHelperAfter.st_nlink == 1 &&
+            registeredHelperBefore.st_dev == registeredHelperAfter.st_dev &&
+            registeredHelperBefore.st_ino == registeredHelperAfter.st_ino &&
+            registeredHelperBefore.st_size == registeredHelperAfter.st_size;
         close(registeredHelperFile);
-        if (!registeredHelperReady || registeredHelperAfter.st_uid != 0 ||
-            registeredHelperAfter.st_gid != 0 ||
+        if (!registeredHelperReady ||
             (registeredHelperAfter.st_mode & 07777) != 0755) {
-            return fail(@"registered giveMeRoot ownership or mode did not "
-                         "verify",
+            return fail(@"registered giveMeRoot identity or mode did not verify",
                         nil);
         }
         log_message("registeredGiveMeRootReady=true path=%s "
@@ -7493,8 +7872,7 @@ int main(int argc, char *argv[]) {
                     registeredHelperAfter.st_uid, registeredHelperAfter.st_gid,
                     registeredHelperAfter.st_mode & 07777);
 
-        NSString *dataContainer =
-            registered_application_data_path(kSileoIdentifier);
+        NSString *dataContainer = kSystemSileoDataRoot;
         log_message("launchServicesDataContainer=%s",
                     dataContainer != nil ? [dataContainer UTF8String]
                                          : "none");
@@ -7534,6 +7912,9 @@ int main(int argc, char *argv[]) {
         manifest[@"VarJbCreated"] = @YES;
         manifest[@"CryptexMountRoot"] = mountRoot;
         manifest[@"SileoBundlePath"] = registeredPath;
+        manifest[@"SileoBundleIdentifier"] = @"org.coolstar.SileoStore";
+        manifest[@"SileoInstallMode"] = @"cryptex-system-app";
+        manifest[@"SileoProvisioningProfile"] = @NO;
         manifest[@"SileoDataContainer"] = dataContainer;
         manifest[@"SileoSandboxExtensions"] = tokenPath;
         manifest[@"SileoSandboxBroker"] = brokerPath;
@@ -7568,21 +7949,15 @@ int main(int argc, char *argv[]) {
             @"system-launchdaemon-persistent-exec-worker";
         manifest[@"SileoRootBrokerPlist"] = kRootBrokerPlist;
         manifest[@"SileoExecutableMode"] =
-            @"developer-signed-main-with-constructor-broker";
-        if (rootlessBackupRoot != nil) {
-            manifest[@"RootlessExecutableBackup"] = rootlessBackupRoot;
-        }
-        if (rootlessMainBackup != nil) {
-            manifest[@"RootlessSileoBackup"] = rootlessMainBackup;
-        }
-        if (rootlessHelperBackup != nil) {
-            manifest[@"RootlessGiveMeRootBackup"] = rootlessHelperBackup;
-        }
+            @"fixed-trust-adhoc-system-app-with-constructor-broker";
         if (rootlessLaunchctlBackup != nil) {
             manifest[@"RootlessLaunchctlBackup"] = rootlessLaunchctlBackup;
         }
         if (rootlessUiopenBackup != nil) {
             manifest[@"RootlessUiopenBackup"] = rootlessUiopenBackup;
+        }
+        if (rootlessUicacheBackup != nil) {
+            manifest[@"RootlessUicacheBackup"] = rootlessUicacheBackup;
         }
         if (sbinjectBundleBackup != nil) {
             manifest[@"SBInjectSpringBoardBundleBackup"] =
@@ -7688,7 +8063,7 @@ int main(int argc, char *argv[]) {
                 @"result=success\nuid=%u\njailbreakRoot=%@\n"
                  "sileo=%@\nlaunchServicesPath=%@\n"
                  "customd=system/%@\nuiopenExit=%d\n",
-                geteuid(), destinationProcursus, rootlessMain,
+                geteuid(), destinationProcursus, trustedMain,
                 registeredPath, kCustomdLabel, uiopen_status];
         if (!write_marker(kDonePath, done)) {
             close(broker);
@@ -7698,7 +8073,7 @@ int main(int argc, char *argv[]) {
         log_message(
             "result=success jailbreakRoot=%s sileo=%s customd=%s "
             "customdHost=%s uiopenExit=%d",
-            [destinationProcursus UTF8String], [rootlessMain UTF8String],
+            [destinationProcursus UTF8String], [trustedMain UTF8String],
             [kCustomdLabel UTF8String], [kExecWorkerExecutable UTF8String],
             uiopen_status);
         serve_sileo_file_broker(registeredPath, destinationProcursus,

@@ -33,6 +33,8 @@ static const char *const kDefaultDylib =
     "/var/jb/usr/lib/ellekit/libinjector.dylib";
 static const char *const kSBInjectLaunchdHook =
     "/var/jb/usr/lib/sbinject/launchdhook-v3.dylib";
+static const char *const kSBInjectLsdRegistrationHook =
+    "/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
 static const char *const kPtrauthChild = "--ptrauth-child";
 static const char *const kInspectPid = "--inspect-pid";
 static const char *const kPreflightPid = "--preflight-pid";
@@ -754,6 +756,7 @@ static bool supported_target_path(const char *path) {
     return strcmp(path,
                   "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
                0 ||
+           strcmp(path, "/usr/libexec/lsd") == 0 ||
            fixed_springboard_candidate_path(path) ||
            path_has_prefix(path,
                            "/private/var/containers/Bundle/Application/") ||
@@ -1071,6 +1074,19 @@ static bool path_is_fixed_sbinject_launchd_hook(const char *resolvedPath) {
     struct stat status = {0};
     return resolvedPath != NULL &&
            realpath(kSBInjectLaunchdHook, fixedPath) != NULL &&
+           strcmp(resolvedPath, fixedPath) == 0 &&
+           lstat(fixedPath, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool path_is_fixed_sbinject_lsd_registration_hook(
+    const char *resolvedPath) {
+    char fixedPath[PATH_MAX] = {0};
+    struct stat status = {0};
+    return resolvedPath != NULL &&
+           realpath(kSBInjectLsdRegistrationHook, fixedPath) != NULL &&
            strcmp(resolvedPath, fixedPath) == 0 &&
            lstat(fixedPath, &status) == 0 && S_ISREG(status.st_mode) &&
            !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
@@ -1622,6 +1638,15 @@ int main(int argc, char *argv[]) {
                    "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
                 0 ||
             fixed_springboard_candidate_path(targetPath);
+        bool lsdTarget = strcmp(targetPath, "/usr/libexec/lsd") == 0;
+        if (lsdTarget &&
+            (!injectPid ||
+             !path_is_fixed_sbinject_lsd_registration_hook(resolvedPath))) {
+            fprintf(stderr,
+                    "compat-loader: lsd injection is restricted to the fixed "
+                    "SBInject registration hook\n");
+            return 65;
+        }
         if ((injectPid || pageProbePid) && springBoardTarget) {
             fprintf(stderr,
                     "compat-loader: post-start SpringBoard mutation is disabled; "

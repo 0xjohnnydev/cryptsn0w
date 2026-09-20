@@ -1,0 +1,7 @@
+Package: org.coolstar.sileo
+Pin: version 2.5.1+codex1
+Pin-Priority: 1001
+
+Package: org.coolstar.sileo
+Pin: version *
+Pin-Priority: -1

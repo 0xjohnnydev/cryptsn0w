@@ -16,6 +16,12 @@ REPLACEMENT = """\tcase "${fd}" in
 \tesac
 \t[ "${ver}" -ge 1 ] || return
 """
+UICACHE_NEEDLE = """if [ -z "${SILEO}" ]; then echo "Not running in Sileo. Trigger UICache"; fi
+if [ -z "${SILEO}" ]; then uicache -p /Applications/Sileo.app; fi
+"""
+UICACHE_REPLACEMENT = """# The fixed-trust system app is registered by
+# codex-dopamine-bootstrap from its byte-verified application-container copy.
+"""
 
 
 def main() -> int:
@@ -25,7 +31,13 @@ def main() -> int:
     source = postinst.read_text()
     if source.count(NEEDLE) != 1:
         raise SystemExit("unexpected Sileo postinst control-channel parser")
-    postinst.write_text(source.replace(NEEDLE, REPLACEMENT))
+    if source.count(UICACHE_NEEDLE) != 1:
+        raise SystemExit("unexpected Sileo postinst uicache handoff")
+    postinst.write_text(
+        source.replace(NEEDLE, REPLACEMENT).replace(
+            UICACHE_NEEDLE, UICACHE_REPLACEMENT
+        )
+    )
     return 0
 
 

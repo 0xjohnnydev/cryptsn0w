@@ -39,7 +39,10 @@ debugged replacement SpringBoard and its dyld bypass provide the sole admission
 path for the ad-hoc signed third-party tweak dylibs ElleKit loads.
 
 Sileo itself is fixed control-plane code, not an incoming package exception.
-Its main executable, helper, constructor shim, and three bundled libraries are
-all byte-matched across the IPA, rootless app, and Cryptex payload, and their
-CDHashes are asserted in the generated fixed trust cache. The trust cache is
-never changed after installation.
+Its main executable, helper, uniquely named broker constructor, and bundled
+libraries live only in the Cryptex system-app bundle; their CDHashes are
+asserted in the generated fixed trust cache. A second fixed hook is admitted
+only for the exact `/usr/libexec/lsd` process and enables iOS 27's modern
+containerized system-app registration call. Its readiness marker is bound to
+the live `lsd` PID and current boot. The trust cache is never changed after
+installation.
