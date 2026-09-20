@@ -1,6 +1,5 @@
 #include "sileo_root_broker_protocol.h"
 
-#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -388,70 +387,6 @@ static int consume_process_bound_extensions(os_log_t log) {
     return 0;
 }
 
-static void probe_apt_lists_access(os_log_t log, const char *jailbreakRoot) {
-    static const char packagesLeaf[] =
-        "apt.procurs.us_dists_1900_main_binary-iphoneos-arm64_Packages";
-    char canonicalDirectory[PATH_MAX];
-    int canonicalLength = snprintf(canonicalDirectory,
-                                   sizeof(canonicalDirectory),
-                                   "%s/var/lib/apt/lists", jailbreakRoot);
-    if (canonicalLength < 0 ||
-        (size_t)canonicalLength >= sizeof(canonicalDirectory)) {
-        os_log_error(log, "apt lists canonical path is too long");
-        return;
-    }
-    const char *directories[] = {
-        "/var/jb/var/lib/apt/lists",
-        canonicalDirectory,
-    };
-    for (size_t index = 0;
-         index < sizeof(directories) / sizeof(directories[0]); ++index) {
-        const char *directory = directories[index];
-        struct stat status;
-        errno = 0;
-        int statResult = stat(directory, &status);
-        int statError = errno;
-        errno = 0;
-        DIR *stream = opendir(directory);
-        int directoryError = errno;
-
-        char packagesPath[PATH_MAX];
-        int packagesLength = snprintf(packagesPath, sizeof(packagesPath),
-                                      "%s/%s", directory, packagesLeaf);
-        int fileDescriptor = -1;
-        int openError = ENAMETOOLONG;
-        ssize_t readResult = -1;
-        int readError = 0;
-        if (packagesLength >= 0 &&
-            (size_t)packagesLength < sizeof(packagesPath)) {
-            errno = 0;
-            fileDescriptor = open(packagesPath,
-                                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-            openError = errno;
-            if (fileDescriptor >= 0) {
-                unsigned char byte = 0;
-                errno = 0;
-                readResult = read(fileDescriptor, &byte, sizeof(byte));
-                readError = errno;
-                close(fileDescriptor);
-            }
-        }
-        if (stream != NULL) {
-            closedir(stream);
-        }
-        os_log(log,
-               "apt lists probe path=%{public}s stat=%{public}d "
-               "statErrno=%{public}d mode=%{public}o opendir=%{public}s "
-               "dirErrno=%{public}d packagesOpen=%{public}s "
-               "openErrno=%{public}d read=%{public}lld "
-               "readErrno=%{public}d",
-               directory, statResult, statError,
-               statResult == 0 ? (unsigned int)status.st_mode : 0U,
-               stream != NULL ? "true" : "false", directoryError,
-               fileDescriptor >= 0 ? "true" : "false", openError,
-               (long long)readResult, readError);
-    }
-}
 
 static bool is_hex_character(char character) {
     return (character >= '0' && character <= '9') ||
@@ -971,17 +906,6 @@ static int codex_posix_spawn(pid_t *restrict pid, const char *restrict path,
             respringRequest = argv[0];
         }
     }
-    if (gConstructorLog != NULL &&
-        ((path != NULL && strstr(path, "sbreload") != NULL) ||
-         (argv != NULL && argv[0] != NULL &&
-          strstr(argv[0], "sbreload") != NULL))) {
-        os_log(gConstructorLog,
-               "respring spawn probe path=%{public}s argv0=%{public}s "
-               "matched=%{public}s",
-               path != NULL ? path : "none",
-               argv != NULL && argv[0] != NULL ? argv[0] : "none",
-               managedRespringSpawn ? "true" : "false");
-    }
     bool managedPersonaSpawn =
         !helperSpawn && !managedRespringSpawn && attributes != NULL &&
         resolve_managed_spawn_command(path, brokerCommand,
@@ -1265,7 +1189,6 @@ __attribute__((constructor)) static void initialize_sileo_broker(void) {
     setenv("PATH", pathEnvironment, 1);
     setenv("SHELL", shell, 1);
     setenv("DYLD_LIBRARY_PATH", libraryPath, 1);
-    probe_apt_lists_access(gConstructorLog, jailbreakRoot);
     int driverExitCode = 0;
     if (run_postboot_driver(gConstructorLog, &driverExitCode)) {
         _exit(driverExitCode);

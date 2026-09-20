@@ -22,17 +22,8 @@ from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedEr
 from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 # [REDACTED] Related personalization helper imports omitted.
 # [REDACTED] Related personalization helper imports omitted.
-from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 
-WORKSPACE = Path(__file__).resolve().parents[2]
-HELPER_DIR = WORKSPACE / "tools" / "cryptexd-static"
-sys.path.insert(0, str(HELPER_DIR))
-
-from install_generic_cryptex1_canary import (  # noqa: E402
-    _read_payload,
-    _validate_identity,
-)
 # [REDACTED] Related personalization helper imports omitted.
 
 
@@ -45,8 +36,21 @@ ALLOWED_INFO_KEYS = {
     "Version",
 }
 MAX_IMAGE_SIZE = 128 * 1024 * 1024
+GENERIC_VERSION = None  # [REDACTED] Flow-specific parameters omitted.
 INSTALL_TIMEOUT_SECONDS = 90
 INSTALL_ATTEMPTS = 3
+
+
+def _read_payload(
+    restore_dir: Path, identity: dict[str, Any], key: str
+) -> bytes:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def _validate_identity(identity: dict[str, Any]) -> None:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
 def _sha256(path: Path) -> str:
@@ -93,11 +97,6 @@ def _validate_bundle(
 
 
 async def _open_rsd(args: argparse.Namespace) -> tuple[Any, Any | None]:
-    if args.tunneld:
-        rsd = await get_tunneld_device_by_udid(args.udid)
-        if rsd is None:
-            raise RuntimeError(f"local tunneld has no tunnel for {args.udid}")
-        return rsd, None
     tunnel = UserspaceRsdTunnel(serial=args.udid, autopair=True)
     try:
         return await tunnel.aopen(), tunnel

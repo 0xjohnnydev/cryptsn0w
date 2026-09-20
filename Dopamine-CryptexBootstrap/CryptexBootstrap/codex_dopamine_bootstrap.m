@@ -41,8 +41,6 @@ extern char *sandbox_extension_issue_mach(const char *extension_class,
 extern const uint32_t SANDBOX_EXTENSION_CANONICAL;
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffer_size);
 extern int proc_listallpids(void *buffer, int buffer_size);
-extern int csops(pid_t pid, unsigned int operation, void *address,
-                 size_t size);
 extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
                                        const char *service_name,
                                        mach_port_t *service_port);
@@ -54,8 +52,6 @@ extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 #define CODEX_MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES 7
 #define CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES 8
 #define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 64
-#define CODEX_CS_OPS_STATUS 0
-#define CODEX_CS_PLATFORM_BINARY 0x04000000U
 
 typedef struct codex_memorystatus_memlimit_properties {
     int32_t memlimit_active;
@@ -147,20 +143,13 @@ static NSString *const kRootBrokerPlist =
 static NSString *const kRootlessUicache = @"/var/jb/usr/bin/uicache";
 static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
-static NSString *const kCustomdLabel = @"com.openai.customd";
-static NSString *const kCustomdExecutable = @"/var/jb/usr/libexec/customd";
-static NSString *const kCustomctlExecutable =
-    @"/var/jb/usr/libexec/customctl";
-static NSString *const kCustomdRegistrarExecutable =
-    @"/var/jb/usr/libexec/customd-candidate-registrar";
-static NSString *const kCustomdTraceReexecExecutable =
-    @"/var/jb/usr/libexec/customd-trace-me-reexec-probe";
-static NSString *const kCustomdSetexecExecutable =
-    @"/var/jb/usr/libexec/customd-springboard-setexec";
-static NSString *const kCustomdPlist =
-    @"/var/jb/Library/LaunchDaemons/com.openai.customd.plist";
-static NSString *const kCustomdSocket = @"/var/jb/var/run/customd.sock";
-static NSString *const kCustomdLog = @"/var/jb/var/log/customd.log";
+static NSString *const kOpenSSHLabel = @"com.openssh.sshd";
+static NSString *const kOpenSSHExecutable = @"/var/jb/usr/sbin/sshd";
+static NSString *const kOpenSSHKeygen = @"/var/jb/usr/bin/ssh-keygen";
+static NSString *const kOpenSSHKeygenWrapper =
+    @"/var/jb/usr/libexec/sshd-keygen-wrapper";
+static NSString *const kOpenSSHPlist =
+    @"/var/jb/Library/LaunchDaemons/com.openssh.sshd.plist";
 static NSString *const kSBInjectPackageValidatorExecutable =
     @"/var/jb/usr/libexec/sbinject-package-validator";
 static NSString *const kSBInjectJitterdLabel =
@@ -3636,324 +3625,6 @@ static bool respring_sbinject_springboard(const char *reason) {
     return active && finalCandidate && finalPid > 1;
 }
 
-static bool is_springboard_target_process(pid_t pid, const char *path) {
-    return strcmp(path,
-                  "/System/Library/CoreServices/"
-                  "SpringBoard.app/SpringBoard") == 0 ||
-           is_exact_springboard_candidate_process(pid, path);
-}
-
-static bool is_ellekit_target_process(pid_t pid, const char *path) {
-    static const char *const jailbreakApplications =
-        "/var/jb/Applications/";
-    static const char *const privateApplicationContainers =
-        "/private/var/containers/Bundle/Application/";
-    static const char *const applicationContainers =
-        "/var/containers/Bundle/Application/";
-    static const char *const sileoExecutableSuffix = "/Sileo.app/Sileo";
-    static const char *const uiTestRunnerPathComponent = "-Runner.app/";
-    size_t pathLength = strlen(path);
-    size_t sileoSuffixLength = strlen(sileoExecutableSuffix);
-    bool sileoProcess =
-        pathLength >= sileoSuffixLength &&
-        strcmp(path + pathLength - sileoSuffixLength,
-               sileoExecutableSuffix) == 0;
-    if (sileoProcess || strstr(path, uiTestRunnerPathComponent) != NULL) {
-        // Sileo has its own launch-time constructor and broker bridge. Loading
-        // ElleKit's generic injector afterward is redundant and destabilizes
-        // the app once its package-manager worker threads are running. XCTest
-        // runner hosts likewise manage their own injected test bundle and can
-        // crash if a second late loader mutates the process.
-        return false;
-    }
-    if (is_exact_preferences_candidate_process(pid, path)) {
-        // The resigned Settings candidate loads ElleKit synchronously from
-        // its SBInject pre-main hook; a second task-port injection is both
-        // redundant and too late for PreferenceLoader's root-list hooks.
-        return false;
-    }
-    if (is_springboard_target_process(pid, path)) {
-        return true;
-    }
-    if (strncmp(path, jailbreakApplications,
-                strlen(jailbreakApplications)) == 0) {
-        return true;
-    }
-    bool applicationContainer =
-        strncmp(path, privateApplicationContainers,
-                strlen(privateApplicationContainers)) == 0 ||
-        strncmp(path, applicationContainers,
-                strlen(applicationContainers)) == 0;
-    uint32_t flags = 0;
-    return applicationContainer &&
-           csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
-           (flags & CODEX_CS_PLATFORM_BINARY) == 0;
-}
-
-static bool valid_tweak_notification_name(NSString *name) {
-    if (![name isKindOfClass:[NSString class]]) {
-        return false;
-    }
-    const char *bytes = [name UTF8String];
-    if (bytes == NULL) {
-        return false;
-    }
-    size_t length = strnlen(bytes, 257U);
-    if (length == 0 || length > 256U) {
-        return false;
-    }
-    for (size_t index = 0; index < length; ++index) {
-        unsigned char character = (unsigned char)bytes[index];
-        if (character <= 0x20U || character >= 0x7fU) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static void collect_tweak_post_notifications(
-    id object, NSMutableOrderedSet<NSString *> *notifications,
-    NSUInteger depth) {
-    if (object == nil || depth > 16U || notifications.count >= 256U) {
-        return;
-    }
-    if ([object isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dictionary = (NSDictionary *)object;
-        for (id key in dictionary) {
-            id value = dictionary[key];
-            if ([key isKindOfClass:[NSString class]] &&
-                [(NSString *)key caseInsensitiveCompare:@"PostNotification"] ==
-                    NSOrderedSame &&
-                valid_tweak_notification_name(value)) {
-                [notifications addObject:(NSString *)value];
-            }
-            collect_tweak_post_notifications(value, notifications,
-                                             depth + 1U);
-            if (notifications.count >= 256U) {
-                break;
-            }
-        }
-        return;
-    }
-    if ([object isKindOfClass:[NSArray class]]) {
-        for (id value in (NSArray *)object) {
-            collect_tweak_post_notifications(value, notifications,
-                                             depth + 1U);
-            if (notifications.count >= 256U) {
-                break;
-            }
-        }
-    }
-}
-
-static NSArray<NSString *> *installed_tweak_post_notifications(void) {
-    static const off_t maximumPlistSize = 1024 * 1024;
-    static const NSUInteger maximumVisitedFiles = 4096U;
-    NSArray<NSString *> *roots = @[
-        @"/var/jb/Library/PreferenceBundles",
-        @"/var/jb/Library/PreferenceLoader/Preferences",
-    ];
-    NSMutableOrderedSet<NSString *> *notifications =
-        [NSMutableOrderedSet orderedSet];
-    NSFileManager *manager = [NSFileManager defaultManager];
-    NSUInteger visitedFiles = 0;
-    for (NSString *root in roots) {
-        NSDirectoryEnumerator<NSString *> *enumerator =
-            [manager enumeratorAtPath:root];
-        for (NSString *relativePath in enumerator) {
-            if (++visitedFiles > maximumVisitedFiles ||
-                notifications.count >= 256U) {
-                break;
-            }
-            if ([[relativePath pathExtension]
-                    caseInsensitiveCompare:@"plist"] != NSOrderedSame) {
-                continue;
-            }
-            NSString *path = [root stringByAppendingPathComponent:relativePath];
-            struct stat status;
-            if (lstat([path fileSystemRepresentation], &status) != 0 ||
-                !S_ISREG(status.st_mode) || status.st_uid != 0 ||
-                status.st_nlink != 1 || status.st_size <= 0 ||
-                status.st_size > maximumPlistSize ||
-                (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-                continue;
-            }
-            NSData *data = [NSData dataWithContentsOfFile:path
-                                                  options:NSDataReadingMappedIfSafe
-                                                    error:nil];
-            if (data == nil) {
-                continue;
-            }
-            id propertyList = [NSPropertyListSerialization
-                propertyListWithData:data
-                             options:NSPropertyListImmutable
-                              format:NULL
-                               error:nil];
-            collect_tweak_post_notifications(propertyList, notifications, 0);
-        }
-        if (visitedFiles > maximumVisitedFiles ||
-            notifications.count >= 256U) {
-            break;
-        }
-    }
-    return notifications.array;
-}
-
-static void replay_tweak_post_notifications(pid_t pid, const char *reason) {
-    if (access("/var/mobile/.eksafemode", F_OK) == 0) {
-        log_message("tweakPostNotificationReplay reason=%s pid=%d "
-                    "skipped=safe-mode",
-                    reason, pid);
-        return;
-    }
-    NSArray<NSString *> *notifications =
-        installed_tweak_post_notifications();
-    NSUInteger posted = 0;
-    NSUInteger failed = 0;
-    for (NSString *notification in notifications) {
-        uint32_t status = notify_post([notification UTF8String]);
-        if (status == NOTIFY_STATUS_OK) {
-            ++posted;
-        } else {
-            ++failed;
-            log_message("tweakPostNotificationFailed reason=%s pid=%d "
-                        "name=%s status=%u",
-                        reason, pid, [notification UTF8String], status);
-        }
-    }
-    log_message("tweakPostNotificationReplay reason=%s pid=%d "
-                "discovered=%lu posted=%lu failed=%lu",
-                reason, pid, (unsigned long)notifications.count,
-                (unsigned long)posted, (unsigned long)failed);
-}
-
-static void serve_ellekit_per_process_injector(bool springBoardOnly) {
-    NSMutableDictionary<NSNumber *, NSDictionary *> *states =
-        [NSMutableDictionary dictionary];
-    const char *lane = springBoardOnly ? "springboard" : "applications";
-    unsigned long long scan = 0;
-    log_message("elleKitPerProcessInjectorServing=true lane=%s "
-                "pid1Guard=true", lane);
-    for (;;) {
-        @autoreleasepool {
-            if (access([kElleKitInjectorExecutable fileSystemRepresentation],
-                       X_OK) != 0 ||
-                access([kElleKitInjectorDylib fileSystemRepresentation],
-                       R_OK) != 0) {
-                usleep(1000 * 1000);
-                continue;
-            }
-            int capacity = proc_listallpids(NULL, 0);
-            if (capacity <= 0 || capacity > 1024 * 1024) {
-                usleep(500 * 1000);
-                continue;
-            }
-            capacity += 32;
-            pid_t *pids = calloc((size_t)capacity, sizeof(*pids));
-            if (pids == NULL) {
-                usleep(500 * 1000);
-                continue;
-            }
-            int count = proc_listallpids(pids,
-                                         capacity * (int)sizeof(*pids));
-            if (count < 0) {
-                free(pids);
-                usleep(500 * 1000);
-                continue;
-            }
-            if (count > capacity) {
-                count = capacity;
-            }
-            NSMutableSet<NSNumber *> *live = [NSMutableSet set];
-            NSUInteger targetCount = 0;
-            NSUInteger pendingCount = 0;
-            for (int index = 0; index < count; ++index) {
-                pid_t pid = pids[index];
-                if (pid <= 1 || pid == getpid()) {
-                    continue;
-                }
-                char path[CODEX_PROC_PIDPATH_MAX] = {0};
-                if (proc_pidpath(pid, path, sizeof(path)) <= 0 ||
-                    strcmp(path, "/sbin/launchd") == 0 ||
-                    !is_ellekit_target_process(pid, path)) {
-                    continue;
-                }
-                bool springBoardProcess =
-                    is_springboard_target_process(pid, path);
-                if (springBoardProcess != springBoardOnly) {
-                    continue;
-                }
-                ++targetCount;
-                NSNumber *key = @(pid);
-                [live addObject:key];
-                NSDictionary *state = states[key];
-                NSString *pathValue = [NSString stringWithUTF8String:path];
-                NSUInteger attempts =
-                    [state[@"path"] isEqual:pathValue]
-                        ? [state[@"attempts"] unsignedIntegerValue]
-                        : 0;
-                bool complete = [state[@"complete"] boolValue];
-                if (complete || attempts >= 3) {
-                    continue;
-                }
-                ++pendingCount;
-                char pidText[32];
-                snprintf(pidText, sizeof(pidText), "%d", pid);
-                char *elleKitArguments[] = {
-                    (char *)[kElleKitInjectorExecutable
-                        fileSystemRepresentation],
-                    "--inject-pid", pidText,
-                    (char *)[kElleKitInjectorDylib fileSystemRepresentation],
-                    NULL};
-                int elleKitStatus = run_and_wait_bounded(
-                    elleKitArguments[0], elleKitArguments, 30000);
-                int status = elleKitStatus == 0 ? 0 : 1;
-                ++attempts;
-                states[key] = @{
-                    @"path" : pathValue,
-                    @"attempts" : @(attempts),
-                    @"complete" : @(status == 0),
-                };
-                log_message("elleKitPerProcessInjection lane=%s pid=%d "
-                            "path=%s attempt=%lu elleKitStatus=%d status=%d",
-                            lane, pid, path, (unsigned long)attempts,
-                            elleKitStatus, status);
-                if (status == 0 && springBoardProcess) {
-                    /*
-                     * Post-start injection can complete after a tweak's
-                     * applicationDidFinishLaunching: hook point. Preference
-                     * bundles already declare their supported Darwin refresh
-                     * notification, so replay those declarations on-device
-                     * once the tweak constructors and observers are loaded.
-                     */
-                    usleep(100 * 1000);
-                    replay_tweak_post_notifications(
-                        pid, "springboard-post-injection");
-                }
-            }
-            free(pids);
-            for (NSNumber *key in [states.allKeys copy]) {
-                if (![live containsObject:key]) {
-                    [states removeObjectForKey:key];
-                }
-            }
-            ++scan;
-            if (scan == 1 || scan % 80 == 0) {
-                log_message("elleKitPerProcessInjectorHeartbeat lane=%s "
-                            "scan=%llu targets=%lu pending=%lu states=%lu "
-                            "safeMode=%s",
-                            lane, scan, (unsigned long)targetCount,
-                            (unsigned long)pendingCount,
-                            (unsigned long)states.count,
-                            access("/var/mobile/.eksafemode", F_OK) == 0
-                                ? "true"
-                                : "false");
-            }
-        }
-        usleep(250 * 1000);
-    }
-}
-
 static xpc_connection_t gSileoXpcListener;
 static pthread_mutex_t gPreferencesRespringLock = PTHREAD_MUTEX_INITIALIZER;
 static bool gPreferencesRespringPending;
@@ -4763,56 +4434,55 @@ static bool install_managed_apt_file(NSString *source, NSString *directory,
     return true;
 }
 
-static bool remove_legacy_dynamic_trust_paths(NSString **errorText) {
-    NSDictionary<NSString *, NSNumber *> *paths = @{
-        @"/var/jb/etc/apt/apt.conf.d/98codex-runtime-trust" : @NO,
-        @"/var/jb/usr/libexec/codex-runtime-trust" : @NO,
-        @"/var/jb/usr/libexec/codex-runtime-trust-client" : @NO,
-        @"/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib" : @NO,
-        @"/var/jb/usr/lib/codex-exec-interposer.dylib" : @NO,
-        @"/var/jb/usr/share/codex-runtime-admission" : @YES,
-        @"/var/jb/var/lib/codex-runtime-admission" : @YES,
+
+static bool install_openssh_job(NSString **errorText) {
+    NSDictionary<NSString *, NSNumber *> *files = @{
+        kOpenSSHExecutable : @0755,
+        kOpenSSHKeygen : @0755,
+        kOpenSSHKeygenWrapper : @0755,
+        kOpenSSHPlist : @0644,
     };
-    for (NSString *path in paths) {
-        struct stat status;
-        if (lstat([path fileSystemRepresentation], &status) != 0) {
-            if (errno == ENOENT) {
-                continue;
-            }
+    for (NSString *path in files) {
+        mode_t mode = (mode_t)[files[path] unsignedShortValue];
+        if (!sbinject_managed_file(path, mode)) {
             if (errorText != NULL) {
                 *errorText = [NSString stringWithFormat:
-                    @"legacy dynamic-trust path status failed: %@", path];
+                    @"OpenSSH payload verification failed: %@", path];
             }
             return false;
         }
-        bool directory = [paths[path] boolValue];
-        bool safe = !S_ISLNK(status.st_mode) && status.st_uid == 0 &&
-                    status.st_gid == 0 &&
-                    (status.st_mode & (S_IWGRP | S_IWOTH)) == 0 &&
-                    (directory ? S_ISDIR(status.st_mode)
-                               : (S_ISREG(status.st_mode) &&
-                                  status.st_nlink == 1));
-        if (!safe) {
-            if (errorText != NULL) {
-                *errorText = [NSString stringWithFormat:
-                    @"refusing unsafe legacy dynamic-trust path: %@", path];
-            }
-            return false;
-        }
-        NSError *removeError = nil;
-        if (![[NSFileManager defaultManager] removeItemAtPath:path
-                                                       error:&removeError]) {
-            if (errorText != NULL) {
-                *errorText = [NSString stringWithFormat:
-                    @"legacy dynamic-trust path removal failed: %@",
-                    removeError];
-            }
-            return false;
-        }
-        log_message("legacyDynamicTrustPathRemoved=%s",
-                    [path UTF8String]);
     }
-    return true;
+
+    NSString *target = [@"system/" stringByAppendingString:kOpenSSHLabel];
+    char *printArguments[] = {
+        "/var/jb/usr/bin/launchctl", "print",
+        (char *)[target fileSystemRepresentation], NULL};
+    int printStatus = run_and_wait_bounded(printArguments[0], printArguments,
+                                           10000);
+    if (printStatus != 0) {
+        char *bootstrapArguments[] = {
+            "/var/jb/usr/bin/launchctl", "bootstrap", "system",
+            (char *)[kOpenSSHPlist fileSystemRepresentation], NULL};
+        int bootstrapStatus = run_and_wait_bounded(
+            bootstrapArguments[0], bootstrapArguments, 10000);
+        log_message("openSSHBootstrapExit=%d", bootstrapStatus);
+        if (bootstrapStatus != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"OpenSSH bootstrap exited %d", bootstrapStatus];
+            }
+            return false;
+        }
+        printStatus = run_and_wait_bounded(printArguments[0], printArguments,
+                                           10000);
+    }
+    log_message("openSSHReady=%s label=%s",
+                printStatus == 0 ? "true" : "false",
+                [kOpenSSHLabel UTF8String]);
+    if (printStatus != 0 && errorText != NULL) {
+        *errorText = @"OpenSSH launch daemon did not become ready";
+    }
+    return printStatus == 0;
 }
 
 static NSArray<NSString *> *validated_bundle_entries(NSString *root,
@@ -5980,346 +5650,6 @@ static bool install_sileo_root_broker_job(NSString *sourceExecutable,
     return serviceReady;
 }
 
-static bool ensure_customd_directory(NSString *path,
-                                     NSString **errorText) {
-    struct stat before;
-    if (lstat([path fileSystemRepresentation], &before) == 0) {
-        if (!S_ISDIR(before.st_mode) || S_ISLNK(before.st_mode)) {
-            if (errorText != NULL) {
-                *errorText = [NSString
-                    stringWithFormat:@"customd directory is unsafe: %@",
-                                     path];
-            }
-            return false;
-        }
-    } else if (errno != ENOENT) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"customd directory status failed: %s",
-                                 strerror(errno)];
-        }
-        return false;
-    }
-    NSError *error = nil;
-    NSDictionary *attributes = @{
-        NSFilePosixPermissions : @0755,
-        NSFileOwnerAccountID : @0,
-        NSFileGroupOwnerAccountID : @0,
-    };
-    NSFileManager *manager = [NSFileManager defaultManager];
-    if (![manager createDirectoryAtPath:path
-            withIntermediateDirectories:YES
-                             attributes:attributes
-                                  error:&error] ||
-        ![manager setAttributes:attributes ofItemAtPath:path error:&error]) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"customd directory failed: %@", error];
-        }
-        return false;
-    }
-    struct stat status;
-    if (lstat([path fileSystemRepresentation], &status) != 0 ||
-        !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
-        status.st_uid != 0 || status.st_gid != 0 ||
-        (status.st_mode & 07777) != 0755) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"customd directory verification failed: %@",
-                                 path];
-        }
-        return false;
-    }
-    return true;
-}
-
-static bool customd_managed_file_exact(NSString *path, mode_t mode) {
-    struct stat status;
-    return lstat([path fileSystemRepresentation], &status) == 0 &&
-           S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
-           status.st_nlink == 1 && status.st_uid == 0 && status.st_gid == 0 &&
-           (status.st_mode & 07777) == mode;
-}
-
-static bool customd_socket_exact(void) {
-    struct stat status;
-    return lstat([kCustomdSocket fileSystemRepresentation], &status) == 0 &&
-           S_ISSOCK(status.st_mode) && status.st_uid == 0 &&
-           status.st_gid == 0 && (status.st_mode & 07777) == 0600;
-}
-
-static bool customd_socket_is_safe_stale_inode(void) {
-    if (!customd_socket_exact()) {
-        return false;
-    }
-    int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (descriptor < 0) {
-        return false;
-    }
-    int descriptorFlags = fcntl(descriptor, F_GETFL);
-    if (descriptorFlags < 0 ||
-        fcntl(descriptor, F_SETFL, descriptorFlags | O_NONBLOCK) != 0) {
-        close(descriptor);
-        return false;
-    }
-    struct sockaddr_un address = {0};
-    address.sun_family = AF_UNIX;
-    const char *path = [kCustomdSocket fileSystemRepresentation];
-    if (strlen(path) >= sizeof(address.sun_path)) {
-        close(descriptor);
-        return false;
-    }
-    strlcpy(address.sun_path, path, sizeof(address.sun_path));
-    errno = 0;
-    int connection =
-        connect(descriptor, (const struct sockaddr *)&address,
-                sizeof(address));
-    int connectionError = connection == 0 ? 0 : errno;
-    close(descriptor);
-    return connection != 0 && connectionError == ECONNREFUSED;
-}
-
-static bool customd_job_plist_exact(void) {
-    NSDictionary *job =
-        [NSDictionary dictionaryWithContentsOfFile:kCustomdPlist];
-    NSArray<NSString *> *expectedArguments = @[
-        kExecWorkerExecutable,
-        @"--macho",
-        kCustomdExecutable,
-    ];
-    return job != nil && [job[@"Label"] isEqualToString:kCustomdLabel] &&
-           [job[@"ProgramArguments"] isEqualToArray:expectedArguments] &&
-           [job[@"RunAtLoad"] boolValue] &&
-           [job[@"KeepAlive"] boolValue] &&
-           [job[@"UserName"] isEqualToString:@"root"] &&
-           [job[@"GroupName"] isEqualToString:@"wheel"] &&
-           [job[@"Umask"] unsignedIntegerValue] == 63U &&
-           [job[@"StandardOutPath"] isEqualToString:kCustomdLog] &&
-           [job[@"StandardErrorPath"] isEqualToString:kCustomdLog];
-}
-
-static bool install_customd_system_job(
-    NSString *sourceWorker, NSString *sourceCustomd,
-    NSString *sourceCustomctl, NSString *sourceRegistrar,
-    NSString *sourceTraceReexec, NSString *sourceSetexec,
-    NSString *sourcePlist, bool restartRequired, NSString **errorText) {
-    bool payloadExact =
-        files_are_equal(sourceWorker, kExecWorkerExecutable) &&
-        files_are_equal(sourceCustomd, kCustomdExecutable) &&
-        files_are_equal(sourceCustomctl, kCustomctlExecutable) &&
-        files_are_equal(sourceRegistrar, kCustomdRegistrarExecutable) &&
-        files_are_equal(sourceTraceReexec,
-                        kCustomdTraceReexecExecutable) &&
-        files_are_equal(sourceSetexec, kCustomdSetexecExecutable) &&
-        files_are_equal(sourcePlist, kCustomdPlist);
-    if (!payloadExact ||
-        !customd_managed_file_exact(kExecWorkerExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomdExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomctlExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomdRegistrarExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomdTraceReexecExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomdSetexecExecutable, 0755) ||
-        !customd_managed_file_exact(kCustomdPlist, 0644) ||
-        !customd_job_plist_exact()) {
-        if (errorText != NULL) {
-            *errorText = @"customd installed artifacts failed verification";
-        }
-        return false;
-    }
-    if (!ensure_customd_directory(@"/var/jb/var/run", errorText) ||
-        !ensure_customd_directory(@"/var/jb/var/log", errorText)) {
-        return false;
-    }
-
-    struct stat existingLog;
-    int existingLogResult =
-        lstat([kCustomdLog fileSystemRepresentation], &existingLog);
-    if ((existingLogResult == 0 &&
-         (!S_ISREG(existingLog.st_mode) || existingLog.st_nlink != 1)) ||
-        (existingLogResult != 0 && errno != ENOENT)) {
-        if (errorText != NULL) {
-            *errorText = @"customd existing log path is unsafe";
-        }
-        return false;
-    }
-    int logFile = open([kCustomdLog fileSystemRepresentation],
-                       O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC |
-                           O_NOFOLLOW,
-                       0600);
-    struct stat logStatus;
-    bool logReady =
-        logFile >= 0 && fstat(logFile, &logStatus) == 0 &&
-        S_ISREG(logStatus.st_mode) && logStatus.st_nlink == 1 &&
-        fchown(logFile, 0, 0) == 0 &&
-        fchmod(logFile, 0600) == 0 && fsync(logFile) == 0;
-    int logError = logReady ? 0 : errno;
-    if (logFile >= 0 && close(logFile) != 0 && logReady) {
-        logReady = false;
-        logError = errno;
-    }
-    if (!logReady || !customd_managed_file_exact(kCustomdLog, 0600)) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"customd log preparation failed: %s",
-                                 strerror(logError != 0 ? logError : errno)];
-        }
-        return false;
-    }
-
-    NSString *target = [@"system/" stringByAppendingString:kCustomdLabel];
-    char *statusArguments[] = {
-        (char *)[kExecWorkerExecutable fileSystemRepresentation],
-        "--macho",
-        (char *)[kCustomctlExecutable fileSystemRepresentation],
-        "status",
-        NULL,
-    };
-    char *preflightPrintArguments[] = {
-        "/var/jb/usr/bin/launchctl", "print",
-        (char *)[target fileSystemRepresentation], NULL};
-    int preflightPrintStatus = run_and_wait_bounded(
-        preflightPrintArguments[0], preflightPrintArguments, 5000);
-    int reuseStatus =
-        !restartRequired && preflightPrintStatus == 0 &&
-                customd_socket_exact()
-            ? run_and_wait_bounded(statusArguments[0], statusArguments, 10000)
-            : 255;
-    bool reused =
-        reuseStatus == 0 && customd_socket_exact() &&
-        customd_job_plist_exact();
-    log_message("customdReuseCheck restartRequired=%s "
-                "launchctlPrintExit=%d statusExit=%d reused=%s",
-                restartRequired ? "true" : "false", preflightPrintStatus,
-                reuseStatus, reused ? "true" : "false");
-    if (reused) {
-        return true;
-    }
-    char *bootoutArguments[] = {
-        "/var/jb/usr/bin/launchctl", "bootout",
-        (char *)[target fileSystemRepresentation], NULL};
-    int bootoutStatus = run_and_wait_bounded(
-        bootoutArguments[0], bootoutArguments, 10000);
-    bool bootoutExact = preflightPrintStatus != 0 || bootoutStatus == 0;
-    bool staleSocketRemoved = false;
-    if (preflightPrintStatus != 0 && preflightPrintStatus != 124 &&
-        preflightPrintStatus != 255 && bootoutStatus != 0 &&
-        bootoutStatus != 124 && bootoutStatus != 255 &&
-        customd_socket_is_safe_stale_inode()) {
-        struct stat staleSocket;
-        if (lstat([kCustomdSocket fileSystemRepresentation],
-                  &staleSocket) == 0 && staleSocket.st_nlink == 1 &&
-            unlink([kCustomdSocket fileSystemRepresentation]) == 0) {
-            staleSocketRemoved = true;
-        }
-    }
-    bool socketAbsent = false;
-    for (NSUInteger attempt = 0; attempt < 500; ++attempt) {
-        struct stat socketStatus;
-        if (lstat([kCustomdSocket fileSystemRepresentation],
-                  &socketStatus) != 0) {
-            if (errno == ENOENT) {
-                socketAbsent = true;
-            }
-            break;
-        }
-        if (!S_ISSOCK(socketStatus.st_mode) || socketStatus.st_uid != 0 ||
-            socketStatus.st_gid != 0) {
-            break;
-        }
-        usleep(10 * 1000);
-    }
-    log_message("customdBootout preflightPrintExit=%d bootoutExit=%d "
-                "staleSocketRemoved=%s socketAbsent=%s exact=%s target=%s "
-                "idempotent=true",
-                preflightPrintStatus, bootoutStatus,
-                staleSocketRemoved ? "true" : "false",
-                socketAbsent ? "true" : "false",
-                bootoutExact ? "true" : "false", [target UTF8String]);
-    if (!bootoutExact || !socketAbsent) {
-        if (errorText != NULL) {
-            *errorText = @"customd prior service did not stop exactly";
-        }
-        return false;
-    }
-
-    char *bootstrapArguments[] = {
-        "/var/jb/usr/bin/launchctl", "bootstrap", "system",
-        (char *)[kCustomdPlist fileSystemRepresentation], NULL};
-    int bootstrapStatus = run_and_wait_bounded(
-        bootstrapArguments[0], bootstrapArguments, 10000);
-    log_message("customdBootstrapExit=%d plist=%s host=%s",
-                bootstrapStatus, [kCustomdPlist UTF8String],
-                [kExecWorkerExecutable UTF8String]);
-    if (bootstrapStatus != 0) {
-        int cleanupStatus = run_and_wait_bounded(
-            bootoutArguments[0], bootoutArguments, 10000);
-        log_message("customdBootstrapFailureCleanupExit=%d target=%s",
-                    cleanupStatus, [target UTF8String]);
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"customd launchctl bootstrap exited %d",
-                                 bootstrapStatus];
-        }
-        return false;
-    }
-
-    bool socketReady = false;
-    for (NSUInteger attempt = 0; attempt < 1000; ++attempt) {
-        if (customd_socket_exact()) {
-            socketReady = true;
-            break;
-        }
-        usleep(10 * 1000);
-    }
-    char *printArguments[] = {
-        "/var/jb/usr/bin/launchctl", "print",
-        (char *)[target fileSystemRepresentation], NULL};
-    int printStatus = socketReady
-                          ? run_and_wait_bounded(printArguments[0],
-                                                 printArguments, 5000)
-                          : 255;
-    int statusExit =
-        socketReady && printStatus == 0
-            ? run_and_wait_bounded(statusArguments[0], statusArguments, 10000)
-            : 255;
-    bool finalExact =
-        socketReady && printStatus == 0 && statusExit == 0 &&
-        customd_socket_exact() && customd_job_plist_exact() &&
-        files_are_equal(sourceWorker, kExecWorkerExecutable) &&
-        files_are_equal(sourceCustomd, kCustomdExecutable) &&
-        files_are_equal(sourceCustomctl, kCustomctlExecutable) &&
-        files_are_equal(sourceRegistrar, kCustomdRegistrarExecutable) &&
-        files_are_equal(sourceTraceReexec,
-                        kCustomdTraceReexecExecutable) &&
-        files_are_equal(sourceSetexec, kCustomdSetexecExecutable) &&
-        files_are_equal(sourcePlist, kCustomdPlist) &&
-        customd_managed_file_exact(kExecWorkerExecutable, 0755) &&
-        customd_managed_file_exact(kCustomdExecutable, 0755) &&
-        customd_managed_file_exact(kCustomctlExecutable, 0755) &&
-        customd_managed_file_exact(kCustomdRegistrarExecutable, 0755) &&
-        customd_managed_file_exact(kCustomdTraceReexecExecutable, 0755) &&
-        customd_managed_file_exact(kCustomdSetexecExecutable, 0755) &&
-        customd_managed_file_exact(kCustomdPlist, 0644);
-    log_message(
-        "customdServiceVerification target=%s socketReady=%s "
-        "launchctlPrintExit=%d statusExit=%d payloadExact=%s finalExact=%s "
-        "systemDomain=true persistentParent=%s",
-        [target UTF8String], socketReady ? "true" : "false", printStatus,
-        statusExit, payloadExact ? "true" : "false",
-        finalExact ? "true" : "false",
-        [kExecWorkerExecutable UTF8String]);
-    if (!finalExact) {
-        int cleanupStatus = run_and_wait_bounded(
-            bootoutArguments[0], bootoutArguments, 10000);
-        log_message("customdHealthFailureCleanupExit=%d target=%s",
-                    cleanupStatus, [target UTF8String]);
-    }
-    if (!finalExact && errorText != NULL) {
-        *errorText = @"customd system service did not become healthy";
-    }
-    return finalExact;
-}
-
 static int fail(NSString *reason, NSString *partialRoot) {
     log_message("result=failed reason=%s", [reason UTF8String]);
     if (partialRoot != nil && path_is_absent(kVarJb)) {
@@ -6431,13 +5761,6 @@ int main(int argc, char *argv[]) {
                             sbinjectPreferencesActive ? "none"
                                                        : "stock-preferences");
             });
-            dispatch_queue_t applicationInjectionQueue =
-                dispatch_queue_create(
-                "com.openai.codex.dopamine.ellekit-applications",
-                DISPATCH_QUEUE_SERIAL);
-            dispatch_async(applicationInjectionQueue, ^{
-                serve_ellekit_per_process_injector(false);
-            });
             dispatch_main();
             __builtin_unreachable();
         }
@@ -6496,6 +5819,13 @@ int main(int argc, char *argv[]) {
         NSString *sourcePreferenceLoader =
             [payloadRoot stringByAppendingPathComponent:
                              @"preferenceloader.deb"];
+        NSString *sourceOpenSSHClient =
+            [payloadRoot stringByAppendingPathComponent:@"openssh-client.deb"];
+        NSString *sourceOpenSSHServer =
+            [payloadRoot stringByAppendingPathComponent:@"openssh-server.deb"];
+        NSString *sourceOpenSSHSFTPServer =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"openssh-sftp-server.deb"];
         NSString *sourceTrustedSileo =
             [mountRoot stringByAppendingPathComponent:@"Applications/Sileo.app"];
         NSString *sourceTrustedElleKitRoot =
@@ -6534,24 +5864,6 @@ int main(int argc, char *argv[]) {
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
-        NSString *sourceCustomd =
-            [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/bin/customd"];
-        NSString *sourceCustomctl =
-            [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/bin/customctl"];
-        NSString *sourceCustomdRegistrar =
-            [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/bin/customd-candidate-registrar"];
-        NSString *sourceCustomdTraceReexec =
-            [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/bin/customd-trace-me-reexec-probe"];
-        NSString *sourceCustomdSetexec =
-            [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/bin/customd-springboard-setexec"];
-        NSString *sourceCustomdPlist =
-            [payloadRoot stringByAppendingPathComponent:
-                             @"com.openai.customd.plist"];
         NSString *sourceSBInjectGeneralHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/generalhook.dylib"];
@@ -6597,6 +5909,12 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceElleKit] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourcePreferenceLoader] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceOpenSSHClient] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceOpenSSHServer] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceOpenSSHSFTPServer] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedSileo
                      isDirectory:&isDirectory] ||
@@ -6698,24 +6016,6 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectJitterdPlist fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomd fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomctl fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomdRegistrar fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomdTraceReexec fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomdSetexec fileSystemRepresentation],
-                  &injectionHelperStatus) != 0 ||
-            !S_ISREG(injectionHelperStatus.st_mode) ||
-            lstat([sourceCustomdPlist fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             validated_bundle_entries(sourceSBInjectBundle, false) == nil ||
@@ -6893,44 +6193,6 @@ int main(int argc, char *argv[]) {
                         [destinationProcursus UTF8String]);
         }
 
-        NSString *legacyDynamicTrustError = nil;
-        if (!remove_legacy_dynamic_trust_paths(&legacyDynamicTrustError)) {
-            return fail(legacyDynamicTrustError, nil);
-        }
-        log_message("legacyDynamicTrustPaths=absent");
-
-        // Remove the bounded development probes used while porting the iOS 27
-        // Settings model. The production bridge is installed below as one
-        // fixed Cryptex artifact and must never be loaded a second time through
-        // ElleKit's generic TweakInject scan.
-        for (NSString *path in @[
-                 @"/var/jb/usr/lib/TweakInject/PL27Bridge.dylib",
-                 @"/var/jb/usr/lib/TweakInject/PL27Bridge.plist",
-                 @"/var/jb/usr/lib/TweakInject/PL27Probe.dylib",
-                 @"/var/jb/usr/lib/TweakInject/PL27Probe.plist",
-                 @"/var/jb/usr/lib/sbinject/pl27-probe.dylib",
-             ]) {
-            struct stat probeStatus = {0};
-            if (lstat([path fileSystemRepresentation], &probeStatus) != 0) {
-                if (errno == ENOENT) continue;
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"could not inspect legacy Settings probe %@: %s",
-                                  path, strerror(errno)],
-                    nil);
-            }
-            if ((!S_ISREG(probeStatus.st_mode) &&
-                 !S_ISLNK(probeStatus.st_mode)) ||
-                unlink([path fileSystemRepresentation]) != 0) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"could not remove legacy Settings probe %@: %s",
-                                  path, strerror(errno)],
-                    nil);
-            }
-        }
-        log_message("legacyPreferencesBridgeProbes=absent");
-
         NSString *rootlessLaunchctl = @"/var/jb/usr/bin/launchctl";
         NSString *rootlessLaunchctlBackup = nil;
         BOOL launchctlMatches =
@@ -6977,6 +6239,9 @@ int main(int argc, char *argv[]) {
                     rootlessLaunchctlBackup != nil
                         ? [rootlessLaunchctlBackup UTF8String]
                         : "not-needed");
+
+        [[NSFileManager defaultManager]
+            removeItemAtPath:@"/private/var/tmp/codex-stage-ssh" error:nil];
 
         NSString *rootlessUiopen = @"/var/jb/usr/bin/uiopen";
         NSString *rootlessUiopenBackup = nil;
@@ -7129,18 +6394,31 @@ int main(int argc, char *argv[]) {
                   @"installed" : kElleKitInjectorExecutable},
                 @{@"source" : sourceExecWorker,
                   @"installed" : kExecWorkerExecutable},
-                @{@"source" : sourceCustomd,
-                  @"installed" : kCustomdExecutable},
-                @{@"source" : sourceCustomctl,
-                  @"installed" : kCustomctlExecutable},
-                @{@"source" : sourceCustomdRegistrar,
-                  @"installed" : kCustomdRegistrarExecutable},
-                @{@"source" : sourceCustomdTraceReexec,
-                  @"installed" : kCustomdTraceReexecExecutable},
-                @{@"source" : sourceCustomdSetexec,
-                  @"installed" : kCustomdSetexecExecutable},
-                @{@"source" : sourceCustomdPlist,
-                  @"installed" : kCustomdPlist},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"usr/bin/ssh"],
+                  @"installed" : @"/var/jb/usr/bin/ssh"},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"usr/bin/ssh-keygen"],
+                  @"installed" : kOpenSSHKeygen},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"usr/libexec/sftp-server"],
+                  @"installed" : @"/var/jb/usr/libexec/sftp-server"},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"usr/libexec/sshd-keygen-wrapper"],
+                  @"installed" : kOpenSSHKeygenWrapper},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"usr/sbin/sshd"],
+                  @"installed" : kOpenSSHExecutable},
+                @{@"source" : [sourceProcursus
+                                     stringByAppendingPathComponent:
+                                         @"Library/LaunchDaemons/"
+                                          "com.openssh.sshd.plist"],
+                  @"installed" : kOpenSSHPlist},
                 @{@"source" : sourceSBInjectGeneralHook,
                   @"installed" : kSBInjectGeneralHook},
                 @{@"source" : sourceSBInjectPreferencesBridge,
@@ -7181,7 +6459,13 @@ int main(int argc, char *argv[]) {
                 dpkg_package_version_is_installed(@"preferenceloader",
                                                   @"2.3.3") &&
                 dpkg_package_version_is_installed(@"org.coolstar.sileo",
-                                                  kSileoPackageVersion);
+                                                  kSileoPackageVersion) &&
+                dpkg_package_version_is_installed(@"openssh-client",
+                                                  @"9.7p1-1") &&
+                dpkg_package_version_is_installed(@"openssh-server",
+                                                  @"9.7p1-1") &&
+                dpkg_package_version_is_installed(@"openssh-sftp-server",
+                                                  @"9.7p1-1");
             for (NSDictionary *pair in fastPairs) {
                 fastPayloadExact &= files_are_equal(pair[@"source"],
                                                      pair[@"installed"]);
@@ -7239,20 +6523,16 @@ int main(int argc, char *argv[]) {
                     install_sileo_root_broker_job(
                         executable, fastRegisteredPath,
                         destinationProcursus, &fastError);
-                bool fastCustomd = fastRootBroker &&
-                    install_customd_system_job(
-                        sourceExecWorker, sourceCustomd, sourceCustomctl,
-                        sourceCustomdRegistrar, sourceCustomdTraceReexec,
-                        sourceCustomdSetexec, sourceCustomdPlist, false,
-                        &fastError);
+                bool fastOpenSSH = fastRootBroker &&
+                    install_openssh_job(&fastError);
                 log_message("fastBootControlPlane jitterd=%s rootBroker=%s "
-                            "customd=%s error=%s",
+                            "openSSH=%s error=%s",
                             fastJitterd ? "true" : "false",
                             fastRootBroker ? "true" : "false",
-                            fastCustomd ? "true" : "false",
+                            fastOpenSSH ? "true" : "false",
                             fastError != nil
                                 ? [[fastError description] UTF8String] : "none");
-                if (fastCustomd) {
+                if (fastOpenSSH) {
                     fastError = nil;
                     bool fastExtensions =
                         write_sileo_sandbox_extensions(
@@ -7287,12 +6567,11 @@ int main(int argc, char *argv[]) {
                     });
                     NSString *done = [NSString stringWithFormat:
                         @"result=success\nmode=fast-boot\nuid=%u\n"
-                         "jailbreakRoot=%@\nsileo=%@\nlaunchServicesPath=%@\n"
-                         "customd=system/%@\n",
+                         "jailbreakRoot=%@\nsileo=%@\nlaunchServicesPath=%@\n",
                         geteuid(), destinationProcursus,
                         [fastRegisteredPath
                             stringByAppendingPathComponent:@"Sileo"],
-                        fastRegisteredPath, kCustomdLabel];
+                        fastRegisteredPath];
                     (void)write_marker(kDonePath, done);
                     log_message("result=success mode=fast-boot "
                                 "networkRequired=false sileo=%s",
@@ -7404,6 +6683,50 @@ int main(int argc, char *argv[]) {
                 nil);
         }
 
+        char *openSSHDpkgArguments[] = {
+            "/var/jb/usr/bin/dpkg", "-i",
+            (char *)[sourceOpenSSHClient fileSystemRepresentation],
+            (char *)[sourceOpenSSHSFTPServer fileSystemRepresentation],
+            (char *)[sourceOpenSSHServer fileSystemRepresentation], NULL};
+        int openSSHDpkgStatus = run_and_wait_bounded(
+            openSSHDpkgArguments[0], openSSHDpkgArguments, 120000);
+        log_message("openSSHFixedDpkgExit=%d version=9.7p1-1",
+                    openSSHDpkgStatus);
+        if (openSSHDpkgStatus != 0 ||
+            !dpkg_package_version_is_installed(@"openssh-client",
+                                               @"9.7p1-1") ||
+            !dpkg_package_version_is_installed(@"openssh-server",
+                                               @"9.7p1-1") ||
+            !dpkg_package_version_is_installed(@"openssh-sftp-server",
+                                               @"9.7p1-1")) {
+            return fail(
+                [NSString stringWithFormat:@"fixed OpenSSH install exited %d",
+                                           openSSHDpkgStatus],
+                nil);
+        }
+        NSDictionary<NSString *, NSString *> *trustedOpenSSHFiles = @{
+            @"usr/bin/ssh" : @"/var/jb/usr/bin/ssh",
+            @"usr/bin/ssh-keygen" : kOpenSSHKeygen,
+            @"usr/libexec/sftp-server" : @"/var/jb/usr/libexec/sftp-server",
+            @"usr/libexec/sshd-keygen-wrapper" : kOpenSSHKeygenWrapper,
+            @"usr/sbin/sshd" : kOpenSSHExecutable,
+            @"Library/LaunchDaemons/com.openssh.sshd.plist" : kOpenSSHPlist,
+        };
+        for (NSString *relativePath in trustedOpenSSHFiles) {
+            NSString *sourcePath =
+                [sourceProcursus stringByAppendingPathComponent:relativePath];
+            if (!files_are_equal(sourcePath,
+                                 trustedOpenSSHFiles[relativePath])) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"fixed OpenSSH payload mismatch: %@",
+                                  relativePath],
+                    nil);
+            }
+        }
+        log_message("openSSHFixedTrustReady=true version=9.7p1-1 files=%lu",
+                    (unsigned long)trustedOpenSSHFiles.count);
+
         bool elleKitKeyUpdated = false;
         bool bigBossKeyUpdated = false;
         bool aptListNormalizerUpdated = false;
@@ -7461,14 +6784,6 @@ int main(int argc, char *argv[]) {
             return fail(defaultSourcesError, nil);
         }
 
-        bool elleKitInjectorUpdated = false;
-        bool execWorkerUpdated = false;
-        bool customdUpdated = false;
-        bool customctlUpdated = false;
-        bool customdRegistrarUpdated = false;
-        bool customdTraceReexecUpdated = false;
-        bool customdSetexecUpdated = false;
-        bool customdPlistUpdated = false;
         bool sbinjectGeneralHookUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
@@ -7480,40 +6795,12 @@ int main(int argc, char *argv[]) {
         if (!install_managed_apt_file(
                 sourceElleKitCompatLoader, @"/var/jb/usr/libexec",
                 @"codex-ellekit-loader", 16 * 1024 * 1024, 0755,
-                "elleKitPerProcessInjector", &elleKitInjectorUpdated,
+                "elleKitInjector", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceExecWorker, @"/var/jb/usr/libexec",
                 @"codex-exec-worker", 16 * 1024 * 1024, 0755,
-                "runtimeExecWorker", &execWorkerUpdated,
-                &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomd, @"/var/jb/usr/libexec", @"customd",
-                16 * 1024 * 1024, 0755, "customdExecutable",
-                &customdUpdated, &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomctl, @"/var/jb/usr/libexec", @"customctl",
-                4 * 1024 * 1024, 0755, "customdControlExecutable",
-                &customctlUpdated, &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomdRegistrar, @"/var/jb/usr/libexec",
-                @"customd-candidate-registrar", 16 * 1024 * 1024, 0755,
-                "customdCandidateRegistrar", &customdRegistrarUpdated,
-                &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomdTraceReexec, @"/var/jb/usr/libexec",
-                @"customd-trace-me-reexec-probe", 16 * 1024 * 1024, 0755,
-                "customdTraceReexecProbe", &customdTraceReexecUpdated,
-                &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomdSetexec, @"/var/jb/usr/libexec",
-                @"customd-springboard-setexec", 16 * 1024 * 1024, 0755,
-                "customdSpringBoardSetexec", &customdSetexecUpdated,
-                &sbinjectPayloadError) ||
-            !install_managed_apt_file(
-                sourceCustomdPlist, @"/var/jb/Library/LaunchDaemons",
-                @"com.openai.customd.plist", 64 * 1024, 0644,
-                "customdLaunchDaemon", &customdPlistUpdated,
+                "runtimeExecWorker", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectGeneralHook, @"/var/jb/usr/lib/sbinject",
@@ -7559,17 +6846,6 @@ int main(int argc, char *argv[]) {
                 &sbinjectPayloadError)) {
             return fail(sbinjectPayloadError, nil);
         }
-        log_message("customdArtifacts executableUpdated=%s "
-                    "controlUpdated=%s registrarUpdated=%s "
-                    "traceReexecUpdated=%s setexecUpdated=%s "
-                    "plistUpdated=%s host=%s",
-                    customdUpdated ? "true" : "false",
-                    customctlUpdated ? "true" : "false",
-                    customdRegistrarUpdated ? "true" : "false",
-                    customdTraceReexecUpdated ? "true" : "false",
-                    customdSetexecUpdated ? "true" : "false",
-                    customdPlistUpdated ? "true" : "false",
-                    [kExecWorkerExecutable UTF8String]);
         bool sbinjectBundleUpdated = false;
         NSString *sbinjectBundleBackup = nil;
         NSString *sbinjectBundleError = nil;
@@ -7633,24 +6909,10 @@ int main(int argc, char *argv[]) {
         log_message("sbinjectExecutionEnvironment=ready mode=jit-rw-to-rx "
                     "interposer=false dynamicTrustCache=false");
 
-        bool unsupportedKernelPackagesRemoved = false;
         NSString *kernelPackageError = nil;
-        if (!repair_unsupported_kernel_packages(
-                &unsupportedKernelPackagesRemoved, &kernelPackageError)) {
+        if (!repair_unsupported_kernel_packages(NULL, &kernelPackageError)) {
             return fail(kernelPackageError, nil);
         }
-
-        char *runtimeSelfTestArguments[] = {
-            (char *)[kExecWorkerExecutable fileSystemRepresentation],
-            "--self-test", NULL};
-        int runtimeSelfTestStatus = run_and_wait(
-            runtimeSelfTestArguments[0], runtimeSelfTestArguments);
-        log_message("sbinjectJITWorkerSelfTestExit=%d", runtimeSelfTestStatus);
-        if (runtimeSelfTestStatus != 0) {
-            return fail(@"on-device SBInject JIT worker self-test failed", nil);
-        }
-        log_message("elleKitInjectionMode=per-process "
-                    "launchdInjection=false pid1Guard=true");
 
         // Repair runs must refresh dpkg's metadata-only maintainer-script copy
         // after the SBInject package policy and broker are refreshed. The
@@ -7936,17 +7198,9 @@ int main(int argc, char *argv[]) {
         manifest[@"SpringBoardTweakAdmission"] =
             @"sbinject-jit-pre-main-no-dynamic-trust-cache";
         manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
-        manifest[@"CustomdExecutable"] = kCustomdExecutable;
-        manifest[@"CustomdControlExecutable"] = kCustomctlExecutable;
-        manifest[@"CustomdCandidateRegistrarExecutable"] =
-            kCustomdRegistrarExecutable;
-        manifest[@"CustomdTraceReexecExecutable"] =
-            kCustomdTraceReexecExecutable;
-        manifest[@"CustomdSpringBoardSetexecExecutable"] =
-            kCustomdSetexecExecutable;
-        manifest[@"CustomdLaunchDaemonPlist"] = kCustomdPlist;
-        manifest[@"CustomdLaunchMode"] =
-            @"system-launchdaemon-persistent-exec-worker";
+        manifest[@"OpenSSHVersion"] = @"9.7p1-1";
+        manifest[@"OpenSSHExecutable"] = kOpenSSHExecutable;
+        manifest[@"OpenSSHLaunchDaemon"] = kOpenSSHPlist;
         manifest[@"SileoRootBrokerPlist"] = kRootBrokerPlist;
         manifest[@"SileoExecutableMode"] =
             @"fixed-trust-adhoc-system-app-with-constructor-broker";
@@ -8016,28 +7270,12 @@ int main(int argc, char *argv[]) {
             return fail(rootBrokerJobError, nil);
         }
 
-        NSString *customdJobError = nil;
-        bool customdRestartRequired =
-            execWorkerUpdated || customdUpdated || customctlUpdated ||
-            customdRegistrarUpdated ||
-            customdTraceReexecUpdated || customdSetexecUpdated ||
-            customdPlistUpdated;
-        if (!install_customd_system_job(
-                sourceExecWorker, sourceCustomd, sourceCustomctl,
-                sourceCustomdRegistrar, sourceCustomdTraceReexec,
-                sourceCustomdSetexec, sourceCustomdPlist,
-                customdRestartRequired,
-                &customdJobError)) {
+        NSString *openSSHJobError = nil;
+        if (!install_openssh_job(&openSSHJobError)) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
-            return fail(customdJobError, nil);
+            return fail(openSSHJobError, nil);
         }
-        log_message("customdReady=true label=%s executable=%s host=%s "
-                    "restartRequired=%s",
-                    [kCustomdLabel UTF8String],
-                    [kCustomdExecutable UTF8String],
-                    [kExecWorkerExecutable UTF8String],
-                    customdRestartRequired ? "true" : "false");
 
         dispatch_queue_t rootBrokerQueue = dispatch_queue_create(
             "com.openai.codex.dopamine.sileo-root-broker",
@@ -8061,21 +7299,17 @@ int main(int argc, char *argv[]) {
         NSString *done = [NSString
             stringWithFormat:
                 @"result=success\nuid=%u\njailbreakRoot=%@\n"
-                 "sileo=%@\nlaunchServicesPath=%@\n"
-                 "customd=system/%@\nuiopenExit=%d\n",
+                 "sileo=%@\nlaunchServicesPath=%@\nuiopenExit=%d\n",
                 geteuid(), destinationProcursus, trustedMain,
-                registeredPath, kCustomdLabel, uiopen_status];
+                registeredPath, uiopen_status];
         if (!write_marker(kDonePath, done)) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
             return fail(@"could not write completion marker", nil);
         }
-        log_message(
-            "result=success jailbreakRoot=%s sileo=%s customd=%s "
-            "customdHost=%s uiopenExit=%d",
-            [destinationProcursus UTF8String], [trustedMain UTF8String],
-            [kCustomdLabel UTF8String], [kExecWorkerExecutable UTF8String],
-            uiopen_status);
+        log_message("result=success jailbreakRoot=%s sileo=%s uiopenExit=%d",
+                    [destinationProcursus UTF8String],
+                    [trustedMain UTF8String], uiopen_status);
         serve_sileo_file_broker(registeredPath, destinationProcursus,
                                 dataContainer);
         __builtin_unreachable();

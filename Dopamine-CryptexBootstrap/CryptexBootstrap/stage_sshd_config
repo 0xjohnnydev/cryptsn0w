@@ -1,0 +1,18 @@
+Port 22222
+ListenAddress 0.0.0.0
+ListenAddress ::
+HostKey /private/var/tmp/codex-stage-ssh/ssh_host_ed25519_key
+PidFile /private/var/tmp/codex-stage-ssh/sshd.pid
+AuthorizedKeysFile /usr/local/share/codex-stage-ssh/authorized_keys
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+StrictModes no
+UsePAM no
+UseDNS no
+PrintMotd no
+PermitUserEnvironment no
+AllowUsers root
+Subsystem sftp internal-sftp

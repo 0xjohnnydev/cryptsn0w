@@ -23,9 +23,8 @@ The launchd hook is inert unless the root-owned
 inside sixty seconds remove that marker and return launchd to the stock
 SpringBoard path.  A failed redirected spawn also falls back immediately.
 
-The dyld signatures and offsets are pinned to the dyld shipped on the target
-iPhone 13 (SHA-256
-`ab9887ed96c9c08ad68d4c6a5c27e8289fb0c9e55ec3e134547292a1ec579608`).
+The dyld bypass locates its two syscall stubs uniquely inside the executable
+segments of the live dyld image. It has no model-specific offset or dyld hash.
 
 ElleKit 1.2 is installed from one pinned, fully ad-hoc-signed package whose
 five Mach-Os are included in the fixed Cryptex trust cache. This is the only

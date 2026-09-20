@@ -17,7 +17,6 @@ from typing import Any
 
 from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
 from pymobiledevice3.services.cryptexd import CryptexdService
-from pymobiledevice3.tunneld.api import get_tunneld_device_by_udid
 
 
 def _json_value(value: Any) -> Any:
@@ -32,9 +31,7 @@ def _json_value(value: Any) -> Any:
     return int(value) if hasattr(value, "__int__") else str(value)
 
 
-async def _capture(
-    udid: str, nonce_domain: int, use_tunneld: bool
-) -> dict[str, Any]:
+async def _capture(udid: str, nonce_domain: int) -> dict[str, Any]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 

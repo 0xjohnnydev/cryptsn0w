@@ -8,9 +8,10 @@ import datetime as dt
 import hashlib
 import json
 import os
-import plistlib
 import re
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -21,50 +22,14 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 UPSTREAM_ROOT = SCRIPT_DIR.parent
-WORKSPACE = UPSTREAM_ROOT.parent
-HELPER_DIR = WORKSPACE / "tools" / "cryptexd-static"
 
 BUILD_SCRIPT = SCRIPT_DIR / "build_cryptex.sh"
 CAPTURE_SCRIPT = SCRIPT_DIR / "capture_device_context.py"
 INSTALL_SCRIPT = SCRIPT_DIR / "install_cryptex_bootstrap.py"
-PERSONALIZE_SCRIPT = HELPER_DIR / "personalize_generic_cryptex1.py"
+PERSONALIZE_SCRIPT = SCRIPT_DIR / "personalize_generic_cryptex1.py"
 BUILD_SUMMARY = SCRIPT_DIR / "out" / "build-summary.json"
-
-SUPPORTED_TARGETS = (
-    {
-        "udid": "00008110-000C542E0EA8201E",
-        "product": "iPhone14,5",
-        "version": "27.0",
-        "build": "24A435",
-    },
-    {
-        "udid": "00008150-0018252C1130C01C",
-        "product": "iPhone18,2",
-        "version": "27.0",
-        "build": "24A435",
-    },
-    {
-        "udid": "00008101-001C39641A9B001E",
-        "product": "iPhone13,1",
-        "version": "27.0",
-        "build": "24A437",
-    },
-)
-SILEO_TRUSTED_EXECUTABLES = (
-    "Sileo",
-    "giveMeRoot",
-    "F/libiosexec.1.dylib",
-    "F/liblzma.5.dylib",
-    "F/libcodex-sileo-broker.dylib",
-    "F/libzstd.1.dylib",
-    "F/libzstd.real.dylib",
-)
+TARGET_BUNDLE_ROOT = SCRIPT_DIR.parents[1] / "build" / "target"
 SYSTEM_SILEO_IDENTIFIER = "org.coolstar.SileoStore"
-SYSTEM_SILEO_URL = (
-    "file:///private/var/containers/Bundle/Application/"
-    "D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app/"
-)
-LEGACY_SILEO_IDENTIFIERS = ("com.lilycohl.sileo27b8",)
 GENERIC_IOS_APP_ICON_SHA256 = (
     "666ac286068bbddb0c83b828ec86f8fd0978cec4f7a4b0cfcc8800182197eb09"
 )
@@ -198,54 +163,15 @@ def system_sileo_record_is_valid(
         and record.get("builtByDeveloper") is False
         and record.get("removable") is False
         and isinstance(url, str)
-        and url == SYSTEM_SILEO_URL
+        and url.endswith("/Sileo.app/")
     )
-
-
-def signal_stale_bootstrap(
-    device: dict[str, str], preinstall_pids: set[int]
-) -> list[int]:
-    if not preinstall_pids:
-        return []
-    current = process_snapshot(device)
-    signaled: list[int] = []
-    for pid in sorted(preinstall_pids):
-        if current.get(pid) != "codex-dopamine-bootstrap":
-            continue
-        command = [
-            "xcrun",
-            "devicectl",
-            "device",
-            "process",
-            "signal",
-            "--device",
-            device["udid"],
-            "--pid",
-            str(pid),
-            "--signal",
-            "15",
-            "--timeout",
-            "20",
-            "--json-output",
-            "-",
-            "--omit-deprecated-fields-in-json",
-        ]
-        capture_json(command, timeout=25)
-        signaled.append(pid)
-    return signaled
 
 
 def verify_and_launch_system_sileo(
     device: dict[str, str],
     expected_version: str,
-    preinstall_bootstrap_pids: set[int],
     icon_output: Path,
 ) -> dict[str, Any]:
-    initial = application_record(device, SYSTEM_SILEO_IDENTIFIER)
-    signaled: list[int] = []
-    if not system_sileo_record_is_valid(initial, expected_version):
-        signaled = signal_stale_bootstrap(device, preinstall_bootstrap_pids)
-
     record: dict[str, Any] | None = None
     deadline = time.monotonic() + 90.0
     while time.monotonic() < deadline:
@@ -345,30 +271,6 @@ def verify_and_launch_system_sileo(
             "Sileo's 60pt @3x icon"
         )
 
-    removed_legacy: list[str] = []
-    for identifier in LEGACY_SILEO_IDENTIFIERS:
-        if application_record(device, identifier) is None:
-            continue
-        capture_json(
-            [
-                "xcrun",
-                "devicectl",
-                "device",
-                "uninstall",
-                "app",
-                "--device",
-                device["udid"],
-                "--timeout",
-                "30",
-                "--json-output",
-                "-",
-                "--omit-deprecated-fields-in-json",
-                identifier,
-            ],
-            timeout=35,
-        )
-        removed_legacy.append(identifier)
-
     return {
         "bundleIdentifier": SYSTEM_SILEO_IDENTIFIER,
         "url": record["url"],
@@ -382,8 +284,6 @@ def verify_and_launch_system_sileo(
             "pixelHeight": pixel_size["height"],
             "placeholder": icon["placeholder"],
         },
-        "staleBootstrapPidsSignaled": signaled,
-        "legacyAppsRemoved": removed_legacy,
     }
 
 
@@ -404,166 +304,43 @@ def require_layout() -> None:
         )
 
 
-def device_version(properties: dict[str, Any]) -> str:
-    value = (
-        properties.get("software", {})
-        .get("osVersionNumber", {})
-        .get("stringValue")
-    )
-    return value if isinstance(value, str) else "unknown"
-
-
-def device_build(properties: dict[str, Any]) -> str:
-    value = (
-        properties.get("software", {})
-        .get("osBuildVersions", {})
-        .get("buildVersion", {})
-        .get("name")
-    )
-    return value if isinstance(value, str) else "unknown"
-
-
 def connected_devices() -> list[dict[str, str]]:
-    command = [
-        "xcrun",
-        "devicectl",
-        "list",
-        "devices",
-        "--timeout",
-        "8",
-        "--quiet",
-        "--json-output",
-        "-",
-        "--omit-deprecated-fields-in-json",
-    ]
     completed = subprocess.run(
-        command,
+        [sys.executable, "-m", "pymobiledevice3", "usbmux", "list"],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=12,
     )
     payload = json.loads(completed.stdout)
-    raw_devices = payload.get("result", {}).get("devices", [])
-    devices: dict[str, dict[str, str]] = {}
-    for raw in raw_devices:
-        properties = raw.get("properties", {})
-        connection = properties.get("connection", {})
-        hardware = properties.get("hardware", {})
-        state = properties.get("state", {})
-        udid = hardware.get("udid")
-        if not (
-            hardware.get("reality") == "physical"
-            and connection.get("pairingState") == "paired"
-            and connection.get("state") == "connected"
-            and isinstance(udid, str)
-            and udid
-        ):
+    if not isinstance(payload, list):
+        raise DeployError("usbmux returned an invalid device list")
+    devices = []
+    for raw in payload:
+        if not isinstance(raw, dict):
             continue
-        devices[udid.casefold()] = {
+        udid = raw.get("UniqueDeviceID") or raw.get("Identifier")
+        product = raw.get("ProductType")
+        if not isinstance(udid, str) or not isinstance(product, str):
+            continue
+        devices.append({
             "udid": udid,
-            "name": state.get("name") or hardware.get("productType") or "iPhone",
-            "model": hardware.get("marketingName") or hardware.get("productType") or "unknown",
-            "product": hardware.get("productType") or "unknown",
-            "version": device_version(properties),
-            "build": device_build(properties),
-            "transport": {
-                "localNetwork": "Wi-Fi",
-                "wired": "USB",
-            }.get(connection.get("transportType"), "connected"),
-        }
-
-    # CoreDevice and usbmux maintain separate pairing state. On SRD-style
-    # configurations CoreDevice may report a USB-attached, lockdown-accessible
-    # phone as disconnected/unpaired even while MobileDevice can use it. The
-    # install path uses pymobiledevice3, so merge its authoritative USB view.
-    usbmux_command = [
-        sys.executable,
-        "-m",
-        "pymobiledevice3",
-        "usbmux",
-        "list",
-    ]
-    try:
-        usbmux_completed = subprocess.run(
-            usbmux_command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=12,
-        )
-        usbmux_payload = json.loads(usbmux_completed.stdout)
-    except (
-        OSError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-    ):
-        usbmux_payload = []
-    if isinstance(usbmux_payload, list):
-        for raw in usbmux_payload:
-            if not isinstance(raw, dict):
-                continue
-            udid = raw.get("UniqueDeviceID") or raw.get("Identifier")
-            connection_type = raw.get("ConnectionType")
-            product = raw.get("ProductType")
-            if not (
-                isinstance(udid, str)
-                and udid
-                and isinstance(product, str)
-                and product
-                and isinstance(connection_type, str)
-                and connection_type.casefold() == "usb"
-            ):
-                continue
-            devices.setdefault(
-                udid.casefold(),
-                {
-                    "udid": udid,
-                    "name": raw.get("DeviceName") or product,
-                    "model": product,
-                    "product": product,
-                    "version": raw.get("ProductVersion") or "unknown",
-                    "build": raw.get("BuildVersion") or "unknown",
-                    "transport": "USB",
-                },
-            )
-    return sorted(devices.values(), key=lambda item: (item["name"], item["udid"]))
-
-
-def is_verified_device(device: dict[str, str]) -> bool:
-    return any(
-        device["udid"].casefold() == target["udid"].casefold()
-        and device["product"] == target["product"]
-        and device["version"] == target["version"]
-        and device["build"] == target["build"]
-        for target in SUPPORTED_TARGETS
-    )
+            "name": str(raw.get("DeviceName") or product),
+            "model": product,
+            "product": product,
+            "version": str(raw.get("ProductVersion") or "unknown"),
+            "build": str(raw.get("BuildVersion") or "unknown"),
+            "transport": str(raw.get("ConnectionType") or "usbmux"),
+        })
+    return devices
 
 
 def configure_target_build_environment(device: dict[str, str]) -> None:
     os.environ.setdefault("CODEX_TARGET_UDID", device["udid"])
+    os.environ["CODEX_TARGET_BUNDLE_ROOT"] = str(TARGET_BUNDLE_ROOT)
 
 
-def supported_target_description() -> str:
-    return ", ".join(
-        f"{target['product']} / iOS {target['version']} "
-        f"({target['build']}) / {target['udid']}"
-        for target in SUPPORTED_TARGETS
-    )
-
-
-def render_device(device: dict[str, str]) -> str:
-    return (
-        f"{device['name']} · {device['model']} · {device['transport']} · "
-        f"{device['product']} / iOS {device['version']} ({device['build']}) · "
-        f"{device['udid']}"
-    )
-
-
-def choose_device(
-    requested: str | None, allow_unverified: bool
-) -> dict[str, str]:
+def choose_device(requested: str | None) -> dict[str, str]:
     devices = connected_devices()
     if requested is not None:
         devices = [
@@ -575,33 +352,83 @@ def choose_device(
             raise DeployError(
                 f"{requested} is not a connected, paired physical Apple device"
             )
-    if not allow_unverified:
-        devices = [device for device in devices if is_verified_device(device)]
     if not devices:
-        qualifier = (
-            "connected, paired physical device"
-            if allow_unverified
-            else f"connected, paired supported device: {supported_target_description()}"
-        )
-        raise DeployError(f"no {qualifier} found")
-    if len(devices) == 1:
-        return devices[0]
-    if not sys.stdin.isatty():
+        raise DeployError("no connected, paired physical Apple device found")
+    if len(devices) != 1:
         raise DeployError("multiple eligible devices found; pass --device UDID")
+    return devices[0]
 
-    note("Eligible devices:")
-    for index, device in enumerate(devices, 1):
-        note(f"  [{index}] {render_device(device)}")
-    while True:
+
+def free_local_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def pull_target_bundles(device: dict[str, str], private_key: Path) -> None:
+    local_port = free_local_port()
+    staging = TARGET_BUNDLE_ROOT.with_name(f".target-{uuid.uuid4().hex}")
+    staging.mkdir(parents=True)
+    forward = subprocess.Popen(
+        [
+            sys.executable, "-m", "pymobiledevice3", "usbmux", "forward",
+            str(local_port), "22222", "--serial", device["udid"],
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    options = [
+        "-i", str(private_key), "-p", str(local_port),
+        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=2",
+        "-o", "ConnectionAttempts=1",
+    ]
+    try:
+        deadline = time.monotonic() + 45.0
+        while True:
+            ready = subprocess.run(
+                ["ssh", *options, "root@127.0.0.1", "true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode == 0
+            if ready or time.monotonic() >= deadline:
+                break
+            time.sleep(1)
+        if not ready:
+            raise DeployError("temporary Cryptex SSH service did not start")
+        scp_options = [
+            "-i", str(private_key), "-P", str(local_port), "-p", "-r",
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        for remote in (
+            "/System/Library/CoreServices/SpringBoard.app",
+            "/Applications/Preferences.app",
+        ):
+            run(["scp", *scp_options, f"root@127.0.0.1:{remote}", str(staging)])
+        if not (staging / "SpringBoard.app" / "SpringBoard").is_file() or not (
+            staging / "Preferences.app" / "Preferences"
+        ).is_file():
+            raise DeployError("device app transfer is incomplete")
+        cleanup = subprocess.run(
+            [
+                "ssh", *options, "root@127.0.0.1",
+                "/usr/local/bin/codex-dopamine-bootstrap --cleanup",
+            ]
+        )
+        if cleanup.returncode != 0:
+            raise DeployError("temporary SSH stage cleanup failed")
+        if TARGET_BUNDLE_ROOT.exists():
+            shutil.rmtree(TARGET_BUNDLE_ROOT)
+        os.replace(staging, TARGET_BUNDLE_ROOT)
+    finally:
+        forward.terminate()
         try:
-            selection = int(input("Select device: ").strip())
-        except (EOFError, KeyboardInterrupt) as error:
-            raise DeployError("device selection cancelled") from error
-        except ValueError:
-            selection = 0
-        if 1 <= selection <= len(devices):
-            return devices[selection - 1]
-        note(f"Enter a number from 1 to {len(devices)}.")
+            forward.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            forward.kill()
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def new_version() -> str:
@@ -628,69 +455,75 @@ def build_pair(version: str | None) -> dict[str, Any]:
     build_summary = read_json(BUILD_SUMMARY)
     if build_summary.get("version") != version:
         raise DeployError("Cryptex build summary version does not match this run")
-    system_app = SCRIPT_DIR / "work" / "image-root" / "Applications" / "Sileo.app"
-    info_path = system_app / "Info.plist"
-    if not info_path.is_file():
-        raise DeployError("Cryptex system Sileo Info.plist is missing")
-    info = plistlib.loads(info_path.read_bytes())
-    if info.get("CFBundleIdentifier") != "org.coolstar.SileoStore":
-        raise DeployError("Cryptex system Sileo does not use its original bundle ID")
-    if info.get("CFBundleVersion") != version:
-        raise DeployError("Cryptex system Sileo bundle version is not build-unique")
-    primary_icon_files = (
-        info.get("CFBundleIcons", {})
-        .get("CFBundlePrimaryIcon", {})
-        .get("CFBundleIconFiles")
-    )
-    if (
-        primary_icon_files != ["AppIcon60x60"]
-        or info.get("CFBundleIconFiles") != ["AppIcon60x60"]
-        or not (system_app / "Assets.car").is_file()
-        or not (system_app / "AppIcon60x60@2x.png").is_file()
-        or not (system_app / "AppIcon60x60@3x.png").is_file()
-        or not (system_app / "CodexSystemEntitlements.plist").is_file()
-    ):
-        raise DeployError("Cryptex system Sileo icon metadata is incomplete")
-    if (system_app / "embedded.mobileprovision").exists():
-        raise DeployError("Cryptex system Sileo unexpectedly has a provisioning profile")
-
-    fixed_trust = build_summary.get("inputs", {}).get("sileoFixedTrust", {})
-    if (
-        fixed_trust.get("installMode") != "cryptex-system-app"
-        or fixed_trust.get("bundleIdentifier") != "org.coolstar.SileoStore"
-        or fixed_trust.get("provisioningProfile") is not False
-    ):
-        raise DeployError("build summary does not describe fixed-trust system Sileo")
-    executable_hashes: dict[str, str] = {}
-    for relative_path in SILEO_TRUSTED_EXECUTABLES:
-        path = system_app / relative_path
-        if not path.is_file():
-            raise DeployError(f"missing Cryptex Sileo executable {relative_path}")
-        executable_hashes[relative_path] = sha256_file(path)
-    summarized = {
-        Path(item["path"]).relative_to(system_app).as_posix(): item["sha256"]
-        for item in fixed_trust.get("machOs", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("path"), str)
-        and isinstance(item.get("sha256"), str)
-        and Path(item["path"]).is_relative_to(system_app)
-    }
-    if summarized != executable_hashes:
-        raise DeployError("Cryptex Sileo executable hashes do not match the summary")
-
     result = {
         "identifier": build_summary["identifier"],
         "version": version,
         "unsignedBundle": build_summary["bundle"],
         "buildSummary": str(BUILD_SUMMARY.resolve()),
-        "sileoSystemApp": str(system_app.resolve()),
-        "sileoBundleIdentifier": "org.coolstar.SileoStore",
-        "sileoProvisioningProfile": False,
-        "sileoFixedTrustExecutables": executable_hashes,
     }
-    note("Fixed-trust system Sileo build verification passed")
+    note("Final Cryptex build completed")
     print(json.dumps(result, indent=2, sort_keys=True))
     return result
+
+
+def capture_context(device: dict[str, str], output: Path) -> None:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def personalize(build: dict[str, Any], context: Path, output: Path) -> Path:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def install_cryptex(
+    build: dict[str, Any], bundle: Path, device: dict[str, str], result: Path
+) -> dict[str, Any]:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def build_ssh_stage(version: str, public_key: Path) -> dict[str, Any]:
+    summary_path = SCRIPT_DIR / "out" / "ssh-stage" / "build-summary.json"
+    env = os.environ.copy()
+    env.update({
+        "CODEX_CRYPTEX_STAGE": "ssh",
+        "CODEX_CRYPTEX_VERSION": version,
+        "CODEX_STAGE_AUTHORIZED_KEY": str(public_key),
+    })
+    run([str(BUILD_SCRIPT)], env=env)
+    summary = read_json(summary_path)
+    return {
+        "identifier": summary["identifier"],
+        "version": version,
+        "unsignedBundle": summary["bundle"],
+        "buildSummary": str(summary_path.resolve()),
+    }
+
+
+def reboot_into_ssh_stage(device: dict[str, str]) -> None:
+    capture_json([
+        "xcrun", "devicectl", "device", "reboot", "--device", device["udid"],
+        "--style", "full", "--timeout", "20",
+        "--json-output", "-", "--omit-deprecated-fields-in-json",
+    ], timeout=25)
+    disconnected = False
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        try:
+            present = any(
+                item["udid"].casefold() == device["udid"].casefold()
+                for item in connected_devices()
+            )
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            present = False
+        disconnected |= not present
+        if disconnected and present:
+            break
+        time.sleep(2)
+    else:
+        raise DeployError("device did not return after the stage reboot")
+    time.sleep(5)
 
 
 def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, Any]:
@@ -701,34 +534,21 @@ def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("build", "install"))
-    parser.add_argument("--device", help="target UDID; auto-selects when exactly one matches")
-    parser.add_argument(
-        "--allow-unverified-device",
-        action="store_true",
-        help=(
-            "allow a connected paired physical device other than the validated "
-            f"targets: {supported_target_description()}"
-        ),
-    )
-    parser.add_argument(
-        "--no-replace",
-        action="store_true",
-        help="refuse rather than replace one older build of this non-Apple Cryptex",
-    )
+    parser.add_argument("--device", help="target UDID; optional with one device")
     parser.add_argument(
         "--cryptex-version",
         help="fresh numeric dot-separated version (generated automatically by default)",
     )
     args = parser.parse_args()
+    if getattr(args, "action", None) in ("install", "resume"):
+        raise DeployError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
     if args.action == "build":
         build_pair(args.cryptex_version)
         return 0
 
-    device = choose_device(args.device, args.allow_unverified_device)
+    device = choose_device(args.device)
     configure_target_build_environment(device)
-    if not is_verified_device(device):
-        note("WARNING: continuing on a device outside the validated target matrix")
     install_pair(args, device)
     return 0
 

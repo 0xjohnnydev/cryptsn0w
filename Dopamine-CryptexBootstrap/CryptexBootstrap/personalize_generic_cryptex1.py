@@ -8,47 +8,79 @@ if __name__ == "__main__":
 
 
 import argparse
-import asyncio
+import copy
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
-from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 # [REDACTED] Related personalization helper imports omitted.
+import requests
+
 # [REDACTED] TSS request dependency import omitted.
 # [REDACTED] Related personalization helper imports omitted.
 
 
-PERSONALIZED_COMPONENTS = None  # [REDACTED] Flow-specific parameters omitted.
+SIGNED_COMPONENTS = None  # [REDACTED] Flow-specific parameters omitted.
+UNSIGNED_COMPONENT = None  # [REDACTED] Flow-specific parameters omitted.
 
 
-def parse_args() -> argparse.Namespace:
+def _json_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"$hex": value.hex()}
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _parse_tss_envelope(
+    content: bytes,
+) -> tuple[int | None, str | None, bytes | None]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-def load_bundle(bundle: Path) -> tuple[Path, dict[str, Any], dict[str, bytes]]:
+def _send(
+    request: dict[str, Any],
+) -> tuple[requests.Response, int | None, str | None, dict[str, Any] | None]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-def request_dictionary(
-    identity: dict[str, Any], chip: dict[str, Any], nonce: bytes
-) -> dict[str, Any]:
+def _restore_dir(path: Path) -> tuple[Path, Path]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-def properties(identity: dict[str, Any]) -> dict[str, Any]:
+def _identity(manifest: dict[str, Any]) -> dict[str, Any]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-async def run(args: argparse.Namespace) -> int:
+def _component_digests(restore_dir: Path, identity: dict[str, Any]) -> dict[str, bytes]:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def _property_dict(properties: Any) -> dict[str, Any]:
+    # [REDACTED] Related request, payload, or installation helper omitted.
+    raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
+
+
+def _ticket_checks(
+    ticket: bytes,
+    identity: dict[str, Any],
+    chip: dict[str, Any],
+    nonce: bytes,
+    digests: dict[str, bytes],
+) -> dict[str, bool]:
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
