@@ -23,8 +23,9 @@ The launchd hook is inert unless the root-owned
 inside sixty seconds remove that marker and return launchd to the stock
 SpringBoard path.  A failed redirected spawn also falls back immediately.
 
-The dyld bypass locates its two syscall stubs uniquely inside the executable
-segments of the live dyld image. It has no model-specific offset or dyld hash.
+The dyld bypass locates its two syscall stubs uniquely in the live dyld image
+using the supplied SBInject signature scan. It has no model-specific offset or
+dyld hash.
 
 ElleKit 1.2 is installed from one pinned, fully ad-hoc-signed package whose
 five Mach-Os are included in the fixed Cryptex trust cache. This is the only
@@ -36,6 +37,8 @@ rootless `/var/jb` layout), identifies dylibs in the standard rootless tweak
 directories, requires this SBInject lane to be ready, and marks a respring. The
 debugged replacement SpringBoard and its dyld bypass provide the sole admission
 path for the ad-hoc signed third-party tweak dylibs ElleKit loads.
+PreferenceLoader, libprefs, and installed preference bundles use that same
+Sileo-managed JIT/dyld lane and are not added to the fixed trust cache.
 
 Sileo itself is fixed control-plane code, not an incoming package exception.
 Its main executable, helper, uniquely named broker constructor, and bundled

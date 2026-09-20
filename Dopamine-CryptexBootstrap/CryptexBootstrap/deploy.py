@@ -603,6 +603,9 @@ def finish_install(
     stage_install: Path,
     enable_host_ssh: bool,
 ) -> dict[str, Any]:
+    # Resume is intentionally idempotent: a prior final build/install failure
+    # may leave generated context and personalization outputs in this run.
+    # Device-pulled target bundles and the installed stage/key remain valid.
     # [REDACTED] Related request, payload, or installation helper omitted.
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
