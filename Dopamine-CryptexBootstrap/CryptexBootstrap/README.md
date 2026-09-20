@@ -1,10 +1,11 @@
 # Dopamine 3.x generic-Cryptex bootstrap lane
 
 This directory adapts opa334's Dopamine 3.x Procursus/Sileo bootstrap to the
-generic Cryptex1 path demonstrated on iPhone18,2 / 24A435 and iPhone13,1
-(iPhone 12 mini) / 24A437. It supplies a generic Cryptex1 trust cache, a managed
-rootless Procursus tree, the Sileo root broker, a fixed runtime-admission worker,
-and a provisioned Sileo app.
+generic Cryptex1 path for iPhone18,2 / 24A435, iPhone14,5 (iPhone 13) / 24A435,
+and iPhone13,1 (iPhone 12 mini) / 24A437. It supplies a managed rootless
+Procursus tree, provisioned Sileo, and the fixed SBInject control plane. The
+Cryptex trust cache covers only fixed bootstrap/control-plane artifacts; Sileo
+package payloads never enter a post-boot or per-package trust-cache path.
 
 ## Working layout
 
@@ -14,7 +15,9 @@ The device has two deliberately separate pieces:
    active preboot UUID. `prep_bootstrap.sh` and opa334's bundled Sileo package
    are installed there once. A later Cryptex version enters repair mode only
    when the symlink target and rollback manifest exactly match this installer.
-2. `org.coolstar.SileoStore` is a normal Apple Development-provisioned app.
+2. Sileo is a normal Apple Development-provisioned app. The attached iPhone
+   13 target uses `com.lilycohl.sileo27b8`, matching its installed profile;
+   other targets retain their configured bundle identifier.
    Its three non-system pre-main dependencies (`liblzma`, `libzstd`, and
    `libiosexec`) are signed by the same team and bundled under `Sileo.app/F`.
    The app's `/opt/procursus/lib` rpath is changed to `@loader_path/F`.
@@ -63,9 +66,9 @@ the required order automatically:
    requesting a persistent install and replacing at most one older copy of this
    non-Apple Cryptex.
 
-The default device guard permits only paired physical iPhone18,2 / iOS 27.0
-(24A435) and iPhone13,1 / iOS 27.0 (24A437) targets. Pass `--device UDID` when
-more than one eligible device is attached. The explicit
+The default device guard permits paired physical iPhone18,2 and iPhone14,5 /
+iOS 27.0 (24A435), plus iPhone13,1 / iOS 27.0 (24A437), targets. Pass `--device
+UDID` when more than one eligible device is attached. The explicit
 `--allow-unverified-device` escape hatch is available for reviewed porting work.
 
 The host-only forms are:
@@ -81,7 +84,8 @@ transport.
 ## Signing
 
 Signing is automatic when Xcode has installed a valid development certificate
-and profile compatible with `org.coolstar.SileoStore`. The selector verifies
+and profile compatible with the target's configured Sileo bundle identifier.
+The selector verifies
 the profile is unexpired, includes `get-task-allow`, contains the installed
 certificate, and covers the bundle identifier. It derives the minimal app
 entitlements from that profile rather than checking in machine-specific team
@@ -120,19 +124,23 @@ and records the development identity/profile hashes in
 `out/build-summary.json`. Per-run app, personalization, validation, and install
 summaries are written under the ignored `CryptexBootstrap/out` tree.
 
-The build also derives a dormant SpringBoard replacement candidate from the
-pinned 24A437 arm64e executable. `Scripts/build_springboard_candidate.py`
+The build derives the SBInject SpringBoard replacement from the pinned 24A435
+iPhone 13 arm64e executable. `Scripts/build_springboard_candidate.py`
 checks its SHA-256, UUID, and `com.apple.springboard` identifier; preserves its
 original entitlement dictionary; adds the explicitly configured debugger/JIT
 policy; regenerates XML and DER entitlement slots; and proves the ad-hoc output
-is deterministic. The static trust cache includes that fixed candidate and the
-installer copies it, without launching it, to
-`/var/jb/usr/libexec/codex-springboard-candidate/SpringBoard`. An alternate
-source path can be supplied with `CODEX_SPRINGBOARD_CANDIDATE_SOURCE`, but it
-must still match the pinned exact-build identity.
+is deterministic. Its otherwise-unused `LC_RPATH` is converted to
+`LC_LOAD_DYLIB @loader_path/g`, allowing the fixed pre-main general hook to run
+before SpringBoard initializes. The installer places the preserved bundle at
+`/var/jb/System/Library/CoreServices/SpringBoard.app` with executable
+`notSpringBoard`. Alternate source paths can be supplied with the
+`CODEX_SPRINGBOARD_CANDIDATE_*` variables, but the executable must still match
+the pinned exact-build identity.
 
-The root installer performs a non-mutating `apt-get check` before launching
-Sileo. Treat `aptDependencyCheckExit=0`, `sileoSystemRootBrokerReady=true`,
+The root installer refreshes the complete signed APT source set and performs a
+non-mutating `apt-get check` before launching Sileo. Treat
+`aptUpdateExit=0`, `aptDependencyCheckExit=0`,
+`sileoSystemRootBrokerReady=true`,
 `root broker preflight complete`, and `result=success` as the acceptance
 gates for the complete package-index and broker path.
 
@@ -141,55 +149,53 @@ The stock Procursus archive includes the chain
 detects that dormant package chain and removes it only after checking that no
 package outside the exact removal set depends on it.
 
-The installer requests cryptexd's persistent DDI settings. The latest recorded
-iPhone 12 mini install completed with `persistence=2` and
-`noncePersistence=1`. A subsequent full reboot remounted the exact build and
-started the daemon, Sileo, and root broker. The broker replayed the nonce-bound
-runtime trust journal before starting its injection lanes.
-
-## Latest iPhone 12 mini acceptance
-
-Cryptex version `1.0.20260916131317.993376` installed successfully with a
-validated 459-entry trust cache whose SHA-256 is
-`4c8d76c52cfc0d111ce17e1b7ee9c0db12382b11ab34882a46965dc888db4c19`.
-Its corrected trust-cached loader reproduced hookd's `RW|COPY -> write -> RX`
-sequence on the device, verified effective protection `0x5`, and called the
-generated function for return value 42. The final trusted ElleKit injection
-into SpringBoard returned status 0, and the injector heartbeat reports
-`safeMode=false`. PID 1 remains excluded by explicit guards.
-
-BrokerProbe 1.0.18 then passed the post-boot dynamic-trust path. The broker
-generated a three-entry cache from the incoming archive, personalized the
-complete `gtcd` IM4P with the persisted Generic Cryptex1 nonce, and loaded it
-through AMFI with status 0 before `dpkg` unpack. The new arm64e dylib was absent
-from the static cache; direct loading into stable SpringBoard PID 1751 returned
-0, dyld image verification passed, and its constructor emitted a PID-matched
-marker. SpringBoard remained alive, no new crash appeared, heartbeats stayed
-`safeMode=false`, and PID 1 remained excluded. See
-[`iphone12mini-postboot-dynamic-trust-20260916.md`](../../findings/iphone12mini-postboot-dynamic-trust-20260916.md)
-for the exact results and hashes.
-
-The accepted personalized cache is also persisted only after AMFI returns 0.
-Entries are kept under a root-owned, mode-0700 journal epoch derived from the
-persisted nonce, named by SHA-256, and validated for ownership, link count,
-permissions, size, and digest before replay. On the clean-reboot pass, the first
-pre-replay BrokerProbe load failed, journal replay returned 0, and BrokerProbe's
-constructor then ran in new SpringBoard PID 37. The dylib CDHash remained absent
-from the static cache and the post-boot log contained no new TSS request. See
-[`iphone12mini-clean-reboot-runtime-trust-20260916.md`](../../findings/iphone12mini-clean-reboot-runtime-trust-20260916.md).
-
 ## Runtime model
 
-The runtime consists of the managed Procursus tree, provisioned Sileo app, root
-broker, a fixed interposer/debugger-softened worker, and a static Cryptex trust
-cache for the stable infrastructure. Direct executable launches are attempted
-first; non-baseline/admission-failing package Mach-Os are routed through the
-fixed worker's bounded `--macho` path. Rebuild and repersonalize when the fixed
-trusted infrastructure or baseline changes, not once per package payload. Full
-Mach-O compatibility remains explicit acceptance work rather than proven
-transparent system-wide `execve` behavior. New package dylibs with structurally
-valid Apple ad-hoc CodeDirectories can now take the post-boot `gtcd` path;
-completely unsigned or malformed files cannot.
+The SpringBoard path is entirely SBInject. A fixed launchd hook redirects only
+the stock SpringBoard spawn to `notSpringBoard`. Its pre-main hook synchronously
+asks the root `sbinject-jitterd` Mach service to attach/detach the exact calling
+PID, which grants the debugged/JIT state. The hook then verifies the pinned dyld
+signatures, changes only the target pages from `RW|COPY` back to `RX`, installs
+the supplied mmap/fcntl validation bypass, and loads ElleKit before SpringBoard
+main. No writable-and-executable mapping is requested.
+
+Sileo's fixed root broker prefetches the resolved archives, invokes the same
+`sbinject-package-validator` logic directly, and only then launches APT with
+Sileo's original no-download transaction. This broker-native step is required
+because rootless APT hardcodes the nonexistent `/bin/sh` when launching a
+`DPkg::Pre-Install-Pkgs` command and otherwise exits with its own code 100
+before the validator starts. The broker extracts each incoming archive into a
+bounded temporary directory, classifies standard rootless tweak dylibs,
+recognizes ElleKit's injector in the same dependency transaction, and creates
+a root-owned respring marker. After a successful `apt`, `apt-get`, or `dpkg`
+transaction, the broker activates the SBInject replacement if SpringBoard is
+still stock, or restarts the active replacement once, so ElleKit discovers the
+new tweak. ElleKit 1.2 is the sole fixed-trust package exception: the build
+pins its upstream archive, ad-hoc signs every arm64/arm64e Mach-O while
+preserving the loader entitlements, embeds the repacked `.deb`, and places the
+same cdhashes in the Cryptex trust cache. The bootstrap installs that exact
+package before activating SBInject, so Sileo sees the dependency as satisfied
+and the pre-main hook always has `libinjector.dylib` available. No third-party
+tweak package is embedded or re-signed. Mixed tweak packages may also carry
+preference bundles or helper Mach-Os, but those extra executables receive no
+implied fixed-trust admission.
+
+There is no runtime trust-cache helper, TSS request, cache journal, replay verb,
+or package fallback. The fixed Cryptex trust cache contains the pinned ElleKit
+exception and the bootstrap control plane only; it is never extended from a
+Sileo transaction. A repair install removes the legacy APT hook, helper,
+client, dyld-admission library, execution interposer, admission baselines, and
+journal before package work begins. If
+SBInject is unavailable, SpringBoard tweak installation fails closed instead of
+silently switching back to dynamic trust. Launch failures fall back to stock
+SpringBoard; three replacement launches in sixty seconds disable redirection,
+and `/var/mobile/.eksafemode` always selects stock SpringBoard.
+
+For an explicitly destructive replacement of this installer's managed root,
+set `CODEX_FORCE_CLEAN_INSTALL=1` for the build/install run. The installer
+validates the `/var/jb` symlink, rollback manifest, active preboot parent, and
+root ownership before atomically staging and deleting only its own old root.
+It then creates a fresh randomized root containing the new SBInject bootstrap.
 
 Sileo's Featured cards can reference optional repositories in addition to the
 standard Procursus, Chariz, Havoc, BigBoss, and ElleKit set. Add the card's

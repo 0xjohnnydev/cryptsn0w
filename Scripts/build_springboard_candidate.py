@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and verify the pinned iOS 27 SpringBoard replacement candidate.
+"""Build and verify the pinned iPhone 13/iOS 27 SpringBoard replacement.
 
 This is deliberately a local-only operation.  It copies the exact extracted
 SpringBoard executable, merges the requested debugging/runtime-code policy
@@ -164,9 +164,21 @@ def sign_candidate(
     source: pathlib.Path,
     destination: pathlib.Path,
     entitlement_path: pathlib.Path,
+    *,
+    load_dylib: str | None,
+    load_dylib_patcher: pathlib.Path | None,
 ) -> None:
     shutil.copyfile(source, destination)
     destination.chmod(0o755)
+    if load_dylib is not None:
+        if load_dylib_patcher is None:
+            raise BuildError("--load-dylib requires --load-dylib-patcher")
+        run(
+            os.fspath(pathlib.Path(os.sys.executable)),
+            os.fspath(load_dylib_patcher),
+            os.fspath(destination),
+            load_dylib,
+        )
     run(
         "codesign",
         "--force",
@@ -193,14 +205,57 @@ def main() -> int:
         "--info-plist",
         type=pathlib.Path,
         help=(
-            "exact live 24A437 SpringBoard.app Info.plist to validate and "
-            "copy byte-for-byte beside the candidate"
+            "exact live 24A435 SpringBoard.app Info.plist to validate and "
+            "write beside the candidate"
         ),
+    )
+    parser.add_argument(
+        "--executable-name",
+        default="SpringBoard",
+        help="output executable basename (default: SpringBoard)",
+    )
+    parser.add_argument(
+        "--bundle-executable",
+        help="replacement CFBundleExecutable value for the emitted Info.plist",
+    )
+    parser.add_argument(
+        "--load-dylib",
+        help="absolute LC_LOAD_DYLIB path added before the deterministic signature",
+    )
+    parser.add_argument(
+        "--load-dylib-patcher",
+        type=pathlib.Path,
+        help="path to the pinned patch_load_dylib.py implementation",
     )
     arguments = parser.parse_args()
 
     source = arguments.source.resolve()
     output_directory = arguments.output_directory.resolve()
+    if (
+        pathlib.PurePath(arguments.executable_name).name
+        != arguments.executable_name
+        or arguments.executable_name in {"", ".", ".."}
+    ):
+        raise BuildError("executable name must be a basename")
+    if arguments.bundle_executable is not None and (
+        pathlib.PurePath(arguments.bundle_executable).name
+        != arguments.bundle_executable
+        or arguments.bundle_executable in {"", ".", ".."}
+    ):
+        raise BuildError("bundle executable must be a basename")
+    if arguments.load_dylib is not None and (
+        (
+            not arguments.load_dylib.startswith("/")
+            and not arguments.load_dylib.startswith("@loader_path/")
+        )
+        or "\0" in arguments.load_dylib
+    ):
+        raise BuildError("load dylib must be absolute or use @loader_path")
+    load_dylib_patcher = None
+    if arguments.load_dylib_patcher is not None:
+        load_dylib_patcher = arguments.load_dylib_patcher.resolve()
+        if not load_dylib_patcher.is_file():
+            raise BuildError(f"load-command patcher is missing: {load_dylib_patcher}")
     if not source.is_file():
         raise BuildError(f"SpringBoard source is missing: {source}")
     if sha256(source) != EXPECTED_SOURCE_SHA256:
@@ -244,16 +299,30 @@ def main() -> int:
     ) as temporary_directory_string:
         temporary_directory = pathlib.Path(temporary_directory_string)
         entitlement_path = temporary_directory / "entitlements.plist"
-        candidate_path = temporary_directory / "SpringBoard"
-        second_candidate_path = temporary_directory / "SpringBoard.determinism-check"
+        candidate_path = temporary_directory / arguments.executable_name
+        second_candidate_path = temporary_directory / (
+            arguments.executable_name + ".determinism-check"
+        )
         info_path = temporary_directory / "Info.plist"
 
         entitlement_path.write_bytes(
             plistlib.dumps(merged_entitlements, fmt=plistlib.FMT_XML, sort_keys=False)
         )
         entitlement_path.chmod(0o644)
-        sign_candidate(source, candidate_path, entitlement_path)
-        sign_candidate(source, second_candidate_path, entitlement_path)
+        sign_candidate(
+            source,
+            candidate_path,
+            entitlement_path,
+            load_dylib=arguments.load_dylib,
+            load_dylib_patcher=load_dylib_patcher,
+        )
+        sign_candidate(
+            source,
+            second_candidate_path,
+            entitlement_path,
+            load_dylib=arguments.load_dylib,
+            load_dylib_patcher=load_dylib_patcher,
+        )
         deterministic = candidate_path.read_bytes() == second_candidate_path.read_bytes()
         if not deterministic:
             raise BuildError("the ad-hoc signing recipe produced different binaries")
@@ -290,7 +359,7 @@ def main() -> int:
                 f"missingOrChanged={missing_or_changed} unexpected={unexpected}"
             )
 
-        final_candidate = output_directory / "SpringBoard"
+        final_candidate = output_directory / arguments.executable_name
         final_entitlements = output_directory / "entitlements.plist"
         final_info = output_directory / "Info.plist"
         manifest_path = output_directory / "build-manifest.json"
@@ -314,6 +383,7 @@ def main() -> int:
                 ),
             },
             "identifier": EXPECTED_IDENTIFIER,
+            "loadDylib": arguments.load_dylib,
             "source": {
                 "cdhash": source_details.get("CDHash", ""),
                 "entitlementCount": len(original_entitlements),
@@ -323,15 +393,24 @@ def main() -> int:
             "uuid": candidate_uuid,
         }
         if info_source is not None and info_value is not None:
-            shutil.copyfile(info_source, info_path)
+            emitted_info = dict(info_value)
+            if arguments.bundle_executable is not None:
+                emitted_info["CFBundleExecutable"] = arguments.bundle_executable
+            info_path.write_bytes(
+                plistlib.dumps(
+                    emitted_info,
+                    fmt=plistlib.FMT_BINARY,
+                    sort_keys=False,
+                )
+            )
             info_path.chmod(0o644)
-            if sha256(info_path) != EXPECTED_INFO_SHA256:
-                raise BuildError("SpringBoard Info.plist changed during local copy")
             manifest["bundleInfo"] = {
                 "dtPlatformBuild": info_value.get("DTPlatformBuild", ""),
+                "executable": emitted_info.get("CFBundleExecutable", ""),
                 "path": str(final_info),
-                "sha256": EXPECTED_INFO_SHA256,
+                "sha256": sha256(info_path),
                 "source": str(info_source),
+                "sourceSha256": EXPECTED_INFO_SHA256,
             }
         manifest_path_temporary = temporary_directory / "build-manifest.json"
         manifest_path_temporary.write_text(

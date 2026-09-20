@@ -31,17 +31,14 @@ extern int posix_spawnattr_set_ptrauth_task_port_np(
 
 static const char *const kDefaultDylib =
     "/var/jb/usr/lib/ellekit/libinjector.dylib";
-static const char *const kDyldJBAdmissionHook =
-    "/var/jb/usr/lib/codex-dyld-jb-admission-hook.dylib";
-static const char *const kSpringBoardLiveCanary =
-    "/var/jb/usr/lib/codex-springboard-live-canary.dylib";
+static const char *const kSBInjectLaunchdHook =
+    "/var/jb/usr/lib/sbinject/launchdhook.dylib";
 static const char *const kPtrauthChild = "--ptrauth-child";
 static const char *const kInspectPid = "--inspect-pid";
 static const char *const kPreflightPid = "--preflight-pid";
 static const char *const kCheckPidImage = "--check-pid-image";
 static const char *const kInjectPid = "--inject-pid";
-static const char *const kInjectPidPairGated =
-    "--inject-pid-pair-gated";
+static const char *const kInjectLaunchdHook = "--inject-launchd-hook";
 static const char *const kPageProbePid = "--page-probe-pid";
 
 #define CODEX_PT_DETACH 11
@@ -67,17 +64,16 @@ static const char *const kPageProbePid = "--page-probe-pid";
 #define CODEX_IMAGE_READY_DELAY_USEC 1000U
 
 static const char *const kSpringBoardCandidatePath =
-    "/var/jb/usr/libexec/codex-springboard-candidate/"
-    "SpringBoard.app/SpringBoard";
+    "/var/jb/System/Library/CoreServices/SpringBoard.app/notSpringBoard";
 static const uint8_t kSpringBoardCandidateCDHash[CODEX_CDHASH_SIZE] = {
-    0x9b, 0x29, 0x8e, 0x84, 0x6a, 0xb9, 0x1a, 0xaa, 0x1f, 0xba,
-    0x30, 0x3f, 0x2c, 0x89, 0x2d, 0x82, 0x8e, 0x9e, 0x92, 0x1c,
+    0xca, 0x63, 0x0b, 0x4f, 0xcd, 0xe8, 0x4f, 0xf2, 0x04, 0x09,
+    0x5b, 0x9b, 0xb1, 0x41, 0xea, 0x05, 0xfc, 0x21, 0xf5, 0xf1,
 };
 static const uint8_t kSpringBoardCandidateSHA256[CODEX_SHA256_SIZE] = {
-    0x73, 0xa2, 0xcc, 0xc2, 0x7f, 0x94, 0xec, 0xc3,
-    0x52, 0x66, 0x02, 0x9d, 0xf8, 0x2d, 0x12, 0xca,
-    0x7e, 0xb0, 0xf2, 0x7f, 0xf5, 0xf2, 0xe0, 0x47,
-    0xbc, 0x9e, 0xa3, 0x56, 0x81, 0x87, 0x71, 0x26,
+    0xa7, 0x7e, 0xf6, 0xb5, 0x9a, 0x53, 0xb1, 0x93,
+    0xcd, 0xc2, 0x98, 0x6e, 0x43, 0x4b, 0x25, 0xec,
+    0x31, 0x02, 0x5a, 0x6a, 0x35, 0x6e, 0x6b, 0xf1,
+    0xb9, 0xc5, 0x9d, 0x0a, 0x72, 0xb5, 0x58, 0x08,
 };
 static const uint8_t kSpringBoardUUID[16] = {
     0xad, 0x93, 0x7f, 0xb7, 0x26, 0x64, 0x3b, 0x8f,
@@ -781,6 +777,18 @@ static bool read_supported_target(pid_t pid, char path[PATH_MAX]) {
            exact_springboard_candidate(pid, path);
 }
 
+static bool read_exact_launchd_target(pid_t pid, char path[PATH_MAX]) {
+    path[0] = '\0';
+    struct codex_proc_bsdinfo information = {0};
+    if (pid != 1 || proc_pidpath(pid, path, PATH_MAX) <= 0 ||
+        !copy_bsd_info(pid, &information) || information.pbi_uid != 0 ||
+        information.pbi_ppid != 0) {
+        return false;
+    }
+    const char *leaf = strrchr(path, '/');
+    return strcmp(leaf != NULL ? leaf + 1 : path, "launchd") == 0;
+}
+
 static bool wait_for_trace_stop(pid_t pid, int *status) {
     for (unsigned int attempt = 0; attempt < CODEX_WAIT_ATTEMPTS; ++attempt) {
         errno = 0;
@@ -1058,18 +1066,16 @@ finished:
     return status;
 }
 
-static bool path_is_fixed_dyld_hook(const char *resolvedPath) {
+static bool path_is_fixed_sbinject_launchd_hook(const char *resolvedPath) {
     char fixedPath[PATH_MAX] = {0};
+    struct stat status = {0};
     return resolvedPath != NULL &&
-           realpath(kDyldJBAdmissionHook, fixedPath) != NULL &&
-           strcmp(resolvedPath, fixedPath) == 0;
-}
-
-static bool path_is_fixed_live_canary(const char *resolvedPath) {
-    char fixedPath[PATH_MAX] = {0};
-    return resolvedPath != NULL &&
-           realpath(kSpringBoardLiveCanary, fixedPath) != NULL &&
-           strcmp(resolvedPath, fixedPath) == 0;
+           realpath(kSBInjectLaunchdHook, fixedPath) != NULL &&
+           strcmp(resolvedPath, fixedPath) == 0 &&
+           lstat(fixedPath, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
 static bool parse_pipe_descriptor(const char *text, bool requireWrite,
@@ -1539,44 +1545,32 @@ int main(int argc, char *argv[]) {
                              strcmp(argv[1], kCheckPidImage) == 0;
         bool injectPid = userArgumentCount == 4 &&
                          strcmp(argv[1], kInjectPid) == 0;
-        bool injectPidPairGated =
-            userArgumentCount == 7 &&
-            strcmp(argv[1], kInjectPidPairGated) == 0;
+        bool injectLaunchdHook =
+            userArgumentCount == 2 &&
+            strcmp(argv[1], kInjectLaunchdHook) == 0;
         bool pageProbePid = userArgumentCount == 3 &&
                             strcmp(argv[1], kPageProbePid) == 0;
         if (!inspectOnly && !preflightOnly && !checkPidImage && !injectPid &&
-            !injectPidPairGated && !pageProbePid) {
+            !injectLaunchdHook && !pageProbePid) {
             fprintf(stderr,
                     "usage: %s --inspect-pid pid|--preflight-pid pid|"
                     "--check-pid-image pid absolute-image-path|"
                     "--inject-pid pid absolute-dylib-path|"
-                    "--inject-pid-pair-gated pid hook-path canary-path "
-                    "ready-fd release-fd|"
+                    "--inject-launchd-hook|"
                     "--page-probe-pid pid\n",
                     argv[0]);
             return 64;
         }
-        if (injectPidPairGated && !isPtrauthChild) {
-            fprintf(stderr,
-                    "compat-loader: gated pair requires ptrauth child mode\n");
-            return 64;
-        }
-        bool dylibOperation = checkPidImage || injectPid || injectPidPairGated;
-        const char *requestedPath =
-            dylibOperation ? argv[3] : kDefaultDylib;
-        const char *secondRequestedPath =
-            injectPidPairGated ? argv[4] : NULL;
+        bool dylibOperation = checkPidImage || injectPid || injectLaunchdHook;
+        const char *requestedPath = injectLaunchdHook
+                                        ? kSBInjectLaunchdHook
+                                        : (dylibOperation ? argv[3]
+                                                          : kDefaultDylib);
         if (dylibOperation && requestedPath[0] != '/') {
             fprintf(stderr, "compat-loader: dylib path must be absolute\n");
             return 65;
         }
-        if (secondRequestedPath != NULL && secondRequestedPath[0] != '/') {
-            fprintf(stderr,
-                    "compat-loader: second dylib path must be absolute\n");
-            return 65;
-        }
         char resolvedPath[PATH_MAX] = {0};
-        char secondResolvedPath[PATH_MAX] = {0};
         if (dylibOperation &&
             (realpath(requestedPath, resolvedPath) == NULL ||
              access(resolvedPath, R_OK) != 0)) {
@@ -1584,19 +1578,11 @@ int main(int argc, char *argv[]) {
                     requestedPath, strerror(errno));
             return 66;
         }
-        if (secondRequestedPath != NULL &&
-            (realpath(secondRequestedPath, secondResolvedPath) == NULL ||
-             access(secondResolvedPath, R_OK) != 0)) {
-            fprintf(stderr, "compat-loader: cannot read %s: %s\n",
-                    secondRequestedPath, strerror(errno));
-            return 66;
-        }
-        if (injectPidPairGated &&
-            (!path_is_fixed_dyld_hook(resolvedPath) ||
-             !path_is_fixed_live_canary(secondResolvedPath))) {
+        if (injectLaunchdHook &&
+            !path_is_fixed_sbinject_launchd_hook(resolvedPath)) {
             fprintf(stderr,
-                    "compat-loader: gated pair paths are not the fixed proof "
-                    "artifacts\n");
+                    "compat-loader: launchd injection is restricted to the "
+                    "fixed SBInject hook\n");
             return 65;
         }
         if (getuid() != 0) {
@@ -1604,42 +1590,47 @@ int main(int argc, char *argv[]) {
             return 67;
         }
 
-        char *end = NULL;
-        errno = 0;
-        long value = strtol(argv[2], &end, 10);
-        if (errno != 0 || end == argv[2] || *end != '\0' || value <= 1 ||
-            value > INT_MAX) {
-            fprintf(stderr, "compat-loader: invalid/forbidden target pid: %s\n",
-                    argv[2]);
-            return 64;
+        pid_t targetPid = 1;
+        if (!injectLaunchdHook) {
+            char *end = NULL;
+            errno = 0;
+            long value = strtol(argv[2], &end, 10);
+            if (errno != 0 || end == argv[2] || *end != '\0' || value <= 1 ||
+                value > INT_MAX) {
+                fprintf(stderr,
+                        "compat-loader: invalid/forbidden target pid: %s\n",
+                        argv[2]);
+                return 64;
+            }
+            targetPid = (pid_t)value;
         }
-        pid_t targetPid = (pid_t)value;
         char targetPath[PATH_MAX] = {0};
-        bool targetAdmitted =
-            injectPidPairGated
-                ? bind_exact_gated_candidate(targetPid, targetPath)
-                : read_supported_target(targetPid, targetPath);
+        bool targetAdmitted = injectLaunchdHook
+                                  ? read_exact_launchd_target(targetPid,
+                                                              targetPath)
+                                  : read_supported_target(targetPid,
+                                                          targetPath);
         if (!targetAdmitted) {
             fprintf(stderr,
                     "compat-loader: pid=%d is not an admitted %s target\n",
                     targetPid,
-                    injectPidPairGated ? "gated SpringBoard candidate"
-                                       : "app");
+                    injectLaunchdHook ? "launchd" : "app");
             return 78;
         }
-        int readyDescriptor = -1;
-        int releaseDescriptor = -1;
-        if (injectPidPairGated &&
-            (!parse_pipe_descriptor(argv[5], true, &readyDescriptor) ||
-             !parse_pipe_descriptor(argv[6], false, &releaseDescriptor) ||
-             readyDescriptor == releaseDescriptor)) {
+        bool springBoardTarget =
+            strcmp(targetPath,
+                   "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+                0 ||
+            fixed_springboard_candidate_path(targetPath);
+        if ((injectPid || pageProbePid) && springBoardTarget) {
             fprintf(stderr,
-                    "compat-loader: invalid gated pair descriptors\n");
-            return 64;
+                    "compat-loader: post-start SpringBoard mutation is disabled; "
+                    "use the SBInject pre-main path\n");
+            return 65;
         }
-        bool runtimeMutation = injectPid || injectPidPairGated || pageProbePid;
+        bool runtimeMutation = injectPid || injectLaunchdHook || pageProbePid;
         bool softened = true;
-        if (runtimeMutation && !isPtrauthChild) {
+        if (runtimeMutation && !injectLaunchdHook && !isPtrauthChild) {
             softened = soften_target(targetPid, targetPath);
         }
         if (runtimeMutation && !isPtrauthChild && !softened) {
@@ -1667,19 +1658,6 @@ int main(int argc, char *argv[]) {
                                targetPid, result);
             return 68;
         }
-        if (injectPidPairGated &&
-            (!gated_candidate_task_exact(targetTask) ||
-             !gated_candidate_still_exact(targetPid, targetPath, false))) {
-            fprintf(stderr,
-                    "compat-loader: pid=%d gated candidate task identity "
-                    "changed after task_for_pid\n",
-                    targetPid);
-            unified_loader_log(
-                "elleKitGatedCandidateTask pid=%d valid=false", targetPid);
-            mach_port_deallocate(mach_task_self(), targetTask);
-            return 78;
-        }
-
 #if __arm64e__
         if (!isPtrauthChild && runtimeMutation) {
             int childResult = spawn_ptrauth_child(argc, argv, targetTask);
@@ -1698,30 +1676,17 @@ int main(int argc, char *argv[]) {
 
         task_dyld_info_data_t dyldInfo = {0};
         mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-        int gateResult = injectPidPairGated
-                             ? await_pair_gate(readyDescriptor,
-                                               releaseDescriptor, targetPid)
-                             : 0;
-        bool runtimeReady =
-            gateResult == 0 && injectPidPairGated
-                ? wait_for_remote_runtime(targetTask, targetPid, targetPath,
-                                          &dyldInfo)
-                : false;
-        if (!injectPidPairGated) {
-            result = task_info(targetTask, TASK_DYLD_INFO,
-                               (task_info_t)&dyldInfo, &count);
-            runtimeReady = result == KERN_SUCCESS &&
-                           dyldInfo.all_image_info_addr != 0;
-        } else {
-            result = runtimeReady ? KERN_SUCCESS : KERN_FAILURE;
-        }
-        if (gateResult != 0 || !runtimeReady) {
+        result = task_info(targetTask, TASK_DYLD_INFO,
+                           (task_info_t)&dyldInfo, &count);
+        bool runtimeReady = result == KERN_SUCCESS &&
+                            dyldInfo.all_image_info_addr != 0;
+        if (!runtimeReady) {
             fprintf(stderr,
                     "compat-loader: runtime readiness for pid %d failed: "
-                    "gate=%d mach=%s (%d)\n",
-                    targetPid, gateResult, mach_error_string(result), result);
+                    "mach=%s (%d)\n",
+                    targetPid, mach_error_string(result), result);
             mach_port_deallocate(mach_task_self(), targetTask);
-            return gateResult != 0 ? gateResult : 69;
+            return 69;
         }
 
         if (checkPidImage) {
@@ -1765,52 +1730,6 @@ int main(int argc, char *argv[]) {
             return pageProbeResult;
         }
 
-        if (injectPidPairGated) {
-            bool hookLoaded = inject_image_and_wait(
-                targetTask, targetPid, targetPath,
-                dyldInfo.all_image_info_addr, resolvedPath);
-            bool hookIdentityExact =
-                hookLoaded && gated_remote_identity_exact(
-                                  targetTask, targetPid, targetPath,
-                                  dyldInfo.all_image_info_addr, true);
-            int hookStatus =
-                hookIdentityExact
-                    ? verify_remote_dyld_hook(
-                          targetTask, targetPid,
-                          dyldInfo.all_image_info_addr, resolvedPath,
-                          targetPath, true)
-                    : (hookLoaded ? 78 : 75);
-            bool canaryLoaded = false;
-            if (hookLoaded && hookStatus == 0) {
-                canaryLoaded = inject_image_and_wait(
-                    targetTask, targetPid, targetPath,
-                    dyldInfo.all_image_info_addr, secondResolvedPath);
-            }
-            printf("compat-loader: pid=%d gated-pair hookLoaded=%s "
-                   "hookIdentityExact=%s hookStatus=%d canaryLoaded=%s "
-                   "hook=%s canary=%s\n",
-                   targetPid, hookLoaded ? "true" : "false",
-                   hookIdentityExact ? "true" : "false", hookStatus,
-                   canaryLoaded ? "true" : "false", resolvedPath,
-                   secondResolvedPath);
-            unified_loader_log(
-                "elleKitGatedPair pid=%d hookLoaded=%s "
-                "hookIdentityExact=%s hookStatus=%d canaryLoaded=%s "
-                "hook=%s canary=%s",
-                targetPid, hookLoaded ? "true" : "false",
-                hookIdentityExact ? "true" : "false", hookStatus,
-                canaryLoaded ? "true" : "false", resolvedPath,
-                secondResolvedPath);
-            mach_port_deallocate(mach_task_self(), targetTask);
-            if (!hookLoaded) {
-                return 75;
-            }
-            if (hookStatus != 0) {
-                return hookStatus;
-            }
-            return canaryLoaded ? 0 : 84;
-        }
-
         int preflightResult = preflight_remote_symbols(
             targetTask, dyldInfo.all_image_info_addr);
         if (preflightResult != 0) {
@@ -1824,7 +1743,12 @@ int main(int argc, char *argv[]) {
         if (!image_is_loaded(targetTask, dyldInfo.all_image_info_addr,
                              resolvedPath)) {
             char currentPath[PATH_MAX];
-            if (!read_supported_target(targetPid, currentPath) ||
+            bool sameTarget = injectLaunchdHook
+                                  ? read_exact_launchd_target(targetPid,
+                                                              currentPath)
+                                  : read_supported_target(targetPid,
+                                                          currentPath);
+            if (!sameTarget ||
                 strcmp(currentPath, targetPath) != 0) {
                 mach_port_deallocate(mach_task_self(), targetTask);
                 return 80;
@@ -1843,12 +1767,6 @@ int main(int argc, char *argv[]) {
                       image_is_loaded(targetTask,
                                       dyldInfo.all_image_info_addr,
                                       resolvedPath);
-        int hookStatus = loaded && injectPid &&
-                                 path_is_fixed_dyld_hook(resolvedPath)
-            ? verify_remote_dyld_hook(targetTask, targetPid,
-                                      dyldInfo.all_image_info_addr,
-                                      resolvedPath, targetPath, false)
-            : 0;
         printf("compat-loader: pid=%d image loaded=%s path=%s\n", targetPid,
                loaded ? "true" : "false", resolvedPath);
         unified_loader_log("elleKitImageAdmission pid=%d loaded=%s path=%s",
@@ -1858,6 +1776,6 @@ int main(int argc, char *argv[]) {
         if (!loaded) {
             return 75;
         }
-        return hookStatus;
+        return 0;
     }
 }

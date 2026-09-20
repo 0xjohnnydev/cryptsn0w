@@ -32,6 +32,13 @@ BUILD_SUMMARY = SCRIPT_DIR / "out" / "build-summary.json"
 
 SUPPORTED_TARGETS = (
     {
+        "udid": "00008110-000C542E0EA8201E",
+        "product": "iPhone14,5",
+        "version": "27.0",
+        "build": "24A435",
+        "sileoBundleIdentifier": "com.lilycohl.sileo27b8",
+    },
+    {
         "udid": "00008150-0018252C1130C01C",
         "product": "iPhone18,2",
         "version": "27.0",

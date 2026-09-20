@@ -86,15 +86,17 @@ Apple/device personalization and strict validation
 Cryptex mounted on the iPhone
    ├── /var/jb Procursus environment
    ├── Sileo + narrow root broker
-   ├── fixed trusted injection helpers
+   ├── SBInject launchd hook + jitterd
+   ├── ad-hoc replacement SpringBoard + pre-main ElleKit
    └── fixed debugger-authorized execution worker
 ```
 
-There are two different runtime strategies:
+There are two separate runtime strategies:
 
-- A normal Mach-O file must have a structurally valid code signature and be
-  admitted by iOS. The currently proven post-boot path creates a small trust
-  cache for it and asks Apple TSS to personalize that cache.
+- SpringBoard tweak dylibs are loaded only in the SBInject replacement. Jitterd
+  marks that exact process debugged, its pre-main hook applies the supplied
+  dyld validation bypass with an `RW -> RX` transition, and ElleKit loads the
+  ad-hoc signed dylibs. Sileo never creates a per-package trust cache.
 - Code supplied as data can run inside the already admitted worker. This
   avoids a new trust-cache entry for every calculation, but it does not turn
   the worker into a system-wide `execve` bypass.
@@ -106,8 +108,8 @@ There are two different runtime strategies:
 - **Trust cache:** a list of code-directory hashes that iOS may treat as
   trusted. It approves a valid code identity; it does not repair a missing or
   malformed signature.
-- **TSS:** Apple's signing/personalization service. The proven dynamic trust
-  path contacts it for each new trust-cache payload.
+- **TSS:** Apple's signing/personalization service. It is used for the fixed
+  Cryptex build, not for Sileo package payloads.
 - **AMFI/TXM:** iOS components that enforce code-signing and executable-memory
   policy.
 - **SpringBoard:** the iOS home-screen and app-launching process. A crash here
@@ -128,14 +130,15 @@ The automatic device guard accepts only these exact tuples:
 | Device | OS | Build | Recorded coverage |
 | --- | --- | --- | --- |
 | iPhone18,2 | iOS 27.0 | 24A435 | Cryptex/Sileo work and native USB/RSD Frida proof |
-| iPhone13,1 (iPhone 12 mini) | iOS 27.0 | 24A437 | Latest persistent bootstrap, runtime trust, worker, and SpringBoard-candidate work |
+| iPhone14,5 (iPhone 13) | iOS 27.0 | 24A435 | SBInject source integration and target dyld signature validation |
+| iPhone13,1 (iPhone 12 mini) | iOS 27.0 | 24A437 | Persistent bootstrap, worker, and earlier SpringBoard research |
 
 The host is macOS with full Xcode and the iPhoneOS SDK. The generated Dopamine
 tree is pinned to the upstream `3.x` commit
 `939a3a21400f0dc6d6163b2b5999ba2ace0d2732`. Python dependencies are pinned in
 [`requirements.txt`](requirements.txt).
 
-An exact UDID is required when both validated devices are connected. The
+An exact UDID is required when multiple validated devices are connected. The
 `--allow-unverified-device` flag only disables the local guard; it does not
 make another device or build supported.
 
@@ -194,7 +197,8 @@ Xcode needs:
 
 - a valid Apple Development certificate in the login keychain;
 - an unexpired iOS development provisioning profile whose application-ID
-  pattern covers `org.coolstar.SileoStore`; and
+  pattern covers the selected Sileo app ID (`com.lilycohl.sileo27b8` for the
+  attached iPhone 13, or `org.coolstar.SileoStore` by default); and
 - the target iPhone registered in that profile.
 
 The least surprising setup is to sign in under **Xcode → Settings →
@@ -292,7 +296,7 @@ To refuse replacement of an older project Cryptex:
 The install command performs these broad steps:
 
 1. checks host tools, the SDK, SRD support, signing, and the selected device;
-2. downloads and hash-checks pinned Procursus and package inputs;
+2. downloads and hash-checks the pinned Procursus and Sileo inputs;
 3. builds the Cryptex, static trust cache, fixed runtime tools, and provisioned
    Sileo app as one matched set;
 4. installs the app through the userspace tunnel;
@@ -557,10 +561,10 @@ Start with these records:
 
 - [iPhone 12 mini runtime acceptance](findings/iphone12mini-runtime-acceptance-20260915.md)
   — persistent bootstrap, package execution, and executable-page proof.
-- [Post-boot dynamic trust acceptance](findings/iphone12mini-postboot-dynamic-trust-20260916.md)
-  — TSS-backed trust for a new valid ad-hoc payload and SpringBoard injection.
-- [Clean-reboot runtime-trust replay](findings/iphone12mini-clean-reboot-runtime-trust-20260916.md)
-  — local replay of a previously accepted cache.
+- [Retired post-boot dynamic trust acceptance](findings/iphone12mini-postboot-dynamic-trust-20260916.md)
+  — historical TSS-backed path, retained as evidence but no longer used.
+- [Retired clean-reboot runtime-trust replay](findings/iphone12mini-clean-reboot-runtime-trust-20260916.md)
+  — historical cache-replay evidence; the current SBInject path removes it.
 - [No-TSS trust boundary](findings/iphone12mini-no-tss-trust-boundary-20260916.md)
   — why a brand-new payload still needs a missing local primitive.
 - [SpringBoard candidate stopped-child result](findings/springboard-candidate-admission-run2-20260917.md)
