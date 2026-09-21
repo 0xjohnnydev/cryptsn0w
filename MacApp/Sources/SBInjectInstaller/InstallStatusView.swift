@@ -4,22 +4,31 @@ struct InstallStatusView: View {
     @Bindable var model: InstallerModel
 
     var body: some View {
-        HStack(spacing: 11) {
-            if model.state == .running || model.isDiscoveringDevices {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: statusSymbol)
-                    .font(.title3)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(statusColor)
-            }
+        HStack(spacing: AppTheme.rowSpacing) {
+            ZStack {
+                PanguBrushStrokeShape()
+                    .fill(statusColor.opacity(0.12))
+                    .frame(width: 29, height: 24)
 
-            VStack(alignment: .leading, spacing: 2) {
+                if model.state == .running || model.isDiscoveringDevices {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(statusColor)
+                } else {
+                    Image(systemName: statusSymbol)
+                        .font(.system(size: 15))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(statusColor)
+                }
+            }
+            .frame(width: AppTheme.rowIconWidth, height: 32)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
                 Text(model.statusTitle)
-                    .font(.headline)
+                    .font(AppTheme.controlFont)
                 Text(model.statusDetail)
-                    .font(.callout)
+                    .font(AppTheme.detailFont)
                     .foregroundStyle(AppTheme.mutedInk)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -37,20 +46,15 @@ struct InstallStatusView: View {
 
             if model.state != .idle {
                 Text(model.progressText)
-                    .font(.headline.monospacedDigit())
+                    .font(.callout.monospacedDigit())
+                    .bold()
                     .foregroundStyle(statusColor)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius)
-                .fill(AppTheme.surface)
-                .stroke(AppTheme.divider, lineWidth: 1)
-        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Status")
+        .accessibilityLabel("Status: \(model.statusTitle). \(model.statusDetail)")
     }
 
     private var statusSymbol: String {

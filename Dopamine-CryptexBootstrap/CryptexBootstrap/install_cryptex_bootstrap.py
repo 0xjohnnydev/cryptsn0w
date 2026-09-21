@@ -54,6 +54,40 @@ INSTALL_TIMEOUT_SECONDS = 90
 INSTALL_ATTEMPTS = 3
 
 
+def _is_apple_owned_identifier(identifier: str) -> bool:
+    normalized = identifier.strip().casefold()
+    return normalized == "com.apple" or normalized.startswith("com.apple.")
+
+
+def _installed_record(item: Any) -> dict[str, str]:
+    identifier = item.identifier
+    version = item.version
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise ValueError("refusing installed Cryptex with an empty identifier")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"refusing installed Cryptex {identifier!r} with an empty version"
+        )
+    return {"identifier": identifier, "version": version}
+
+
+def _partition_installed(
+    installed: list[Any],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    records = [_installed_record(item) for item in installed]
+    apple = [
+        record
+        for record in records
+        if _is_apple_owned_identifier(record["identifier"])
+    ]
+    custom = [
+        record
+        for record in records
+        if not _is_apple_owned_identifier(record["identifier"])
+    ]
+    return apple, custom
+
+
 def _read_payload(
     restore_dir: Path, identity: dict[str, Any], key: str
 ) -> bytes:
@@ -134,7 +168,11 @@ def _validate_bundle(
 
     identifier = summary.get("identifier")
     version = summary.get("version")
-    if not isinstance(identifier, str) or identifier.startswith("com.apple."):
+    if (
+        not isinstance(identifier, str)
+        or not identifier.strip()
+        or _is_apple_owned_identifier(identifier)
+    ):
         raise ValueError("refusing missing or Apple-owned Cryptex identifier")
     if not isinstance(version, str):
         raise ValueError("build summary has no Cryptex version")
@@ -211,17 +249,15 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
     try:
         service = CryptexdService(rsd)
         before = await service.copy_installed()
-        existing = [item for item in before if item.identifier == identifier]
-        if existing and not args.replace_installed:
-            raise ValueError(f"{identifier} is already installed")
-        if len(existing) > 1:
+        preserved_apple, custom = _partition_installed(before)
+        existing = [
+            record for record in custom if record["identifier"] == identifier
+        ]
+        if custom and not args.replace_installed:
             raise ValueError(
-                f"refusing multiple installed versions of {identifier}: "
-                f"{[item.version for item in existing]}"
+                "non-Apple Cryptexes are already installed; pass "
+                f"--replace-installed to remove them first: {custom}"
             )
-        exact_version_installed = bool(
-            existing and existing[0].version == version
-        )
         chip = await service.read_personalization_identifiers()
         nonce = await service.cryptex_nonce(identity["Cryptex1,NonceDomain"])
         ticket_checks = _ticket_checks(ticket, identity, chip, nonce, digests)
@@ -244,28 +280,15 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 "noncePersistence": DDI_NONCE_PERSISTENCE,
                 "auth": 0,
             },
-            "installedBefore": [
-                {"identifier": item.identifier, "version": item.version}
-                for item in before
-            ],
+            "installedBefore": preserved_apple + custom,
+            "preservedAppleCryptexes": preserved_apple,
         }
-        if exact_version_installed:
-            return preflight | {
-                "installed": {"identifier": identifier, "version": version},
-                "replaced": None,
-                "installAttempts": 0,
-                "recoveredExistingInstall": True,
-                "sameVersionAlreadyInstalled": True,
-            }
 
-        replaced = None
-        if existing:
-            replaced = {
-                "identifier": existing[0].identifier,
-                "version": existing[0].version,
-            }
+        removed_custom = custom if args.replace_installed else []
+        replaced = existing[0] if existing else None
+        for installed in removed_custom:
             await service.uninstall(
-                existing[0].identifier, existing[0].version
+                installed["identifier"], installed["version"]
             )
     finally:
         await _close_rsd(rsd, rsd_owner)
@@ -284,9 +307,9 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
         ],
     }
 
-    # Unmounting an older Cryptex tears down its jobs and file mappings. Give
+    # Unmounting custom Cryptexes tears down their jobs and file mappings. Give
     # cryptexd a clean RemoteXPC session for the replacement image transfer.
-    if replaced is not None:
+    if removed_custom:
         await asyncio.sleep(1)
 
     retryable = (
@@ -304,22 +327,23 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
             install_rsd, install_rsd_owner = await _open_rsd(args)
             service = CryptexdService(install_rsd)
             current = await service.copy_installed()
+            _, current_custom = _partition_installed(current)
             installed = [
-                {"identifier": item.identifier, "version": item.version}
-                for item in current
-                if item.identifier == identifier
+                item for item in current_custom
+                if item["identifier"] == identifier
             ]
-            if installed == expected:
+            if current_custom == expected:
                 return preflight | {
                     "installed": installed[0],
                     "replaced": replaced,
+                    "removedCustomCryptexes": removed_custom,
                     "installAttempts": attempt,
                     "recoveredExistingInstall": True,
                 }
-            if installed:
+            if current_custom:
                 raise RuntimeError(
-                    "unexpected Cryptex appeared before replacement transfer: "
-                    f"{installed}"
+                    "non-Apple Cryptex appeared before replacement transfer: "
+                    f"{current_custom}"
                 )
 
             chip = await service.read_personalization_identifiers()
@@ -354,19 +378,16 @@ async def _install(args: argparse.Namespace) -> dict[str, Any]:
                 timeout=INSTALL_TIMEOUT_SECONDS,
             )
             after = await service.copy_installed()
-            installed = [
-                {"identifier": item.identifier, "version": item.version}
-                for item in after
-                if item.identifier == identifier
-            ]
-            if installed != expected:
+            _, installed_custom = _partition_installed(after)
+            if installed_custom != expected:
                 raise RuntimeError(
-                    "install returned but exact Cryptex was not listed: "
-                    f"{installed}"
+                    "install returned without the sole expected custom Cryptex: "
+                    f"{installed_custom}"
                 )
             return preflight | {
-                "installed": installed[0],
+                "installed": installed_custom[0],
                 "replaced": replaced,
+                "removedCustomCryptexes": removed_custom,
                 "installAttempts": attempt,
                 "recoveredExistingInstall": False,
             }
@@ -400,7 +421,10 @@ def main() -> int:
     parser.add_argument(
         "--replace-installed",
         action="store_true",
-        help="replace one older Cryptex with this exact identifier",
+        help=(
+            "remove every installed non-Apple Cryptex before installing this one; "
+            "com.apple identifiers are always preserved"
+        ),
     )
     args = parser.parse_args()
 

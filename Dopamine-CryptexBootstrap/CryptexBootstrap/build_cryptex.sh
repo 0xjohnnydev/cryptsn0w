@@ -13,6 +13,10 @@ OPENSSH_SERVER_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900
 OPENSSH_SERVER_SHA256=578a172e679c961d2966caaf300bd0a43cfdf0a311741712690cfdb6e16eca54
 OPENSSH_SFTP_SERVER_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/openssh/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb
 OPENSSH_SFTP_SERVER_SHA256=d31534b270710381ddf5763f38458498c6bfe7308cbe09d1c45a1109d40dfb19
+LDID_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/ldid/ldid_2.1.5-procursus7_iphoneos-arm64.deb
+LDID_SHA256=f0808557064279e2e4febe443ed1e4fed76de42abf3491a45caca14915fd0895
+LIBPLIST_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/libplist/libplist3_2.2.0+git20230130.4b50a5a_iphoneos-arm64.deb
+LIBPLIST_SHA256=87f3e16108cc943d1c22a77a7f6bbcdef1d2f48bab0a23f867833e09dbd7d3ea
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
 ELLEKIT_URL=https://ellekit.space/pool/ellekit_1.2_iphoneos-arm64.deb
 ELLEKIT_SHA256=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
@@ -40,6 +44,8 @@ BOOTSTRAP_ARCHIVE="$CACHE_DIR/bootstrap_ssh_1900.tar.zst"
 OPENSSH_CLIENT_DEB="$CACHE_DIR/openssh-client_9.7p1-1_iphoneos-arm64.deb"
 OPENSSH_SERVER_DEB="$CACHE_DIR/openssh-server_9.7p1-1_iphoneos-arm64.deb"
 OPENSSH_SFTP_SERVER_DEB="$CACHE_DIR/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb"
+LDID_DEB="$CACHE_DIR/ldid_2.1.5-procursus7_iphoneos-arm64.deb"
+LIBPLIST_DEB="$CACHE_DIR/libplist3_2.2.0+git20230130.4b50a5a_iphoneos-arm64.deb"
 ELLEKIT_DEB="$CACHE_DIR/ellekit_1.2_iphoneos-arm64.deb"
 PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.3.3_iphoneos-arm64.deb"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
@@ -48,6 +54,7 @@ REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
 SBINJECT_APT_CONFIG="$SCRIPT_DIR/sbinject-package.conf"
 PREFERENCELOADER_PIN="$SCRIPT_DIR/preferenceloader.pref"
 SILEO_PIN="$SCRIPT_DIR/sileo.pref"
+LDID_PIN="$SCRIPT_DIR/ldid.pref"
 APT_LIST_NORMALIZER="$SCRIPT_DIR/normalize_apt_lists.sh"
 ELLEKIT_KEY="$SCRIPT_DIR/keyrings/ellekit.asc"
 BIGBOSS_KEY="$SCRIPT_DIR/keyrings/bigboss.asc"
@@ -59,6 +66,7 @@ EMBEDDED_REPOSITORY_COMPAT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/99dopamine-repositor
 EMBEDDED_SBINJECT_APT_CONFIG="$EMBEDDED_APT_CONFIG_DIR/98sbinject-packages"
 EMBEDDED_PREFERENCELOADER_PIN="$EMBEDDED_APT_CONFIG_DIR/99preferenceloader"
 EMBEDDED_SILEO_PIN="$EMBEDDED_APT_CONFIG_DIR/99codex-system-sileo"
+EMBEDDED_LDID_PIN="$EMBEDDED_APT_CONFIG_DIR/99codex-fixed-ldid"
 EMBEDDED_APT_LIST_NORMALIZER="$IMAGE_ROOT/usr/local/share/codex-bootstrap/normalize-apt-lists.sh"
 EMBEDDED_CLEAN_INSTALL_TOKEN="$IMAGE_ROOT/usr/local/share/codex-bootstrap/clean-install-token.txt"
 EMBEDDED_KEYRING_DIR="$IMAGE_ROOT/usr/local/share/codex-bootstrap/keyrings"
@@ -69,8 +77,12 @@ EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/prefe
 EMBEDDED_OPENSSH_CLIENT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-client.deb"
 EMBEDDED_OPENSSH_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-server.deb"
 EMBEDDED_OPENSSH_SFTP_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-sftp-server.deb"
+EMBEDDED_LDID_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ldid.deb"
+EMBEDDED_LIBPLIST_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/libplist3.deb"
 EMBEDDED_HOST_SSH_AUTHORIZED_KEY="$IMAGE_ROOT/usr/local/share/codex-bootstrap/host-ssh-authorized-keys"
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
+TRUSTED_LDID_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ldid-root"
+TRUSTED_LIBPLIST_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/libplist-root"
 SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
 SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
 SILEO_ASSET_INFO="$WORK_DIR/sileo-asset-info.json"
@@ -78,13 +90,16 @@ SILEO_NORMALIZED_ICON="$WORK_DIR/AppIcon60x60@2x.png"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
+TROLLSTORE_BROKER_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-trollstore-broker-client"
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
-SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v3.dylib"
+SBINJECT_AMFIHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/amfihook.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v12.dylib"
 SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
+SBINJECT_TROLLSTORE_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trollstore-registration-hook.dylib"
 SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
 PREFERENCES_BRIDGE_SUPPORT_DIR="$SBINJECT_SOURCE_DIR/PreferenceBridgeSupport"
 PREFERENCES_BRIDGE_BUILD_DIRECTORY="$WORK_DIR/preferences-bridge-build"
@@ -94,6 +109,7 @@ SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.ji
 EMBEDDED_SBINJECT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/sbinject"
 EMBEDDED_SBINJECT_JITTERD_PLIST="$EMBEDDED_SBINJECT_ROOT/com.openai.codex.sbinject.jitterd.plist"
 SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/build_springboard_candidate.py"
+AMFID_CANDIDATE_BUILDER="$SCRIPT_DIR/build_amfid_candidate.py"
 TARGET_BUNDLE_ROOT=${CODEX_TARGET_BUNDLE_ROOT:-"$SCRIPT_DIR/../../build/target"}
 SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/SpringBoard"}
 SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/Info.plist"}
@@ -111,6 +127,11 @@ PREFERENCES_CANDIDATE="$PREFERENCES_CANDIDATE_DIRECTORY/notPreferences"
 PREFERENCES_CANDIDATE_INFO="$PREFERENCES_CANDIDATE_DIRECTORY/Info.plist"
 PREFERENCES_CANDIDATE_ENTITLEMENTS="$PREFERENCES_CANDIDATE_DIRECTORY/entitlements.plist"
 PREFERENCES_CANDIDATE_GENERALHOOK="$PREFERENCES_CANDIDATE_DIRECTORY/g"
+AMFID_CANDIDATE_SOURCE=${CODEX_AMFID_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/amfid"}
+AMFID_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/amfid"
+AMFID_CANDIDATE="$AMFID_CANDIDATE_DIRECTORY/notamfid"
+AMFID_CANDIDATE_ENTITLEMENTS="$AMFID_CANDIDATE_DIRECTORY/notamfid.entitlements.plist"
+AMFID_CANDIDATE_HOOK="$AMFID_CANDIDATE_DIRECTORY/a"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
@@ -119,7 +140,11 @@ PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
 OPENSSH_PACKAGE_ROOT="$WORK_DIR/openssh-package"
+LDID_PACKAGE_ROOT="$WORK_DIR/ldid-package"
+LIBPLIST_PACKAGE_ROOT="$WORK_DIR/libplist-package"
 REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
+REPACKED_LDID="$WORK_DIR/ldid.cryptex-signed.deb"
+REPACKED_LIBPLIST="$WORK_DIR/libplist.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
 SUMMARY="$OUT_DIR/build-summary.json"
 STAGE_WORK_DIR="$WORK_DIR/ssh-stage"
@@ -347,6 +372,8 @@ fetch_pinned "$OPENSSH_SERVER_URL" "$OPENSSH_SERVER_SHA256" \
     "$OPENSSH_SERVER_DEB"
 fetch_pinned "$OPENSSH_SFTP_SERVER_URL" "$OPENSSH_SFTP_SERVER_SHA256" \
     "$OPENSSH_SFTP_SERVER_DEB"
+fetch_pinned "$LDID_URL" "$LDID_SHA256" "$LDID_DEB"
+fetch_pinned "$LIBPLIST_URL" "$LIBPLIST_SHA256" "$LIBPLIST_DEB"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
     "$PREFERENCELOADER_DEB"
@@ -355,10 +382,12 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
-    "$OPENSSH_PACKAGE_ROOT" \
+    "$OPENSSH_PACKAGE_ROOT" "$LDID_PACKAGE_ROOT" \
+    "$LIBPLIST_PACKAGE_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
-    "$REPACKED_ELLEKIT" "$TRUSTED_RUNTIME_CDHASHES" \
+    "$REPACKED_ELLEKIT" "$REPACKED_LDID" "$REPACKED_LIBPLIST" \
+    "$TRUSTED_RUNTIME_CDHASHES" \
     "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_ASSET_INFO" \
     "$SILEO_NORMALIZED_ICON"
 mkdir -p \
@@ -369,9 +398,12 @@ mkdir -p \
     "$IMAGE_ROOT/usr/local/lib/sbinject" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap" \
     "$EMBEDDED_SBINJECT_ROOT" \
+    "$AMFID_CANDIDATE_DIRECTORY" \
     "$EMBEDDED_APT_CONFIG_DIR" \
     "$EMBEDDED_KEYRING_DIR" \
     "$TRUSTED_ELLEKIT_ROOT" \
+    "$TRUSTED_LDID_ROOT" \
+    "$TRUSTED_LIBPLIST_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
     "$PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
@@ -446,6 +478,54 @@ for (( index = 1; index <= ${#ellekit_package_machos}; ++index )); do
         die "embedded ElleKit payload changed after repacking"
 done
 
+# TrollStore Lite invokes ldid as a nested process while its own helper runs
+# through the JIT worker.  That nested exec is a separate kernel admission
+# decision, so pin and fixed-trust this one infrastructure executable.  Apps
+# signed by it remain outside the trust cache and use the generic launcher.
+dpkg-deb -R "$LIBPLIST_DEB" "$LIBPLIST_PACKAGE_ROOT"
+[[ "$(dpkg-deb -f "$LIBPLIST_DEB" Package)" == libplist3 && \
+   "$(dpkg-deb -f "$LIBPLIST_DEB" Version)" == \
+       '2.2.0+git20230130.4b50a5a' && \
+   "$(dpkg-deb -f "$LIBPLIST_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned libplist package identity changed"
+FIXED_LIBPLIST="$LIBPLIST_PACKAGE_ROOT/var/jb/usr/lib/libplist-2.0.3.dylib"
+[[ -f "$FIXED_LIBPLIST" ]] || die "pinned libplist package has no dylib"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$FIXED_LIBPLIST"
+codesign --verify --strict --all-architectures "$FIXED_LIBPLIST" || \
+    die "fixed libplist signature is invalid"
+dpkg-deb --root-owner-group -b "$LIBPLIST_PACKAGE_ROOT" \
+    "$REPACKED_LIBPLIST" >/dev/null
+cp "$REPACKED_LIBPLIST" "$EMBEDDED_LIBPLIST_DEB"
+chmod 0644 "$EMBEDDED_LIBPLIST_DEB"
+dpkg-deb -x "$REPACKED_LIBPLIST" "$TRUSTED_LIBPLIST_ROOT"
+TRUSTED_LIBPLIST="$TRUSTED_LIBPLIST_ROOT/var/jb/usr/lib/libplist-2.0.3.dylib"
+[[ "$(sha256_of "$FIXED_LIBPLIST")" == \
+   "$(sha256_of "$TRUSTED_LIBPLIST")" ]] || \
+    die "embedded libplist payload changed after repacking"
+
+dpkg-deb -R "$LDID_DEB" "$LDID_PACKAGE_ROOT"
+[[ "$(dpkg-deb -f "$LDID_DEB" Package)" == ldid && \
+   "$(dpkg-deb -f "$LDID_DEB" Version)" == 2.1.5-procursus7 && \
+   "$(dpkg-deb -f "$LDID_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned ldid package identity changed"
+FIXED_LDID="$LDID_PACKAGE_ROOT/var/jb/usr/bin/ldid"
+[[ -x "$FIXED_LDID" ]] || die "pinned ldid package has no executable"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.fixed-ldid \
+    --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
+    "$FIXED_LDID"
+codesign --verify --strict --all-architectures "$FIXED_LDID" || \
+    die "fixed ldid signature is invalid"
+dpkg-deb --root-owner-group -b "$LDID_PACKAGE_ROOT" "$REPACKED_LDID" \
+    >/dev/null
+cp "$REPACKED_LDID" "$EMBEDDED_LDID_DEB"
+chmod 0644 "$EMBEDDED_LDID_DEB"
+dpkg-deb -x "$REPACKED_LDID" "$TRUSTED_LDID_ROOT"
+TRUSTED_LDID="$TRUSTED_LDID_ROOT/var/jb/usr/bin/ldid"
+[[ "$(sha256_of "$FIXED_LDID")" == "$(sha256_of "$TRUSTED_LDID")" ]] || \
+    die "embedded ldid payload changed after repacking"
+
 # Build the supplied SBInject chain as thin arm64e artifacts.  The launchd
 # component contains only SpringBoard path redirection, jitterd accepts only a
 # self-request from the exact replacement path, and generalhook performs the
@@ -459,7 +539,7 @@ xcrun --sdk iphoneos clang \
     -I "$SBINJECT_SOURCE_DIR" \
     "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -install_name /var/jb/usr/lib/sbinject/launchdhook-v3.dylib \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook-v12.dylib \
     -o "$SBINJECT_LAUNCHDHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LAUNCHDHOOK"
@@ -489,12 +569,43 @@ xcrun --sdk iphoneos clang \
     -dynamiclib \
     -fobjc-arc -fblocks \
     -Os -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    "$SBINJECT_SOURCE_DIR/sbinject_amfihook.m" \
+    "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
+    -framework Foundation \
+    -install_name @loader_path/a \
+    -o "$SBINJECT_AMFIHOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_AMFIHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fobjc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
     "$SBINJECT_SOURCE_DIR/sbinject_lsd_registration_hook.m" \
     -framework Foundation \
     -install_name /var/jb/usr/lib/sbinject/lsd-registration-hook.dylib \
     -o "$SBINJECT_LSD_REGISTRATION_HOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LSD_REGISTRATION_HOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fobjc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
+    "$SBINJECT_SOURCE_DIR/sbinject_trollstore_registration_hook.m" \
+    -framework Foundation \
+    -install_name \
+        /var/jb/usr/lib/sbinject/trollstore-registration-hook.dylib \
+    -o "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK"
 
 # Build the iOS 27 SwiftUI Settings bridge as a small, fixed arm64e control
 # plane dylib. PreferenceLoader 2.3.3 still supplies libprefs and constructs the
@@ -610,6 +721,28 @@ python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     --load-dylib @loader_path/g \
     --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
 
+# Build a standalone, device-matched amfid copy rather than injecting an
+# ad-hoc dylib into Apple's live system binary. The fixed hook and resigned
+# candidate are immutable Cryptex trust-cache entries; get-task-allow lets the
+# existing jitterd attach/detach lane grant the candidate its debug state.
+[[ -f "$AMFID_CANDIDATE_SOURCE" ]] || \
+    die "missing device-matched amfid source"
+cp "$SBINJECT_AMFIHOOK" "$AMFID_CANDIDATE_HOOK"
+chmod 0755 "$AMFID_CANDIDATE_HOOK"
+python3 "$AMFID_CANDIDATE_BUILDER" \
+    "$AMFID_CANDIDATE_SOURCE" "$AMFID_CANDIDATE" \
+    --load-dylib @loader_path/a \
+    --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
+codesign --verify --strict --all-architectures "$AMFID_CANDIDATE" || \
+    die "amfid candidate signature is invalid"
+otool -L "$AMFID_CANDIDATE" | rg -q '^\s+@loader_path/a ' || \
+    die "amfid candidate does not preload its fixed hook"
+ldid -e "$AMFID_CANDIDATE" | rg -q '<key>get-task-allow</key>' || \
+    die "amfid candidate lacks get-task-allow"
+[[ "$(sha256_of "$AMFID_CANDIDATE_HOOK")" == \
+   "$(sha256_of "$SBINJECT_AMFIHOOK")" ]] || \
+    die "amfid hook changed while copying"
+
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
 [[ -d "$WORK_DIR/var/jb" ]] || die "archive did not extract var/jb"
@@ -631,12 +764,39 @@ done
     die "pinned OpenSSH package payload is incomplete"
 ditto --noqtn "$OPENSSH_PACKAGE_ROOT/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
+OPENSSH_CONFIG="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/etc/ssh/sshd_config"
+grep -qx 'UsePAM yes' "$OPENSSH_CONFIG" || \
+    die "pinned OpenSSH configuration no longer has the expected PAM setting"
+sed -i '' 's/^UsePAM yes$/UsePAM no/' "$OPENSSH_CONFIG"
+grep -qx 'UsePAM no' "$OPENSSH_CONFIG" || \
+    die "could not disable PAM for rootless public-key SSH"
+rg -q '^AuthorizedKeysFile[[:space:]]+\.ssh/authorized_keys$' \
+    "$OPENSSH_CONFIG" || \
+    die "pinned OpenSSH authorized-keys path changed"
+sed -i '' \
+    's#^AuthorizedKeysFile[[:space:]].*$#AuthorizedKeysFile /var/jb/var/root/.ssh/authorized_keys#' \
+    "$OPENSSH_CONFIG"
+rg -q '^AuthorizedKeysFile /var/jb/var/root/\.ssh/authorized_keys$' \
+    "$OPENSSH_CONFIG" || \
+    die "could not select the rootless OpenSSH authorized-keys path"
 typeset -a trusted_openssh_machos=(
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh"
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh-keygen"
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/libexec/sftp-server"
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/sbin/sshd"
 )
+typeset -a trusted_ldid_machos=(
+    "$TRUSTED_LDID"
+    "$TRUSTED_LIBPLIST"
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libcrypto.3.dylib"
+    "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib/libiosexec.1.dylib"
+)
+for candidate in "${trusted_ldid_machos[@]}"; do
+    [[ -f "$candidate" ]] || \
+        die "fixed ldid runtime dependency is missing: ${candidate:t}"
+    codesign --verify --strict --all-architectures "$candidate" || \
+        die "fixed ldid runtime signature is invalid: ${candidate:t}"
+done
 
 # iOS 27 removed launch_active_user_switch from libSystem. Procursus launchctl
 # does not use it for bootout/bootstrap, but its strong unused import prevents
@@ -881,13 +1041,33 @@ xcrun --sdk iphoneos clang \
     -miphoneos-version-min=17.0 \
     -isysroot "$SDKROOT" \
     -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
     "$SCRIPT_DIR/codex_exec_worker.c" \
+    "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
     -o "$EXEC_WORKER"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.sbinject.app-launcher \
     --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
     "$EXEC_WORKER"
 codesign --verify --strict --all-architectures "$EXEC_WORKER" || \
     die "execution worker signature is invalid"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -fblocks \
+    -Wall -Wextra -Werror \
+    -I "$SCRIPT_DIR" \
+    "$SCRIPT_DIR/trollstore_broker_client.c" \
+    -o "$TROLLSTORE_BROKER_CLIENT"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.trollstore-broker-client \
+    --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
+    "$TROLLSTORE_BROKER_CLIENT"
+codesign --verify --strict --all-architectures \
+    "$TROLLSTORE_BROKER_CLIENT" || \
+    die "TrollStore broker client signature is invalid"
 
 xcrun --sdk iphoneos clang \
     -arch arm64 \
@@ -908,9 +1088,12 @@ typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
+    "$TROLLSTORE_BROKER_CLIENT" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_AMFIHOOK" \
     "$SBINJECT_LSD_REGISTRATION_HOOK" \
+    "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK" \
     "$SBINJECT_PREFERENCES_BRIDGE" \
     "$SBINJECT_LAUNCHDHOOK" \
     "$SBINJECT_JITTERD" \
@@ -918,8 +1101,11 @@ for candidate in \
     "$SPRINGBOARD_CANDIDATE" \
     "$PREFERENCES_CANDIDATE_GENERALHOOK" \
     "$PREFERENCES_CANDIDATE" \
+    "$AMFID_CANDIDATE_HOOK" \
+    "$AMFID_CANDIDATE" \
     "${prepared_sileo_machos[@]}" \
     "${trusted_ellekit_machos[@]}" \
+    "${trusted_ldid_machos[@]}" \
     "${trusted_openssh_machos[@]}"; do
     for architecture in $(lipo -archs "$candidate"); do
         cdhash=$(codesign -d --arch "$architecture" -vvvv "$candidate" \
@@ -956,12 +1142,14 @@ cp "$REPOSITORY_COMPAT_CONFIG" \
 cp "$SBINJECT_APT_CONFIG" "$EMBEDDED_SBINJECT_APT_CONFIG"
 cp "$PREFERENCELOADER_PIN" "$EMBEDDED_PREFERENCELOADER_PIN"
 cp "$SILEO_PIN" "$EMBEDDED_SILEO_PIN"
+cp "$LDID_PIN" "$EMBEDDED_LDID_PIN"
 cp "$APT_LIST_NORMALIZER" "$EMBEDDED_APT_LIST_NORMALIZER"
 chmod 0644 "$EMBEDDED_DEFAULT_SOURCES" \
     "$EMBEDDED_REPOSITORY_COMPAT_CONFIG" \
     "$EMBEDDED_SBINJECT_APT_CONFIG" \
     "$EMBEDDED_PREFERENCELOADER_PIN" \
     "$EMBEDDED_SILEO_PIN" \
+    "$EMBEDDED_LDID_PIN" \
     "$EMBEDDED_APT_LIST_NORMALIZER"
 if [[ "$FORCE_CLEAN_INSTALL" == 1 ]]; then
     print -r -- "$VERSION" >"$EMBEDDED_CLEAN_INSTALL_TOKEN"

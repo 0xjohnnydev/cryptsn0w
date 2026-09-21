@@ -1,6 +1,6 @@
-# CryptexSn0w for macOS
+# CryptSn0w for macOS
 
-CryptexSn0w is the compact native SwiftUI front end for the repository's
+CryptSn0w is the compact native SwiftUI front end for the repository's
 one-shot installer. Its layout is patterned after the classic Pangu utility:
 a connected-device selector, a single Jailbreak action, concise status, and
 the supplied running-pineapple artwork.
@@ -19,7 +19,7 @@ From the repository root, run:
 
 ```sh
 make app
-open dist/CryptexSn0w.app
+open dist/CryptSn0w.app
 ```
 
 The build requires Swift 6.2 or newer, generates the macOS icon from
