@@ -90,9 +90,14 @@ SILEO_NORMALIZED_ICON="$WORK_DIR/AppIcon60x60@2x.png"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
+EXEC_WORKER_NO_KEYCHAIN="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-no-keychain"
+EXEC_WORKER_NATIVE_SDK="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-native-sdk"
+EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-native-sdk-no-keychain"
 TROLLSTORE_BROKER_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-trollstore-broker-client"
+TROLLSTORE_SETTINGS_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trollstore-settings-hook.dylib"
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
 EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
+EXEC_WORKER_NO_KEYCHAIN_ENTITLEMENTS="$WORK_DIR/exec-worker-no-keychain-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
@@ -1042,15 +1047,72 @@ xcrun --sdk iphoneos clang \
     -isysroot "$SDKROOT" \
     -Wall -Wextra -Werror \
     -I "$SBINJECT_SOURCE_DIR" \
+    -framework CoreFoundation \
     "$SCRIPT_DIR/codex_exec_worker.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -o "$EXEC_WORKER"
+    -o "$EXEC_WORKER_NATIVE_SDK"
+cp "$EXEC_WORKER_NATIVE_SDK" "$EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN"
+cp "$EXEC_WORKER_NATIVE_SDK" "$EXEC_WORKER"
+cp "$EXEC_WORKER_NATIVE_SDK" "$EXEC_WORKER_NO_KEYCHAIN"
+# The launcher is the process main executable. Keep its SDK version at the
+# last pre-iOS-26 level so Foundation applies the payload's legacy behavior.
+EXEC_WORKER_COMPAT="$EXEC_WORKER.compat"
+xcrun vtool -set-build-version ios 17.0 18.5 -replace \
+    -output "$EXEC_WORKER_COMPAT" "$EXEC_WORKER"
+mv "$EXEC_WORKER_COMPAT" "$EXEC_WORKER"
+EXEC_WORKER_NO_KEYCHAIN_COMPAT="$EXEC_WORKER_NO_KEYCHAIN.compat"
+xcrun vtool -set-build-version ios 17.0 18.5 -replace \
+    -output "$EXEC_WORKER_NO_KEYCHAIN_COMPAT" "$EXEC_WORKER_NO_KEYCHAIN"
+mv "$EXEC_WORKER_NO_KEYCHAIN_COMPAT" "$EXEC_WORKER_NO_KEYCHAIN"
+xcrun vtool -show-build "$EXEC_WORKER" | \
+    rg -q '^[[:space:]]+sdk 18\.5$' || \
+    die "execution worker SDK compatibility version is invalid"
+cp "$EXEC_WORKER_ENTITLEMENTS" "$EXEC_WORKER_NO_KEYCHAIN_ENTITLEMENTS"
+plutil -remove application-identifier \
+    "$EXEC_WORKER_NO_KEYCHAIN_ENTITLEMENTS"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     --identifier com.openai.codex.sbinject.app-launcher \
     --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
     "$EXEC_WORKER"
-codesign --verify --strict --all-architectures "$EXEC_WORKER" || \
-    die "execution worker signature is invalid"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.sbinject.app-launcher \
+    --entitlements "$EXEC_WORKER_NO_KEYCHAIN_ENTITLEMENTS" \
+    "$EXEC_WORKER_NO_KEYCHAIN"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.sbinject.app-launcher \
+    --entitlements "$EXEC_WORKER_ENTITLEMENTS" \
+    "$EXEC_WORKER_NATIVE_SDK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.sbinject.app-launcher \
+    --entitlements "$EXEC_WORKER_NO_KEYCHAIN_ENTITLEMENTS" \
+    "$EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN"
+for candidate in \
+    "$EXEC_WORKER" \
+    "$EXEC_WORKER_NO_KEYCHAIN" \
+    "$EXEC_WORKER_NATIVE_SDK" \
+    "$EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN"; do
+    codesign --verify --strict --all-architectures "$candidate" || \
+        die "execution worker signature is invalid: ${candidate:t}"
+done
+
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib -fobjc-arc -fblocks \
+    -Wall -Wextra -Werror \
+    -I "$SCRIPT_DIR" \
+    -framework CoreGraphics \
+    -framework Foundation \
+    -framework UIKit \
+    -Wl,-install_name,"$TROLLSTORE_SETTINGS_HOOK" \
+    "$SCRIPT_DIR/trollstore_app_settings.m" \
+    -o "$TROLLSTORE_SETTINGS_HOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$TROLLSTORE_SETTINGS_HOOK"
+codesign --verify --strict --all-architectures \
+    "$TROLLSTORE_SETTINGS_HOOK" || \
+    die "TrollStore settings hook signature is invalid"
 
 xcrun --sdk iphoneos clang \
     -arch arm64 \
@@ -1088,7 +1150,11 @@ typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
     "$EXEC_WORKER" \
+    "$EXEC_WORKER_NO_KEYCHAIN" \
+    "$EXEC_WORKER_NATIVE_SDK" \
+    "$EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN" \
     "$TROLLSTORE_BROKER_CLIENT" \
+    "$TROLLSTORE_SETTINGS_HOOK" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
     "$SBINJECT_AMFIHOOK" \

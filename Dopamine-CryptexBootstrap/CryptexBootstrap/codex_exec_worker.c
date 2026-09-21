@@ -1,4 +1,5 @@
 #include <CommonCrypto/CommonDigest.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include "sbinject_protocol.h"
 #include "litehook_rebind.h"
 
@@ -297,13 +298,106 @@ static bool regular_files_equal(const char *left, const char *right) {
     return equal;
 }
 
+static bool managed_app_launcher_file(const char *path) {
+    static const char *const launchers[] = {
+        CODEX_SBINJECT_APP_LAUNCHER,
+        CODEX_SBINJECT_APP_LAUNCHER_NO_KEYCHAIN,
+        CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK,
+        CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK_NO_KEYCHAIN,
+    };
+    for (size_t index = 0;
+         index < sizeof(launchers) / sizeof(launchers[0]); ++index) {
+        if (regular_files_equal(path, launchers[index])) return true;
+    }
+    return false;
+}
+
+static CFPropertyListRef copy_property_list(const char *path,
+                                            off_t maximum_size) {
+    struct stat status = {0};
+    if (!secure_regular_file(path, maximum_size, &status)) return NULL;
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return NULL;
+    uint8_t *bytes = malloc((size_t)status.st_size);
+    bool complete = bytes != NULL;
+    size_t offset = 0;
+    while (complete && offset < (size_t)status.st_size) {
+        ssize_t amount = read(descriptor, bytes + offset,
+                              (size_t)status.st_size - offset);
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount <= 0) {
+            complete = false;
+            break;
+        }
+        offset += (size_t)amount;
+    }
+    close(descriptor);
+    if (!complete) {
+        free(bytes);
+        return NULL;
+    }
+    CFDataRef data = CFDataCreate(kCFAllocatorDefault, bytes,
+                                  (CFIndex)status.st_size);
+    free(bytes);
+    if (data == NULL) return NULL;
+    CFErrorRef error = NULL;
+    CFPropertyListRef list = CFPropertyListCreateWithData(
+        kCFAllocatorDefault, data, kCFPropertyListImmutable, NULL, &error);
+    if (error != NULL) CFRelease(error);
+    CFRelease(data);
+    return list;
+}
+
+static bool managed_app_option_enabled(const char *runtime_path,
+                                       CFStringRef option) {
+    if (runtime_path == NULL || option == NULL) return true;
+    char bundle[PATH_MAX] = {0};
+    if (strlcpy(bundle, runtime_path, sizeof(bundle)) >= sizeof(bundle)) {
+        return true;
+    }
+    char *separator = strrchr(bundle, '/');
+    if (separator == NULL || separator == bundle) return true;
+    *separator = '\0';
+    char info_path[PATH_MAX] = {0};
+    if (snprintf(info_path, sizeof(info_path), "%s/Info.plist", bundle) <= 0) {
+        return true;
+    }
+    CFPropertyListRef info = copy_property_list(info_path, 4 * 1024 * 1024);
+    CFPropertyListRef settings = copy_property_list(
+        CODEX_SBINJECT_MANAGED_APP_SETTINGS, 1024 * 1024);
+    bool enabled = true;
+    if (info != NULL && settings != NULL &&
+        CFGetTypeID(info) == CFDictionaryGetTypeID() &&
+        CFGetTypeID(settings) == CFDictionaryGetTypeID()) {
+        CFTypeRef identifier = CFDictionaryGetValue(
+            (CFDictionaryRef)info, CFSTR("CFBundleIdentifier"));
+        if (identifier != NULL &&
+            CFGetTypeID(identifier) == CFStringGetTypeID()) {
+            CFTypeRef entry = CFDictionaryGetValue(
+                (CFDictionaryRef)settings, identifier);
+            if (entry != NULL &&
+                CFGetTypeID(entry) == CFDictionaryGetTypeID()) {
+                CFTypeRef value = CFDictionaryGetValue(
+                    (CFDictionaryRef)entry, option);
+                if (value != NULL &&
+                    CFGetTypeID(value) == CFBooleanGetTypeID()) {
+                    enabled = CFBooleanGetValue((CFBooleanRef)value);
+                }
+            }
+        }
+    }
+    if (info != NULL) CFRelease(info);
+    if (settings != NULL) CFRelease(settings);
+    return enabled;
+}
+
 static bool managed_app_runtime_path(char runtime_path[PATH_MAX]) {
     uint32_t executable_size = PATH_MAX;
     char executable[PATH_MAX] = {0};
     char resolved[PATH_MAX] = {0};
     if (_NSGetExecutablePath(executable, &executable_size) != 0 ||
         realpath(executable, resolved) == NULL ||
-        !regular_files_equal(resolved, CODEX_SBINJECT_APP_LAUNCHER)) {
+        !managed_app_launcher_file(resolved)) {
         return false;
     }
 
@@ -398,6 +492,37 @@ static void app_launcher_log(const char *format, ...) {
     (void)dprintf(descriptor, "\n");
     (void)fsync(descriptor);
     close(descriptor);
+}
+
+static kern_return_t managed_task_set_exception_ports(
+    task_t task, exception_mask_t exception_mask, mach_port_t new_port,
+    exception_behavior_t behavior, thread_state_flavor_t new_flavor) {
+    if (task != mach_task_self()) {
+        return task_set_exception_ports(task, exception_mask, new_port,
+                                        behavior, new_flavor);
+    }
+    app_launcher_log("pid=%d stage=exception-ports operation=set blocked=1 "
+                     "mask=0x%x behavior=0x%x flavor=%d",
+                     getpid(), exception_mask, behavior, new_flavor);
+    return KERN_FAILURE;
+}
+
+static kern_return_t managed_task_swap_exception_ports(
+    task_t task, exception_mask_t exception_mask, mach_port_t new_port,
+    exception_behavior_t behavior, thread_state_flavor_t new_flavor,
+    exception_mask_array_t masks, mach_msg_type_number_t *masks_count,
+    exception_handler_array_t old_handlers,
+    exception_behavior_array_t old_behaviors,
+    exception_flavor_array_t old_flavors) {
+    if (task != mach_task_self()) {
+        return task_swap_exception_ports(
+            task, exception_mask, new_port, behavior, new_flavor, masks,
+            masks_count, old_handlers, old_behaviors, old_flavors);
+    }
+    app_launcher_log("pid=%d stage=exception-ports operation=swap blocked=1 "
+                     "mask=0x%x behavior=0x%x flavor=%d",
+                     getpid(), exception_mask, behavior, new_flavor);
+    return KERN_FAILURE;
 }
 
 typedef int (*codex_posix_spawn_function)(
@@ -1409,8 +1534,15 @@ static int run_managed_app_payload(const char *runtime_path, int argc,
                          getpid(), runtime_path);
         return 105;
     }
+    bool blockExceptionPorts = false;
+    if (__builtin_available(iOS 27.0, *)) {
+        blockExceptionPorts = managed_app_option_enabled(
+            runtime_path, CFSTR("BlockExceptionPorts"));
+    }
     dlerror();
-    void *handle = dlopen(runtime_path, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
+    int dlopenFlags = RTLD_GLOBAL | RTLD_FIRST |
+        (blockExceptionPorts ? RTLD_NOW : RTLD_LAZY);
+    void *handle = dlopen(runtime_path, dlopenFlags);
     if (handle == NULL) {
         const char *error = dlerror();
         app_launcher_log("pid=%d stage=dlopen ready=0 path=%s error=%s",
@@ -1419,7 +1551,40 @@ static int run_managed_app_payload(const char *runtime_path, int argc,
         return 106;
     }
     const struct mach_header_64 *header = find_loaded_header(runtime_path);
+    if (blockExceptionPorts) {
+        litehook_rebind_result_t set = litehook_rebind_symbol(
+            header, (void *)(uintptr_t)task_set_exception_ports,
+            (void *)(uintptr_t)managed_task_set_exception_ports);
+        litehook_rebind_result_t swap = litehook_rebind_symbol(
+            header, (void *)(uintptr_t)task_swap_exception_ports,
+            (void *)(uintptr_t)managed_task_swap_exception_ports);
+        app_launcher_log(
+            "pid=%d stage=exception-ports-hook setMatches=%zu setWrites=%zu "
+            "swapMatches=%zu swapWrites=%zu setError=%d swapError=%d path=%s",
+            getpid(), set.matches, set.writes, swap.matches, swap.writes,
+            set.first_error, swap.first_error, runtime_path);
+        if ((set.matches != 0 && set.writes == 0) ||
+            (swap.matches != 0 && swap.writes == 0)) {
+            return 109;
+        }
+    }
     if (trollstore_ui_payload(runtime_path)) {
+        dlerror();
+        void *settingsHook = dlopen(
+            CODEX_SBINJECT_TROLLSTORE_SETTINGS_HOOK, RTLD_NOW | RTLD_LOCAL);
+        const char *settingsError = settingsHook == NULL ? dlerror() : NULL;
+        bool settingsReady = false;
+        if (settingsHook != NULL) {
+            bool (*installSettings)(void) =
+                (bool (*)(void))dlsym(
+                    settingsHook, "codex_install_trollstore_settings_hook");
+            settingsReady = installSettings != NULL && installSettings();
+        }
+        app_launcher_log("pid=%d stage=trollstore-settings-hook ready=%d "
+                         "error=%s", getpid(), settingsReady,
+                         settingsReady ? "none" :
+                         (settingsError != NULL ? settingsError :
+                                                  "unavailable"));
         gTrollStoreOriginalPosixSpawn =
             (codex_posix_spawn_function)(uintptr_t)posix_spawn;
         litehook_rebind_result_t spawn = litehook_rebind_symbol(
