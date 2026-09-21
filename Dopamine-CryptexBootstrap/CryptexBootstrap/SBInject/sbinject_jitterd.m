@@ -53,6 +53,100 @@ static bool exact_root_process(pid_t pid, const char *expected_path) {
            (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
+static bool secure_regular_file(const char *path, off_t maximum_size,
+                                struct stat *status_out) {
+    struct stat status = {0};
+    if (path == NULL || lstat(path, &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 0 || status.st_gid != 0 ||
+        status.st_size <= 0 || status.st_size > maximum_size ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    if (status_out != NULL) *status_out = status;
+    return true;
+}
+
+static bool regular_files_equal(const char *left, const char *right) {
+    struct stat left_status = {0};
+    struct stat right_status = {0};
+    if (!secure_regular_file(left, 16 * 1024 * 1024, &left_status) ||
+        !secure_regular_file(right, 16 * 1024 * 1024, &right_status) ||
+        left_status.st_size != right_status.st_size) {
+        return false;
+    }
+    int left_fd = open(left, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int right_fd = open(right, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool equal = left_fd >= 0 && right_fd >= 0;
+    uint8_t left_bytes[64 * 1024];
+    uint8_t right_bytes[sizeof(left_bytes)];
+    while (equal) {
+        ssize_t left_amount = read(left_fd, left_bytes, sizeof(left_bytes));
+        ssize_t right_amount = read(right_fd, right_bytes,
+                                    sizeof(right_bytes));
+        if (left_amount < 0 && errno == EINTR) continue;
+        if (right_amount < 0 && errno == EINTR) continue;
+        if (left_amount < 0 || right_amount < 0 ||
+            left_amount != right_amount) {
+            equal = false;
+            break;
+        }
+        if (left_amount == 0) break;
+        if (memcmp(left_bytes, right_bytes, (size_t)left_amount) != 0) {
+            equal = false;
+            break;
+        }
+    }
+    if (left_fd >= 0) close(left_fd);
+    if (right_fd >= 0) close(right_fd);
+    return equal;
+}
+
+static bool managed_app_launcher_process(pid_t pid) {
+    char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
+        realpath(raw_path, observed) == NULL ||
+        !regular_files_equal(observed, CODEX_SBINJECT_APP_LAUNCHER)) {
+        return false;
+    }
+    char bundle[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(bundle, observed, sizeof(bundle)) >= sizeof(bundle)) {
+        return false;
+    }
+    char *separator = strrchr(bundle, '/');
+    if (separator == NULL || separator == bundle) return false;
+    *separator = '\0';
+    size_t bundle_length = strlen(bundle);
+    if (bundle_length < 4U ||
+        strcmp(bundle + bundle_length - 4U, ".app") != 0) {
+        return false;
+    }
+    char container[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(container, bundle, sizeof(container)) >= sizeof(container)) {
+        return false;
+    }
+    separator = strrchr(container, '/');
+    if (separator == NULL || separator == container) return false;
+    *separator = '\0';
+    char parent[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(parent, container, sizeof(parent)) >= sizeof(parent)) {
+        return false;
+    }
+    separator = strrchr(parent, '/');
+    if (separator == NULL || separator == parent) return false;
+    *separator = '\0';
+    if (strcmp(parent, "/private/var/containers/Bundle/Application") != 0 &&
+        strcmp(parent, "/var/containers/Bundle/Application") != 0) {
+        return false;
+    }
+    char marker[CODEX_PROC_PIDPATH_MAX] = {0};
+    int length = snprintf(marker, sizeof(marker), "%s/%s", container,
+                          CODEX_SBINJECT_MANAGED_APP_MARKER);
+    return length > 0 && (size_t)length < sizeof(marker) &&
+           secure_regular_file(marker, 64 * 1024, NULL);
+}
+
 static bool safe_candidate(pid_t requested, audit_token_t token) {
     pid_t caller = (pid_t)token.val[5];
     uid_t effective_user = (uid_t)token.val[1];
@@ -86,11 +180,13 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
             break;
         }
     }
-    if (!exact ||
+    bool managed_app = self_request && managed_app_launcher_process(requested);
+    if ((!exact && !managed_app) ||
         (broker_amfid_request &&
          matched_index != (sizeof(candidates) / sizeof(candidates[0]) - 1U))) {
         return false;
     }
+    if (managed_app) return true;
     struct stat status;
     return lstat(configured, &status) == 0 && S_ISREG(status.st_mode) &&
            !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
