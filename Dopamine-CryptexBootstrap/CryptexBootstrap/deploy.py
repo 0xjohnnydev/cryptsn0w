@@ -31,6 +31,7 @@ PERSONALIZE_SCRIPT = SCRIPT_DIR / "personalize_generic_cryptex1.py"
 BUILD_SUMMARY = SCRIPT_DIR / "out" / "build-summary.json"
 TARGET_BUNDLE_ROOT = SCRIPT_DIR.parents[1] / "build" / "target"
 SYSTEM_SILEO_IDENTIFIER = "org.coolstar.SileoStore"
+IPHONE_18_PRODUCT_PREFIX = "iPhone19,"
 GENERIC_IOS_APP_ICON_SHA256 = (
     "666ac286068bbddb0c83b828ec86f8fd0978cec4f7a4b0cfcc8800182197eb09"
 )
@@ -350,6 +351,21 @@ def connected_devices() -> list[dict[str, str]]:
 def configure_target_build_environment(device: dict[str, str]) -> None:
     os.environ.setdefault("CODEX_TARGET_UDID", device["udid"])
     os.environ["CODEX_TARGET_BUNDLE_ROOT"] = str(TARGET_BUNDLE_ROOT)
+    # The marketing iPhone 18 generation identifies itself as iPhone19,*.
+    # Keep the registration workaround scoped to that hardware on iOS 27;
+    # older products retain the existing lsd-hook-first path.
+    direct_registration = (
+        device["product"].startswith(IPHONE_18_PRODUCT_PREFIX)
+        and device["version"].split(".", 1)[0] == "27"
+    )
+    os.environ["CODEX_PREFER_DIRECT_SILEO_REGISTRATION"] = (
+        "1" if direct_registration else "0"
+    )
+    if direct_registration:
+        note(
+            "Using the iPhone 18-generation direct LaunchServices "
+            "registration path"
+        )
 
 
 def choose_device(requested: str | None) -> dict[str, str]:
