@@ -121,24 +121,52 @@ final class SSHShellSessionManager {
             "-o", "ConnectTimeout=5",
             "root@127.0.0.1",
         ].joined(separator: " ")
-        let escapedCommand = command
-            .replacing("\\", with: "\\\\")
-            .replacing("\"", with: "\\\"")
-        let source = """
-        tell application "Terminal"
-            activate
-            do script "\(escapedCommand)"
-        end tell
+        let scriptURL = FileManager.default.temporaryDirectory.appending(
+            path: "CryptSn0w-SSH-\(UUID().uuidString).command"
+        )
+        let script = """
+        #!/bin/zsh
+        trap '/bin/rm -f -- "$0"' EXIT
+        clear
+        print -- 'CryptSn0w · root SSH over USB'
+        \(command)
         """
-        guard let script = NSAppleScript(source: source) else {
-            throw SSHShellFailure.terminalFailed("The Terminal request was invalid.")
+
+        do {
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path
+            )
+        } catch {
+            throw SSHShellFailure.terminalFailed(
+                "The SSH launch script could not be prepared. \(error.localizedDescription)"
+            )
         }
-        var errorInfo: NSDictionary?
-        script.executeAndReturnError(&errorInfo)
-        if let errorInfo {
-            let detail = errorInfo[NSAppleScript.errorMessage] as? String
-                ?? "macOS rejected the Terminal automation request."
-            throw SSHShellFailure.terminalFailed(detail)
+
+        let opener = Process()
+        let errorPipe = Pipe()
+        opener.executableURL = URL(filePath: "/usr/bin/open")
+        opener.arguments = ["-b", "com.apple.Terminal", scriptURL.path]
+        opener.standardOutput = FileHandle.nullDevice
+        opener.standardError = errorPipe
+        do {
+            try opener.run()
+            opener.waitUntilExit()
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw SSHShellFailure.terminalFailed(error.localizedDescription)
+        }
+
+        guard opener.terminationStatus == 0 else {
+            let detail = String(
+                decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(),
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            try? FileManager.default.removeItem(at: scriptURL)
+            throw SSHShellFailure.terminalFailed(
+                detail.isEmpty ? "Launch Services could not open Terminal." : detail
+            )
         }
     }
 

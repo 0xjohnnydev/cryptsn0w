@@ -16,7 +16,7 @@ final class InstallerModel {
     private(set) var isDiscoveringDevices = false
     private(set) var sshShellIsAvailable = false
     var isShowingError = false
-    private(set) var errorTitle = "CryptexSn0w"
+    private(set) var errorTitle = "CryptSn0w"
     private(set) var errorMessage = ""
 
     @ObservationIgnored private var activeProcess: Process?

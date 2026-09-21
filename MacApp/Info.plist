@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>CryptexSn0w</string>
+	<string>CryptSn0w</string>
 	<key>CFBundleExecutable</key>
-	<string>CryptexSn0w</string>
+	<string>CryptSn0w</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>CryptexSn0w</string>
+	<string>CryptSn0w</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -27,9 +27,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>CryptexSn0w SBInject installer</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>CryptexSn0w opens an authenticated SSH session in Terminal when you request it.</string>
+	<string>CryptSn0w SBInject installer</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

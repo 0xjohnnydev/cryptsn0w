@@ -252,8 +252,8 @@ static int spawn_redirected(
         (void)posix_spawnattr_set_launch_type_np(
             (posix_spawnattr_t *)attributes, 0);
     }
-    hook_log("redirecting %s to %s",
-             preferences ? "Preferences" : "SpringBoard", redirected_path);
+    const char *target = preferences ? "Preferences" : "SpringBoard";
+    hook_log("redirecting %s to %s", target, redirected_path);
     int result = implementation(pid, redirected_path, file_actions, attributes,
                                 arguments, environment);
     if (arguments != NULL) {
@@ -263,8 +263,8 @@ static int spawn_redirected(
         return 0;
     }
 
-    hook_log("redirected %s spawn failed error=%d; using stock",
-             preferences ? "Preferences" : "SpringBoard", result);
+    hook_log("redirected %s spawn failed error=%d; using stock", target,
+             result);
     disable_redirect(preferences, "redirected posix_spawn failed");
     return implementation(pid, path, file_actions, attributes, arguments,
                           environment);
@@ -288,17 +288,24 @@ static int hooked_posix_spawnp(
                             arguments, environment);
 }
 
+static int hooked_chained_spawn(
+    pid_t *pid, const char *path,
+    const posix_spawn_file_actions_t *file_actions,
+    const posix_spawnattr_t *attributes, char *const arguments[],
+    char *const environment[]) {
+    bool search_path = path != NULL && strchr(path, '/') == NULL;
+    return spawn_redirected(search_path, pid, path, file_actions, attributes,
+                            arguments, environment);
+}
+
 __attribute__((constructor)) static void initialize_launchd_hook(void) {
     void *previous = dlopen(CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK,
                             RTLD_LAZY | RTLD_NOLOAD);
+    bool chaining = previous != NULL;
     if (previous != NULL) {
-        bool published = publish_ready_marker();
-        hook_log("launchd hook delegated to live previous image=%s "
-                 "published=%s",
-                 CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK,
-                 published ? "true" : "false");
+        hook_log("launchd hook chaining over live previous image=%s",
+                 CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK);
         dlclose(previous);
-        return;
     }
     original_posix_spawn = dlsym(RTLD_DEFAULT, "posix_spawn");
     original_posix_spawnp = dlsym(RTLD_DEFAULT, "posix_spawnp");
@@ -308,19 +315,31 @@ __attribute__((constructor)) static void initialize_launchd_hook(void) {
     }
     const struct mach_header_64 *header =
         (const struct mach_header_64 *)_dyld_get_image_header(0);
-    litehook_rebind_result_t spawn =
-        litehook_rebind_symbol_with_previous_image(
-            header, original_posix_spawn, hooked_posix_spawn,
+    litehook_rebind_result_t spawn = {0};
+    litehook_rebind_result_t spawnp = {0};
+    bool rebound = false;
+    if (chaining) {
+        // The previous generation owns both launchd import slots. Take them
+        // over in one pass; matching "any pointer in the previous image" in
+        // two passes would consume both during the first pass and make the
+        // second pass report a false failure.
+        spawn = litehook_rebind_symbol_with_previous_image(
+            header, original_posix_spawn, hooked_chained_spawn,
             CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK);
-    litehook_rebind_result_t spawnp =
-        litehook_rebind_symbol_with_previous_image(
-            header, original_posix_spawnp, hooked_posix_spawnp,
-            CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK);
-    bool ready = spawn.matches > 0 && spawn.writes == spawn.matches &&
-                 spawnp.matches > 0 && spawnp.writes == spawnp.matches &&
-                 publish_ready_marker();
+        rebound = spawn.matches > 0 && spawn.writes == spawn.matches;
+    } else {
+        spawn = litehook_rebind_symbol(
+            header, original_posix_spawn, hooked_posix_spawn);
+        spawnp = litehook_rebind_symbol(
+            header, original_posix_spawnp, hooked_posix_spawnp);
+        rebound = spawn.matches > 0 && spawn.writes == spawn.matches &&
+                  spawnp.matches > 0 && spawnp.writes == spawnp.matches;
+    }
+    bool ready = rebound && publish_ready_marker();
     hook_log("launchd hook ready posix_spawn matches=%zu writes=%zu kr=%d "
-             "posix_spawnp matches=%zu writes=%zu kr=%d published=%s",
+             "posix_spawnp matches=%zu writes=%zu kr=%d chaining=%s "
+             "published=%s",
              spawn.matches, spawn.writes, spawn.first_error, spawnp.matches,
-             spawnp.writes, spawnp.first_error, ready ? "true" : "false");
+             spawnp.writes, spawnp.first_error,
+             chaining ? "true" : "false", ready ? "true" : "false");
 }

@@ -1,11 +1,11 @@
 import SwiftUI
 
 @main
-struct CryptexSn0wApp: App {
+struct CryptSn0wApp: App {
     @State private var model = InstallerModel()
 
     var body: some Scene {
-        Window("CryptexSn0w", id: "main") {
+        Window("CryptSn0w", id: "main") {
             ContentView(model: model)
         }
         .defaultSize(

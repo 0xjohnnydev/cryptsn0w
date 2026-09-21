@@ -14,6 +14,8 @@
 #define CODEX_ROOT_BROKER_OPERATION_KEY "operation"
 #define CODEX_ROOT_BROKER_PREFERENCES_RESPRING_OPERATION                     \
     "preferences-respring-v1"
+#define CODEX_ROOT_BROKER_TROLLSTORE_HELPER_OPERATION                         \
+    "trollstore-helper-v1"
 
 struct codex_root_broker_header {
     uint32_t magic;

@@ -41,6 +41,40 @@ INSTALL_TIMEOUT_SECONDS = 90
 INSTALL_ATTEMPTS = 3
 
 
+def _is_apple_owned_identifier(identifier: str) -> bool:
+    normalized = identifier.strip().casefold()
+    return normalized == "com.apple" or normalized.startswith("com.apple.")
+
+
+def _installed_record(item: Any) -> dict[str, str]:
+    identifier = item.identifier
+    version = item.version
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise ValueError("refusing installed Cryptex with an empty identifier")
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError(
+            f"refusing installed Cryptex {identifier!r} with an empty version"
+        )
+    return {"identifier": identifier, "version": version}
+
+
+def _partition_installed(
+    installed: list[Any],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    records = [_installed_record(item) for item in installed]
+    apple = [
+        record
+        for record in records
+        if _is_apple_owned_identifier(record["identifier"])
+    ]
+    custom = [
+        record
+        for record in records
+        if not _is_apple_owned_identifier(record["identifier"])
+    ]
+    return apple, custom
+
+
 def _read_payload(
     restore_dir: Path, identity: dict[str, Any], key: str
 ) -> bytes:

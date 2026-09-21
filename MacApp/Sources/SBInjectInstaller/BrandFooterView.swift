@@ -2,10 +2,12 @@ import SwiftUI
 
 struct BrandFooterView: View {
     private static let sourceURL: URL = {
-        guard let url = URL(
-            string: "https://github.com/0xjohnnydev/untitled"
-        ) else {
-            fatalError("The CryptexSn0w source URL is invalid")
+        guard
+            let url = URL(
+                string: "https://github.com/0xjohnnydev/untitled"
+            )
+        else {
+            fatalError("The CryptSn0w source URL is invalid")
         }
         return url
     }()
@@ -15,43 +17,56 @@ struct BrandFooterView: View {
             Image(nsImage: LogoResource.image)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 68, height: 68)
-                .accessibilityLabel("Running pineapple CryptexSn0w logo")
+                .frame(width: 48, height: 48)
+                .accessibilityLabel("Running pineapple CryptSn0w logo")
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("CryptexSn0w")
-                    .font(.headline)
-                    .bold()
-                Text("By 0xJohnny, Varik, and @GenericCoding")
+                Text("CryptSn0w")
+                    .font(AppTheme.brandFont)
+
+                Text("By 0xJohnny, Varik & @GenericCoding")
+                    .font(AppTheme.detailFont)
+
                 Text("SBInject by Htrowii · Advice from Jake James")
+                    .font(AppTheme.detailFont)
                     .foregroundStyle(AppTheme.mutedInk)
-                Link("Project source", destination: Self.sourceURL)
             }
-            .font(.callout)
             .foregroundStyle(AppTheme.ink)
 
             Spacer(minLength: 12)
 
-            VStack(spacing: 4) {
-                ZStack {
-                    Circle()
-                        .fill(AppTheme.accent)
-                    Image(systemName: "snowflake")
-                        .font(.title2)
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 42, height: 42)
-                Text("SBInject")
-                    .font(.callout)
-                    .foregroundStyle(AppTheme.mutedInk)
+            Link(destination: Self.sourceURL) {
+                Label("Source", systemImage: "arrow.up.right")
+                    .font(AppTheme.detailFont)
+                    .foregroundStyle(AppTheme.accent)
             }
-            .accessibilityElement(children: .combine)
+            .buttonStyle(.plain)
+            .help("Open the CryptSn0w project source")
         }
-        .padding(.top, 12)
+        .padding(.top, 18)
+        .background {
+            PanguBrushStrokeShape()
+                .fill(AppTheme.accent.opacity(0.038))
+                .frame(height: 82)
+                .rotationEffect(.degrees(-1.5))
+                .offset(x: 44, y: 6)
+                .accessibilityHidden(true)
+        }
         .overlay(alignment: .top) {
-            Rectangle()
-                .fill(AppTheme.divider)
-                .frame(height: 1)
+            PanguBrushStrokeShape()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            AppTheme.accentBright,
+                            AppTheme.accentBright.opacity(0.46),
+                            AppTheme.accentBright.opacity(0.06),
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(height: 16)
+                .accessibilityHidden(true)
         }
     }
 }
