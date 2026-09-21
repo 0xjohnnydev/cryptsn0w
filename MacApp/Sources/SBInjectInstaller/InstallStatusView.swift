@@ -36,6 +36,14 @@ struct InstallStatusView: View {
 
             Spacer(minLength: AppTheme.compactSpacing)
 
+            if model.canShowLog {
+                Button("Show Log", systemImage: "doc.text") {
+                    model.showLog()
+                }
+                .controlSize(.small)
+                .help("Reveal the complete installer log in Finder")
+            }
+
             if model.state != .idle {
                 Text(model.progressText)
                     .font(.callout.monospacedDigit())

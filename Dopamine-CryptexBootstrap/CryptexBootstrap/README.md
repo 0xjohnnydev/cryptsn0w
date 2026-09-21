@@ -42,6 +42,10 @@ LaunchServices registers that path under the original
 `org.coolstar.SileoStore` identifier as a non-removable system app. Its icon,
 assets, translations, localizations, and dictionaries remain in the copied
 upstream bundle. Sileo has no provisioning profile or signing expiration.
+On iOS 27, the marketing iPhone 18 generation (`iPhone19,*`) first registers
+through the installer's entitled LaunchServices client. If that lane fails it
+falls back to the existing `lsd` registration hook; other hardware keeps the
+hook-first behavior.
 
 The Debian `org.coolstar.sileo` package contains dependency and maintainer
 metadata, not a second mutable application bundle. APT pins the local
