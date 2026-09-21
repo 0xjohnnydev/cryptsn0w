@@ -133,6 +133,11 @@ static NSString *const kBundleContainerRoot =
 static NSString *const kSystemSileoBundlePath =
     @"/var/containers/Bundle/Application/"
      "D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app";
+static NSString *const kTrollStoreLiteIdentifier =
+    @"com.opa334.TrollStoreLite";
+static NSString *const kManagedApplicationMarker =
+    @"_SBInjectManagedApp.plist";
+static NSString *const kTrollStoreLiteMarker = @"_TrollStoreLite";
 static NSString *const kRootBrokerLabel =
     @"com.openai.codex.dopamine.sileo-root-broker";
 static NSString *const kRootBrokerExecutable =
@@ -148,6 +153,7 @@ static NSString *const kOpenSSHExecutable = @"/var/jb/usr/sbin/sshd";
 static NSString *const kOpenSSHKeygen = @"/var/jb/usr/bin/ssh-keygen";
 static NSString *const kOpenSSHKeygenWrapper =
     @"/var/jb/usr/libexec/sshd-keygen-wrapper";
+static NSString *const kOpenSSHConfig = @"/var/jb/etc/ssh/sshd_config";
 static NSString *const kOpenSSHPlist =
     @"/var/jb/Library/LaunchDaemons/com.openssh.sshd.plist";
 static NSString *const kSBInjectPackageValidatorExecutable =
@@ -161,10 +167,12 @@ static NSString *const kSBInjectJitterdPlist =
      "com.openai.codex.sbinject.jitterd.plist";
 static NSString *const kSBInjectGeneralHook =
     @"/var/jb/usr/lib/sbinject/generalhook.dylib";
+static NSString *const kSBInjectAmfidHook =
+    @"/var/jb/usr/libexec/sbinject/a";
 static NSString *const kSBInjectPreferencesBridge =
     @"/var/jb/usr/lib/sbinject/preferences-bridge.dylib";
 static NSString *const kSBInjectLaunchdHook =
-    @"/var/jb/usr/lib/sbinject/launchdhook-v3.dylib";
+    @"/var/jb/usr/lib/sbinject/launchdhook-v12.dylib";
 static NSString *const kSBInjectLsdRegistrationHook =
     @"/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
 static NSString *const kSBInjectLsdRegistrationMarker =
@@ -190,8 +198,18 @@ static NSString *const kSBInjectPreferencesCrashMarker =
     @"/var/jb/var/lib/sbinject/preferences-disabled-crash-loop";
 static NSString *const kSBInjectPreferencesRestartMarker =
     @"/var/jb/var/lib/sbinject/preferences-restart-required";
+static NSString *const kSBInjectAmfidEnableMarker =
+    @"/var/jb/var/lib/sbinject/amfid-injection-enabled";
+static NSString *const kSBInjectAmfidCrashMarker =
+    @"/var/jb/var/lib/sbinject/amfid-injection-disabled-crash-loop";
+static NSString *const kSBInjectAmfidReadyMarker =
+    @"/var/jb/var/lib/sbinject/amfid-hook-ready";
+static NSString *const kSBInjectAmfidFailureMarker =
+    @"/var/jb/var/lib/sbinject/amfid-hook-failure";
 static NSString *const kSBInjectLaunchdReadyMarker =
     @"/var/jb/var/lib/sbinject/launchd-hook-ready";
+static NSString *const kSBInjectLaunchdUpgradeMarker =
+    @"/var/jb/var/lib/sbinject/launchd-hook-upgrade-required";
 static NSString *const kSBInjectRespringMarker =
     @"/var/jb/var/lib/sbinject/respring-required";
 static NSString *const kSpringBoardCandidateExecutable =
@@ -199,6 +217,9 @@ static NSString *const kSpringBoardCandidateExecutable =
      "SpringBoard.app/notSpringBoard";
 static NSString *const kPreferencesCandidateExecutable =
     @"/var/jb/Applications/Preferences.app/notPreferences";
+static NSString *const kAmfidCandidateExecutable =
+    @"/var/jb/usr/libexec/sbinject/notamfid";
+static NSString *const kStockAmfidExecutable = @"/usr/libexec/amfid";
 static NSString *const kHeadlessSileoExecutable =
     @"/var/jb/Applications/Sileo.app/Sileo";
 static NSString *const kElleKitInjectorExecutable =
@@ -208,22 +229,29 @@ static NSString *const kElleKitInjectorDylib =
 
 #define CODEX_SBINJECT_JITTERD_SERVICE \
     "com.openai.codex.sbinject.jitterd.systemwide"
-
 @interface NSObject (CodexLaunchServices)
 + (id)applicationProxyForIdentifier:(NSString *)identifier;
 + (id)defaultWorkspace;
++ (id)containerWithIdentifier:(NSString *)identifier
+             createIfNecessary:(BOOL)create
+                       existed:(BOOL *)existed
+                         error:(NSError **)error;
+- (BOOL)registerApplicationDictionary:(NSDictionary *)dictionary;
+- (BOOL)unregisterApplication:(NSURL *)url;
 - (id)registerContainerizedApplicationWithInfoDictionaries:(NSArray *)infos
                                               operationUUID:(NSUUID *)uuid
                                              requestContext:(id)context
                                                saveObserver:(id)observer
                                           registrationError:(NSError **)error;
 - (NSURL *)bundleURL;
+- (NSURL *)url;
 - (NSString *)applicationType;
 @end
 
 static int gLog = STDERR_FILENO;
 static os_log_t gUnifiedLog;
 
+static void log_message(const char *format, ...);
 static int run_and_wait(const char *executable, char *const arguments[]);
 static int run_and_wait_bounded_to_fd(const char *executable,
                                       char *const arguments[],
@@ -236,13 +264,137 @@ static bool is_exact_springboard_candidate_process(pid_t pid,
                                                     const char *path);
 static bool is_exact_preferences_candidate_process(pid_t pid,
                                                     const char *path);
+static bool is_exact_amfid_candidate_process(pid_t pid, const char *path);
 static bool sbinject_managed_file(NSString *path, mode_t mode);
 static bool exact_empty_root_marker(NSString *path);
 static bool prepare_sbinject_redirect(const char *reason);
 static bool activate_sbinject_springboard(void);
 static bool activate_sbinject_preferences(void);
+static bool activate_sbinject_amfid(void);
 static bool respring_sbinject_springboard(const char *reason);
 static bool prepare_lsd_registration_hook(const char *reason);
+static bool executable_paths_match(NSString *expected, NSString *actual);
+static NSString *registered_application_path(NSString *identifier);
+static NSArray<NSString *> *validated_bundle_entries(NSString *root,
+                                                      bool requireManaged);
+static bool normalize_bundle_tree(NSString *source, NSString *destination);
+static bool bundle_trees_are_equal(NSString *source, NSString *destination);
+static bool register_managed_rootless_application(NSString *source,
+                                                   NSString **targetPath,
+                                                   NSString **errorText);
+static bool cleanup_stale_managed_applications(NSSet<NSString *> *active,
+                                                NSString **errorText);
+
+static bool refresh_rootless_application_registrations(const char *reason) {
+    if (!prepare_lsd_registration_hook(reason)) {
+        log_message("sbinjectApplicationRegistration=false reason=%s "
+                    "phase=lsd-hook",
+                    reason);
+        return false;
+    }
+    NSString *applications = @"/var/jb/Applications";
+    NSArray<NSString *> *entries = [[[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:applications error:nil]
+        sortedArrayUsingSelector:@selector(compare:)];
+    bool registered = true;
+    NSUInteger submitted = 0;
+    NSMutableArray<NSDictionary *> *bundles = [NSMutableArray array];
+    NSMutableSet<NSString *> *activeIdentifiers = [NSMutableSet set];
+    for (NSString *entry in entries) {
+        if ([[entry pathExtension] caseInsensitiveCompare:@"app"] !=
+            NSOrderedSame) {
+            continue;
+        }
+        NSString *path = [applications stringByAppendingPathComponent:entry];
+        struct stat status = {0};
+        if (lstat([path fileSystemRepresentation], &status) != 0 ||
+            !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
+            status.st_uid != 0 || (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+            registered = false;
+            log_message("sbinjectApplicationRegistration=false reason=%s "
+                        "phase=bundle-validation path=%s",
+                        reason, [path UTF8String]);
+            continue;
+        }
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+            [path stringByAppendingPathComponent:@"Info.plist"]];
+        NSString *identifier = info[@"CFBundleIdentifier"];
+        if (![identifier isKindOfClass:NSString.class] ||
+            identifier.length == 0) {
+            registered = false;
+            log_message("sbinjectApplicationRegistration=false reason=%s "
+                        "phase=bundle-identifier path=%s",
+                        reason, [path UTF8String]);
+            continue;
+        }
+        if (++submitted > 128U) {
+            registered = false;
+            break;
+        }
+        if ([identifier isEqualToString:@"com.apple.Preferences"]) {
+            log_message("sbinjectApplicationRegistration=skipped reason=%s "
+                        "scope=redirect-managed identifier=%s path=%s",
+                        reason, [identifier UTF8String], [path UTF8String]);
+            continue;
+        }
+        [activeIdentifiers addObject:identifier];
+        NSString *verificationPath = nil;
+        NSString *directError = nil;
+        bool directReady = register_managed_rootless_application(
+            path, &verificationPath, &directError);
+        log_message("sbinjectEmbeddedApplicationRegistration=%s "
+                    "reason=%s identifier=%s source=%s target=%s error=%s",
+                    directReady ? "true" : "false", reason,
+                    [identifier UTF8String], [path UTF8String],
+                    verificationPath != nil
+                        ? [verificationPath UTF8String] : "none",
+                    directError != nil
+                        ? [[directError description] UTF8String] : "none");
+        [bundles addObject:@{
+            @"path" : verificationPath ?: path,
+            @"identifier" : identifier,
+            @"directReady" : @(directReady),
+        }];
+    }
+    NSString *cleanupError = nil;
+    bool cleanupReady = cleanup_stale_managed_applications(
+        activeIdentifiers, &cleanupError);
+    registered &= cleanupReady;
+    if (!cleanupReady) {
+        log_message("sbinjectApplicationCleanup=false reason=%s error=%s",
+                    reason,
+                    cleanupError != nil
+                        ? [[cleanupError description] UTF8String] : "unknown");
+    }
+    for (NSDictionary *bundle in bundles) {
+        NSString *path = bundle[@"path"];
+        NSString *identifier = bundle[@"identifier"];
+        bool directReady = [bundle[@"directReady"] boolValue];
+        NSString *observedPath = nil;
+        bool verified = false;
+        for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+            observedPath = registered_application_path(identifier);
+            if (executable_paths_match(path, observedPath)) {
+                verified = true;
+                break;
+            }
+            usleep(10 * 1000);
+        }
+        bool pathReady = directReady && verified;
+        registered &= pathReady;
+        log_message("sbinjectApplicationPathRegistration=%s reason=%s "
+                    "identifier=%s path=%s observed=%s",
+                    pathReady ? "true" : "false", reason,
+                    [identifier UTF8String], [path UTF8String],
+                    observedPath != nil ? [observedPath UTF8String] : "none");
+    }
+    bool ready = registered;
+    log_message("sbinjectApplicationRegistration=%s reason=%s bundles=%lu "
+                "cleanup=%s",
+                ready ? "true" : "false", reason,
+                (unsigned long)submitted, cleanupReady ? "true" : "false");
+    return ready;
+}
 
 static void log_message(const char *format, ...) {
     va_list arguments;
@@ -852,6 +1004,379 @@ static bool register_sileo_system_application(NSString *bundlePath,
     return registered;
 }
 
+static bool managed_app_container_path_is_valid(NSString *path) {
+    if (path.length == 0) return false;
+    NSString *standardized = [path stringByStandardizingPath];
+    NSString *parent = [standardized stringByDeletingLastPathComponent];
+    if (![parent isEqual:@"/var/containers/Bundle/Application"] &&
+        ![parent isEqual:@"/private/var/containers/Bundle/Application"]) {
+        return false;
+    }
+    return [[NSUUID alloc]
+        initWithUUIDString:[standardized lastPathComponent]] != nil;
+}
+
+static bool write_managed_application_marker(NSString *containerPath,
+                                             NSString *identifier,
+                                             NSString *sourcePath,
+                                             NSString *bundlePath,
+                                             NSString **errorText) {
+    NSDictionary *marker = @{
+        @"Version" : @1,
+        @"BundleIdentifier" : identifier,
+        @"SourcePath" : [sourcePath stringByStandardizingPath],
+        @"BundlePath" : [bundlePath stringByStandardizingPath],
+    };
+    NSString *path = [containerPath
+        stringByAppendingPathComponent:kManagedApplicationMarker];
+    NSString *temporary = [containerPath stringByAppendingPathComponent:
+        [NSString stringWithFormat:@".%@-%@", kManagedApplicationMarker,
+                                   [NSUUID UUID].UUIDString]];
+    NSError *error = nil;
+    if (![marker writeToFile:temporary atomically:NO] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0644,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:temporary error:&error] ||
+        rename([temporary fileSystemRepresentation],
+               [path fileSystemRepresentation]) != 0) {
+        int savedError = errno;
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"managed application marker failed: %@ (%s)",
+                error ?: @"none", strerror(savedError)];
+        }
+        return false;
+    }
+    if ([identifier isEqual:kTrollStoreLiteIdentifier]) {
+        NSString *trollStoreMarker = [containerPath
+            stringByAppendingPathComponent:kTrollStoreLiteMarker];
+        NSString *markerError = nil;
+        if (!ensure_root_owned_empty_file(
+                [trollStoreMarker fileSystemRepresentation], 0644,
+                &markerError)) {
+            if (errorText != NULL) *errorText = markerError;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool replace_managed_application_bundle(NSString *source,
+                                               NSString *containerPath,
+                                               NSString *destination,
+                                               NSString **errorText) {
+    if (validated_bundle_entries(source, false) == nil) {
+        if (errorText != NULL) {
+            *errorText = @"rootless application bundle is invalid";
+        }
+        return false;
+    }
+    if (bundle_trees_are_equal(source, destination)) return true;
+
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSString *temporary = [containerPath stringByAppendingPathComponent:
+        [NSString stringWithFormat:@".%@.new-%@",
+            [destination lastPathComponent], [NSUUID UUID].UUIDString]];
+    NSError *error = nil;
+    if (![manager copyItemAtPath:source toPath:temporary error:&error] ||
+        !normalize_bundle_tree(source, temporary) ||
+        !bundle_trees_are_equal(source, temporary)) {
+        [manager removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"managed application copy failed: %@", error ?: @"none"];
+        }
+        return false;
+    }
+
+    NSString *backup = nil;
+    struct stat existing = {0};
+    if (lstat([destination fileSystemRepresentation], &existing) == 0) {
+        NSString *markerPath = [containerPath
+            stringByAppendingPathComponent:kManagedApplicationMarker];
+        struct stat marker = {0};
+        bool managed = S_ISDIR(existing.st_mode) &&
+            !S_ISLNK(existing.st_mode) &&
+            lstat([markerPath fileSystemRepresentation], &marker) == 0 &&
+            S_ISREG(marker.st_mode) && !S_ISLNK(marker.st_mode) &&
+            marker.st_uid == 0 && marker.st_gid == 0;
+        if (!managed) {
+            [manager removeItemAtPath:temporary error:nil];
+            if (errorText != NULL) {
+                *errorText = @"refusing to replace an unmanaged app container";
+            }
+            return false;
+        }
+        backup = [containerPath stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".%@.old-%@",
+                [destination lastPathComponent], [NSUUID UUID].UUIDString]];
+        if (rename([destination fileSystemRepresentation],
+                   [backup fileSystemRepresentation]) != 0) {
+            [manager removeItemAtPath:temporary error:nil];
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed application backup failed: %s", strerror(errno)];
+            }
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        [manager removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"managed application status failed: %s", strerror(errno)];
+        }
+        return false;
+    }
+
+    if (rename([temporary fileSystemRepresentation],
+               [destination fileSystemRepresentation]) != 0) {
+        int savedError = errno;
+        if (backup != nil) {
+            (void)rename([backup fileSystemRepresentation],
+                         [destination fileSystemRepresentation]);
+        }
+        [manager removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"managed application activation failed: %s",
+                strerror(savedError)];
+        }
+        return false;
+    }
+    if (backup != nil) [manager removeItemAtPath:backup error:nil];
+    if (!bundle_trees_are_equal(source, destination)) {
+        if (errorText != NULL) {
+            *errorText = @"managed application verification failed";
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool load_mobile_container_manager(void) {
+    static dispatch_once_t once;
+    static bool loaded = false;
+    dispatch_once(&once, ^{
+        loaded = dlopen(
+            "/System/Library/PrivateFrameworks/"
+            "MobileContainerManager.framework/MobileContainerManager",
+            RTLD_NOW | RTLD_LOCAL) != NULL;
+    });
+    return loaded;
+}
+
+static bool register_managed_rootless_application(NSString *source,
+                                                   NSString **targetPath,
+                                                   NSString **errorText) {
+    if (targetPath != NULL) *targetPath = nil;
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+        [source stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *identifier = info[@"CFBundleIdentifier"];
+    NSString *executable = info[@"CFBundleExecutable"];
+    if (![identifier isKindOfClass:NSString.class] || identifier.length == 0 ||
+        ![executable isKindOfClass:NSString.class] || executable.length == 0 ||
+        validated_bundle_entries(source, false) == nil ||
+        !load_mobile_container_manager()) {
+        if (errorText != NULL) {
+            *errorText = @"managed application metadata is unavailable";
+        }
+        return false;
+    }
+    Class appContainerClass = NSClassFromString(@"MCMAppContainer");
+    Class dataContainerClass = NSClassFromString(@"MCMAppDataContainer");
+    BOOL existed = NO;
+    NSError *containerError = nil;
+    id appContainer = [appContainerClass
+        containerWithIdentifier:identifier
+              createIfNecessary:YES
+                        existed:&existed
+                          error:&containerError];
+    NSURL *containerURL = [appContainer respondsToSelector:@selector(url)]
+        ? [appContainer url] : nil;
+    NSString *containerPath = [containerURL path];
+    if (containerPath == nil ||
+        !managed_app_container_path_is_valid(containerPath)) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"could not create application container: %@",
+                containerError ?: @"unknown"];
+        }
+        return false;
+    }
+    NSString *destination = [containerPath
+        stringByAppendingPathComponent:[source lastPathComponent]];
+    if (!replace_managed_application_bundle(
+            source, containerPath, destination, errorText) ||
+        !write_managed_application_marker(
+            containerPath, identifier, source, destination, errorText)) {
+        return false;
+    }
+    if (targetPath != NULL) *targetPath = destination;
+
+    NSError *dataError = nil;
+    id dataContainer = [dataContainerClass
+        containerWithIdentifier:identifier
+              createIfNecessary:YES
+                        existed:NULL
+                          error:&dataError];
+    NSURL *dataURL = [dataContainer respondsToSelector:@selector(url)]
+        ? [dataContainer url] : nil;
+    NSString *dataPath = [dataURL path];
+    if (dataPath.length == 0) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"could not create application data container: %@",
+                dataError ?: @"unknown"];
+        }
+        return false;
+    }
+
+    (void)registered_application_proxy(identifier);
+    id workspace = [NSClassFromString(@"LSApplicationWorkspace")
+        defaultWorkspace];
+    SEL registrationSelector = @selector(
+        registerContainerizedApplicationWithInfoDictionaries:operationUUID:
+        requestContext:saveObserver:registrationError:);
+    if (workspace == nil ||
+        ![workspace respondsToSelector:registrationSelector]) {
+        if (errorText != NULL) {
+            *errorText = @"LaunchServices embedded registration is unavailable";
+        }
+        return false;
+    }
+    NSMutableDictionary *registration = [info mutableCopy];
+    [registration addEntriesFromDictionary:@{
+        @"ApplicationType" : @"User",
+        @"CFBundleIdentifier" : identifier,
+        @"CodeInfoIdentifier" : identifier,
+        @"CompatibilityState" : @0,
+        @"IsContainerized" : @YES,
+        @"Container" : dataPath,
+        @"EnvironmentVariables" : @{
+            @"CFFIXED_USER_HOME" : dataPath,
+            @"HOME" : dataPath,
+            @"TMPDIR" : [dataPath stringByAppendingPathComponent:@"tmp"],
+        },
+        @"IsDeletable" : @YES,
+        @"Path" : [destination stringByStandardizingPath],
+        @"SignerOrganization" : @"Apple Inc.",
+        @"SignatureVersion" : @132352,
+        @"SignerIdentity" : @"Apple iPhone OS Application Signing",
+        @"IsAdHocSigned" : @YES,
+        @"LSInstallType" : @1,
+        @"HasMIDBasedSINF" : @NO,
+        @"MissingSINF" : @NO,
+        @"FamilyID" : @0,
+        @"IsOnDemandInstallCapable" : @NO,
+        @"_LSBundlePlugins" : @{},
+    }];
+    Class requestContextClass = NSClassFromString(@"LSOperationRequestContext");
+    id requestContext = requestContextClass != Nil
+        ? [[requestContextClass alloc] init] : nil;
+    if (requestContext == nil) {
+        if (errorText != NULL) {
+            *errorText = @"LaunchServices request context is unavailable";
+        }
+        return false;
+    }
+    [requestContext setValue:@501 forKey:@"targetUserID"];
+    NSError *registrationError = nil;
+    id registrationResult = nil;
+    @try {
+        registrationResult = [workspace
+            registerContainerizedApplicationWithInfoDictionaries:
+                @[registration]
+            operationUUID:[NSUUID UUID]
+            requestContext:requestContext
+            saveObserver:nil
+            registrationError:&registrationError];
+    } @catch (NSException *exception) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"LaunchServices registration raised %@", exception];
+        }
+        return false;
+    }
+    (void)notify_post("com.apple.mobile.application_installed");
+    (void)notify_post("com.apple.itunesstored.application_installed");
+    NSString *observed = nil;
+    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+        observed = registered_application_path(identifier);
+        if (executable_paths_match(destination, observed)) return true;
+        usleep(25 * 1000);
+    }
+    if (errorText != NULL) {
+        *errorText = [NSString stringWithFormat:
+            @"LaunchServices registration failed (transport=%@ error=%@ "
+             "observed=%@)",
+            registrationResult != nil ? @"true" : @"false",
+            registrationError ?: @"none", observed ?: @"none"];
+    }
+    return false;
+}
+
+static NSDictionary *managed_application_marker(NSString *containerPath) {
+    NSString *path = [containerPath
+        stringByAppendingPathComponent:kManagedApplicationMarker];
+    struct stat status = {0};
+    if (lstat([path fileSystemRepresentation], &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 0 || status.st_gid != 0 ||
+        status.st_size <= 0 || status.st_size > 64 * 1024 ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return nil;
+    }
+    NSDictionary *marker = [NSDictionary dictionaryWithContentsOfFile:path];
+    return [marker[@"Version"] integerValue] == 1 ? marker : nil;
+}
+
+static bool cleanup_stale_managed_applications(NSSet<NSString *> *active,
+                                                NSString **errorText) {
+    NSString *root = @"/var/containers/Bundle/Application";
+    NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:root error:nil];
+    id workspace = [NSClassFromString(@"LSApplicationWorkspace")
+        defaultWorkspace];
+    NSUInteger inspected = 0;
+    for (NSString *entry in entries) {
+        if (++inspected > 4096U) break;
+        if ([[NSUUID alloc] initWithUUIDString:entry] == nil) continue;
+        NSString *containerPath = [root stringByAppendingPathComponent:entry];
+        NSDictionary *marker = managed_application_marker(containerPath);
+        if (marker == nil) continue;
+        NSString *identifier = marker[@"BundleIdentifier"];
+        NSString *sourcePath = marker[@"SourcePath"];
+        NSString *bundlePath = marker[@"BundlePath"];
+        bool retained = [identifier isKindOfClass:NSString.class] &&
+            [sourcePath isKindOfClass:NSString.class] &&
+            [bundlePath isKindOfClass:NSString.class] &&
+            [active containsObject:identifier] &&
+            [[NSFileManager defaultManager] fileExistsAtPath:sourcePath];
+        if (retained) continue;
+        if ([bundlePath isKindOfClass:NSString.class] &&
+            [workspace respondsToSelector:@selector(unregisterApplication:)]) {
+            (void)[workspace unregisterApplication:
+                [NSURL fileURLWithPath:bundlePath]];
+        }
+        NSError *removeError = nil;
+        if (![[NSFileManager defaultManager]
+                removeItemAtPath:containerPath error:&removeError]) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed application cleanup failed: %@", removeError];
+            }
+            return false;
+        }
+        (void)notify_post("com.apple.mobile.application_uninstalled");
+    }
+    return true;
+}
+
 static bool write_sileo_sandbox_extensions(NSString *dataContainer,
                                            NSString *jailbreakRoot,
                                            NSString **tokenPathOut,
@@ -1387,9 +1912,15 @@ static bool sbinject_infrastructure_ready(const char *reason) {
         access([kSBInjectBundleHook fileSystemRepresentation], R_OK) == 0;
     bool elleKit =
         access([kElleKitInjectorDylib fileSystemRepresentation], R_OK) == 0;
+    bool amfidHook =
+        access([kSBInjectAmfidHook fileSystemRepresentation], R_OK) == 0;
+    bool amfidCandidate =
+        access([kAmfidCandidateExecutable fileSystemRepresentation], X_OK) ==
+        0;
     log_message("sbinjectInfrastructure reason=%s validator=%s loader=%s "
                 "jitterd=%s launchdHook=%s generalHook=%s candidate=%s "
-                "bundleHook=%s elleKit=%s dynamicTrustCache=disabled",
+                "bundleHook=%s elleKit=%s amfidHook=%s amfidCandidate=%s "
+                "dynamicTrustCache=disabled",
                 reason, validator ? "ready" : "missing",
                 loader ? "ready" : "missing",
                 jitterd ? "ready" : "missing",
@@ -1397,9 +1928,11 @@ static bool sbinject_infrastructure_ready(const char *reason) {
                 generalHook ? "ready" : "missing",
                 candidate ? "ready" : "missing",
                 bundleHook ? "ready" : "missing",
-                elleKit ? "ready" : "missing");
+                elleKit ? "ready" : "missing",
+                amfidHook ? "ready" : "missing",
+                amfidCandidate ? "ready" : "missing");
     return validator && loader && jitterd && launchdHook && generalHook &&
-           candidate && bundleHook;
+           candidate && bundleHook && amfidHook && amfidCandidate;
 }
 
 static bool broker_command_is_named(const char *resolvedCommand,
@@ -2505,6 +3038,34 @@ static pid_t current_preferences_process(bool *candidateOut) {
     return result;
 }
 
+static pid_t current_amfid_process(bool *candidateOut) {
+    if (candidateOut != NULL) *candidateOut = false;
+    int capacity = proc_listallpids(NULL, 0);
+    if (capacity <= 0 || capacity > 1024 * 1024) return -1;
+    capacity += 32;
+    pid_t *processes = calloc((size_t)capacity, sizeof(*processes));
+    if (processes == NULL) return -1;
+    int count = proc_listallpids(processes,
+                                 capacity * (int)sizeof(*processes));
+    if (count > capacity) count = capacity;
+    pid_t result = 0;
+    for (int index = 0; index < count; ++index) {
+        pid_t pid = processes[index];
+        if (pid <= 1) continue;
+        char path[CODEX_PROC_PIDPATH_MAX] = {0};
+        if (proc_pidpath(pid, path, sizeof(path)) <= 0) continue;
+        bool candidate = is_exact_amfid_candidate_process(pid, path);
+        bool stock = strcmp(path, "/usr/libexec/amfid") == 0;
+        if (candidate || stock) {
+            result = pid;
+            if (candidateOut != NULL) *candidateOut = candidate;
+            break;
+        }
+    }
+    free(processes);
+    return result;
+}
+
 static pid_t current_lsd_process(void) {
     int capacity = proc_listallpids(NULL, 0);
     if (capacity <= 0 || capacity > 1024 * 1024) return -1;
@@ -3097,6 +3658,11 @@ static int32_t run_root_broker_command(
         log_message("sileoRootBrokerJITResult command=%s status=%d",
                     resolvedCommand, status);
     }
+    if (packageMutation && WIFEXITED(status) && WEXITSTATUS(status) == 0 &&
+        !refresh_rootless_application_registrations(
+            "sileo-package-transaction")) {
+        status = 75 << 8;
+    }
     if (packageMutation) {
         bool finalized = finish_sbinject_package_transaction(
             springBoardBefore, status, resolvedCommand);
@@ -3266,6 +3832,11 @@ static bool is_exact_preferences_candidate_process(pid_t pid,
         pid, path, kPreferencesCandidateExecutable);
 }
 
+static bool is_exact_amfid_candidate_process(pid_t pid, const char *path) {
+    return is_exact_managed_candidate_process(
+        pid, path, kAmfidCandidateExecutable);
+}
+
 static bool sbinject_managed_file(NSString *path, mode_t mode) {
     struct stat status;
     return lstat([path fileSystemRepresentation], &status) == 0 &&
@@ -3370,10 +3941,16 @@ static bool prepare_sbinject_redirect(const char *reason) {
     }
     mach_port_deallocate(mach_task_self(), jitterdPort);
 
+    bool launchdHookUpgrade =
+        exact_empty_root_marker(kSBInjectLaunchdUpgradeMarker);
+    if (launchdHookUpgrade) {
+        (void)unlink(
+            [kSBInjectLaunchdReadyMarker fileSystemRepresentation]);
+    }
     bool launchdHookReady =
         sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker);
     int injectionStatus = 0;
-    if (!launchdHookReady) {
+    if (!launchdHookReady && !launchdHookUpgrade) {
         // A launchd-injected dylib cannot unload before the next boot. If an
         // exact managed notSpringBoard from this boot is alive, the redirect
         // hook is necessarily already resident in PID 1. Recover a readiness
@@ -3423,6 +4000,11 @@ static bool prepare_sbinject_redirect(const char *reason) {
                     launchdHookReady ? "true" : "false");
         (void)unlink([kSBInjectEnableMarker fileSystemRepresentation]);
         return false;
+    }
+    if (launchdHookUpgrade) {
+        (void)unlink(
+            [kSBInjectLaunchdUpgradeMarker fileSystemRepresentation]);
+        log_message("sbinjectLaunchdHotChain=true reason=%s", reason);
     }
     NSString *markerError = nil;
     if (!ensure_root_owned_empty_file(
@@ -3625,6 +4207,205 @@ static bool activate_sbinject_preferences(void) {
     log_message("sbinjectPreferencesActivation=false "
                 "reason=candidate-not-observed pid=%d fallback=stock",
                 finalPreferences);
+    return false;
+}
+
+static int trigger_amfid_service(void) {
+    char *arguments[] = {
+        "/var/jb/usr/bin/launchctl", "kickstart", "-k",
+        "user/501/com.apple.MobileFileIntegrity", NULL};
+    return run_and_wait_bounded(arguments[0], arguments, 10000);
+}
+
+static void trigger_amfid_service_async(void) {
+    dispatch_async(
+        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            int result = trigger_amfid_service();
+            log_message("sbinjectAmfidRespawnTrigger=%d", result);
+        });
+}
+
+static dispatch_source_t gAmfidJitMonitor;
+
+static bool inject_sbinject_amfid_hook(pid_t pid) {
+    char observedPath[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (pid <= 1 ||
+        proc_pidpath(pid, observedPath, sizeof(observedPath)) <= 0 ||
+        strcmp(observedPath,
+               [kStockAmfidExecutable fileSystemRepresentation]) != 0) {
+        return false;
+    }
+
+    (void)unlink([kSBInjectAmfidReadyMarker fileSystemRepresentation]);
+    (void)unlink([kSBInjectAmfidFailureMarker fileSystemRepresentation]);
+
+    char pidText[32] = {0};
+    if (snprintf(pidText, sizeof(pidText), "%d", pid) <= 0) return false;
+    char *arguments[] = {
+        (char *)[kElleKitInjectorExecutable fileSystemRepresentation],
+        "--inject-pid", pidText,
+        (char *)[kSBInjectAmfidHook fileSystemRepresentation], NULL,
+    };
+    int injectionStatus = run_and_wait_bounded(
+        arguments[0], arguments, 30000);
+    bool candidate = false;
+    pid_t current = current_amfid_process(&candidate);
+    bool ready = injectionStatus == 0 && current == pid && !candidate &&
+                 sbinject_boot_fresh_marker(kSBInjectAmfidReadyMarker) &&
+                 access([kSBInjectAmfidFailureMarker fileSystemRepresentation],
+                        F_OK) != 0;
+    log_message("sbinjectAmfidInjection pid=%d fixedTrust=true injection=%d "
+                "current=%d stock=%s ready=%s",
+                pid, injectionStatus, current,
+                current == pid && !candidate ? "true" : "false",
+                ready ? "true" : "false");
+    return ready;
+}
+
+static void start_amfid_jit_monitor(void) {
+    if (gAmfidJitMonitor != NULL) return;
+    dispatch_queue_t queue = dispatch_queue_create(
+        "com.openai.codex.dopamine.amfid-jit-monitor",
+        DISPATCH_QUEUE_SERIAL);
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (timer == NULL) return;
+    bool initialCandidate = false;
+    pid_t initialPid = current_amfid_process(&initialCandidate);
+    __block pid_t attachedPid =
+        initialPid > 1 && !initialCandidate &&
+                sbinject_boot_fresh_marker(kSBInjectAmfidReadyMarker)
+            ? initialPid
+            : 0;
+    dispatch_source_set_timer(
+        timer, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
+        50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        if (!exact_empty_root_marker(kSBInjectAmfidEnableMarker)) {
+            attachedPid = 0;
+            return;
+        }
+        bool candidate = false;
+        pid_t observed = current_amfid_process(&candidate);
+        if (observed <= 1 || candidate) {
+            if (observed != attachedPid) attachedPid = 0;
+            return;
+        }
+        if (observed == attachedPid) return;
+        bool injected = inject_sbinject_amfid_hook(observed);
+        log_message("sbinjectAmfidJITMonitor pid=%d injected=%s",
+                    observed, injected ? "true" : "false");
+        attachedPid = injected ? observed : 0;
+    });
+    gAmfidJitMonitor = timer;
+    dispatch_resume(timer);
+    log_message("sbinjectAmfidJITMonitor=ready initialPid=%d",
+                attachedPid);
+}
+
+static bool activate_sbinject_amfid(void) {
+    NSArray<NSDictionary *> *artifacts = @[
+        @{@"path" : kSBInjectAmfidHook, @"mode" : @0755},
+        @{@"path" : kElleKitInjectorExecutable, @"mode" : @0755},
+    ];
+    for (NSDictionary *artifact in artifacts) {
+        NSString *path = artifact[@"path"];
+        mode_t mode = (mode_t)[artifact[@"mode"] unsignedShortValue];
+        if (!sbinject_managed_file(path, mode)) {
+            log_message("sbinjectAmfidActivation=false reason=artifact path=%s",
+                        [path UTF8String]);
+            (void)unlink(
+                [kSBInjectAmfidEnableMarker fileSystemRepresentation]);
+            return false;
+        }
+    }
+    (void)unlink([kSBInjectAmfidCrashMarker fileSystemRepresentation]);
+
+    NSString *markerError = nil;
+    if (!ensure_root_owned_empty_file(
+            [kSBInjectAmfidEnableMarker fileSystemRepresentation], 0644,
+            &markerError)) {
+        log_message("sbinjectAmfidActivation=false "
+                    "reason=enable-marker error=%s",
+                    markerError != nil
+                        ? [[markerError description] UTF8String]
+                        : "unknown");
+        return false;
+    }
+
+    // A previous experimental build used this marker to redirect launchd to
+    // a resigned amfid copy.  Keep it absent: the kernel authenticates AMFI
+    // replies against the genuine daemon's CDHash, so only live injection
+    // into /usr/libexec/amfid is valid.
+    (void)unlink("/var/jb/var/lib/sbinject/amfid-enabled");
+    (void)unlink([kSBInjectAmfidFailureMarker fileSystemRepresentation]);
+    (void)unlink([kSBInjectAmfidReadyMarker fileSystemRepresentation]);
+
+    bool candidate = false;
+    pid_t amfid = current_amfid_process(&candidate);
+    if (amfid < 0) {
+        log_message("sbinjectAmfidActivation=false "
+                    "reason=process-enumeration");
+        (void)unlink([kSBInjectAmfidEnableMarker fileSystemRepresentation]);
+        return false;
+    }
+    if (candidate && amfid > 1) {
+        int signalStatus = kill(amfid, SIGKILL);
+        log_message("sbinjectAmfidLegacyCandidateStop pid=%d status=%d "
+                    "error=%d",
+                    amfid, signalStatus,
+                    signalStatus == 0 ? 0 : errno);
+        if (signalStatus != 0) {
+            (void)unlink(
+                [kSBInjectAmfidEnableMarker fileSystemRepresentation]);
+            return false;
+        }
+        amfid = 0;
+    } else if (amfid > 1 && inject_sbinject_amfid_hook(amfid)) {
+        log_message("sbinjectAmfidActivation=true pid=%d reused=true "
+                    "mode=stock-live-injection",
+                    amfid);
+        return true;
+    }
+
+    trigger_amfid_service_async();
+
+    pid_t injectedPid = 0;
+    for (NSUInteger attempt = 0; attempt < 300; ++attempt) {
+        bool observedCandidate = false;
+        pid_t observed = current_amfid_process(&observedCandidate);
+        if (observed > 1 && !observedCandidate) {
+            if (observed != injectedPid &&
+                inject_sbinject_amfid_hook(observed)) {
+                injectedPid = observed;
+                log_message("sbinjectAmfidActivation=true pid=%d "
+                            "reused=false mode=stock-live-injection",
+                            observed);
+                return true;
+            }
+        } else if (observed > 1 && observedCandidate) {
+            (void)kill(observed, SIGKILL);
+        }
+        usleep(100 * 1000);
+    }
+
+    bool finalCandidate = false;
+    pid_t finalAmfid = current_amfid_process(&finalCandidate);
+    bool initializedThenIdle = injectedPid > 1 && finalAmfid == 0 &&
+        sbinject_boot_fresh_marker(kSBInjectAmfidReadyMarker) &&
+        access([kSBInjectAmfidFailureMarker fileSystemRepresentation], F_OK) !=
+            0;
+    if (initializedThenIdle) {
+        log_message("sbinjectAmfidActivation=true pid=none "
+                    "state=initialized-idle mode=stock-live-injection");
+        return true;
+    }
+    (void)unlink([kSBInjectAmfidEnableMarker fileSystemRepresentation]);
+    (void)unlink([kSBInjectAmfidReadyMarker fileSystemRepresentation]);
+    log_message("sbinjectAmfidActivation=false "
+                "reason=stock-injection-not-ready pid=%d "
+                "fallback=stock",
+                finalAmfid);
     return false;
 }
 
@@ -4492,11 +5273,56 @@ static bool install_managed_apt_file(NSString *source, NSString *directory,
 }
 
 
+static bool secure_openssh_root_directories(NSString **errorText) {
+    NSFileManager *manager = [NSFileManager defaultManager];
+    NSDictionary *attributes = @{
+        NSFilePosixPermissions : @0700,
+        NSFileOwnerAccountID : @0,
+        NSFileGroupOwnerAccountID : @0,
+    };
+    NSArray<NSString *> *directories = @[
+        @"/var/jb/var/root",
+        @"/var/jb/var/root/.ssh",
+    ];
+    NSError *error = nil;
+    for (NSString *directory in directories) {
+        if (![manager createDirectoryAtPath:directory
+                 withIntermediateDirectories:YES
+                                  attributes:attributes
+                                       error:&error] ||
+            ![manager setAttributes:attributes
+                       ofItemAtPath:directory
+                              error:&error]) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"OpenSSH root directory preparation failed: %@",
+                    error];
+            }
+            return false;
+        }
+        struct stat status = {0};
+        if (lstat([directory fileSystemRepresentation], &status) != 0 ||
+            !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
+            status.st_uid != 0 || status.st_gid != 0 ||
+            (status.st_mode & 07777) != 0700) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"OpenSSH root directory verification failed: %@",
+                    directory];
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool install_openssh_job(NSString **errorText) {
+    if (!secure_openssh_root_directories(errorText)) return false;
     NSDictionary<NSString *, NSNumber *> *files = @{
         kOpenSSHExecutable : @0755,
         kOpenSSHKeygen : @0755,
         kOpenSSHKeygenWrapper : @0755,
+        kOpenSSHConfig : @0644,
         kOpenSSHPlist : @0644,
     };
     for (NSString *path in files) {
@@ -5810,6 +6636,15 @@ int main(int argc, char *argv[]) {
                 bool sbinjectActive = activate_sbinject_springboard();
                 bool sbinjectPreferencesActive =
                     sbinjectActive && activate_sbinject_preferences();
+                bool sbinjectAmfidActive =
+                    sbinjectActive && activate_sbinject_amfid();
+                if (sbinjectAmfidActive) {
+                    start_amfid_jit_monitor();
+                }
+                bool applicationRegistrationsReady =
+                    sbinjectAmfidActive &&
+                    refresh_rootless_application_registrations(
+                        "broker-start");
                 log_message("sbinjectStartup=%s fallback=%s",
                             sbinjectActive ? "active" : "inactive",
                             sbinjectActive ? "none" : "stock-springboard");
@@ -5817,6 +6652,12 @@ int main(int argc, char *argv[]) {
                             sbinjectPreferencesActive ? "active" : "inactive",
                             sbinjectPreferencesActive ? "none"
                                                        : "stock-preferences");
+                log_message("sbinjectAmfidStartup=%s fallback=%s",
+                            sbinjectAmfidActive ? "active" : "inactive",
+                            sbinjectAmfidActive ? "none" : "stock-amfid");
+                log_message("sbinjectApplicationStartup=%s",
+                            applicationRegistrationsReady ? "ready"
+                                                          : "inactive");
             });
             dispatch_main();
             __builtin_unreachable();
@@ -5883,6 +6724,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceOpenSSHSFTPServer =
             [payloadRoot stringByAppendingPathComponent:
                              @"openssh-sftp-server.deb"];
+        NSString *sourceOpenSSHConfig =
+            [sourceProcursus stringByAppendingPathComponent:
+                                  @"etc/ssh/sshd_config"];
         NSString *sourceHostSSHAuthorizedKeys =
             [payloadRoot stringByAppendingPathComponent:
                              @"host-ssh-authorized-keys"];
@@ -5927,12 +6771,15 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectGeneralHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/generalhook.dylib"];
+        NSString *sourceSBInjectAmfidHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/amfihook.dylib"];
         NSString *sourceSBInjectPreferencesBridge =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/preferences-bridge.dylib"];
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/lib/sbinject/launchdhook-v3.dylib"];
+                           @"usr/local/lib/sbinject/launchdhook-v12.dylib"];
         NSString *sourceSBInjectLsdRegistrationHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/lsd-registration-hook.dylib"];
@@ -5950,6 +6797,13 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectPreferencesBundle =
             [sourceSBInjectRoot stringByAppendingPathComponent:
                                     @"Preferences.app"];
+        NSString *sourceSBInjectAmfidRoot =
+            [sourceSBInjectRoot stringByAppendingPathComponent:@"amfid"];
+        NSString *sourceSBInjectAmfidCandidate =
+            [sourceSBInjectAmfidRoot stringByAppendingPathComponent:
+                                        @"notamfid"];
+        NSString *sourceSBInjectAmfidCandidateHook =
+            [sourceSBInjectAmfidRoot stringByAppendingPathComponent:@"a"];
         NSString *sourceSBInjectJitterdPlist =
             [sourceSBInjectRoot stringByAppendingPathComponent:
                                     @"com.openai.codex.sbinject.jitterd.plist"];
@@ -5989,8 +6843,18 @@ int main(int argc, char *argv[]) {
                 fileExistsAtPath:sourceTrustedUiopen] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedUicache] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceSBInjectAmfidHook] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceSBInjectAmfidCandidate] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceSBInjectAmfidCandidateHook] ||
             !is_sileo_system_bundle_path(sourceTrustedSileo)) {
             return fail(@"cryptex payload is incomplete", nil);
+        }
+        if (!files_are_equal(sourceSBInjectAmfidHook,
+                             sourceSBInjectAmfidCandidateHook)) {
+            return fail(@"amfid fixed hook copies do not match", nil);
         }
         struct stat defaultSourcesStatus;
         if (lstat([sourceDefaultSources fileSystemRepresentation],
@@ -6414,6 +7278,15 @@ int main(int argc, char *argv[]) {
                 &systemSileoBundleError)) {
             return fail(systemSileoBundleError, nil);
         }
+        if (repairMode &&
+            access([kSBInjectAmfidCrashMarker fileSystemRepresentation],
+                   F_OK) == 0) {
+            int resetStatus = unlink(
+                [kSBInjectAmfidCrashMarker fileSystemRepresentation]);
+            log_message("sbinjectAmfidRepairReset=%s error=%d",
+                        resetStatus == 0 ? "success" : "failed",
+                        resetStatus == 0 ? 0 : errno);
+        }
 
         // The Cryptex launch daemon runs again after every reboot.  When its
         // immutable payload is already installed byte-for-byte, bring up the
@@ -6474,6 +7347,8 @@ int main(int argc, char *argv[]) {
                                      stringByAppendingPathComponent:
                                          @"usr/sbin/sshd"],
                   @"installed" : kOpenSSHExecutable},
+                @{@"source" : sourceOpenSSHConfig,
+                  @"installed" : kOpenSSHConfig},
                 @{@"source" : [sourceProcursus
                                      stringByAppendingPathComponent:
                                          @"Library/LaunchDaemons/"
@@ -6481,6 +7356,10 @@ int main(int argc, char *argv[]) {
                   @"installed" : kOpenSSHPlist},
                 @{@"source" : sourceSBInjectGeneralHook,
                   @"installed" : kSBInjectGeneralHook},
+                @{@"source" : sourceSBInjectAmfidHook,
+                  @"installed" : kSBInjectAmfidHook},
+                @{@"source" : sourceSBInjectAmfidCandidate,
+                  @"installed" : kAmfidCandidateExecutable},
                 @{@"source" : sourceSBInjectPreferencesBridge,
                   @"installed" : kSBInjectPreferencesBridge},
                 @{@"source" : sourceSBInjectLaunchdHook,
@@ -6787,12 +7666,21 @@ int main(int argc, char *argv[]) {
                                            openSSHDpkgStatus],
                 nil);
         }
+        bool openSSHConfigUpdated = false;
+        NSString *openSSHConfigError = nil;
+        if (!install_managed_apt_file(
+                sourceOpenSSHConfig, @"/var/jb/etc/ssh", @"sshd_config",
+                256 * 1024, 0644, "openSSHConfig", &openSSHConfigUpdated,
+                &openSSHConfigError)) {
+            return fail(openSSHConfigError, nil);
+        }
         NSDictionary<NSString *, NSString *> *trustedOpenSSHFiles = @{
             @"usr/bin/ssh" : @"/var/jb/usr/bin/ssh",
             @"usr/bin/ssh-keygen" : kOpenSSHKeygen,
             @"usr/libexec/sftp-server" : @"/var/jb/usr/libexec/sftp-server",
             @"usr/libexec/sshd-keygen-wrapper" : kOpenSSHKeygenWrapper,
             @"usr/sbin/sshd" : kOpenSSHExecutable,
+            @"etc/ssh/sshd_config" : kOpenSSHConfig,
             @"Library/LaunchDaemons/com.openssh.sshd.plist" : kOpenSSHPlist,
         };
         for (NSString *relativePath in trustedOpenSSHFiles) {
@@ -6888,6 +7776,8 @@ int main(int argc, char *argv[]) {
         }
 
         bool sbinjectGeneralHookUpdated = false;
+        bool sbinjectAmfidHookUpdated = false;
+        bool sbinjectAmfidCandidateUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
         bool sbinjectLsdRegistrationHookUpdated = false;
@@ -6911,6 +7801,16 @@ int main(int argc, char *argv[]) {
                 "sbinjectGeneralHook", &sbinjectGeneralHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
+                sourceSBInjectAmfidHook, @"/var/jb/usr/libexec/sbinject",
+                @"a", 4 * 1024 * 1024, 0755,
+                "sbinjectAmfidHook", &sbinjectAmfidHookUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceSBInjectAmfidCandidate,
+                @"/var/jb/usr/libexec/sbinject", @"notamfid",
+                32 * 1024 * 1024, 0755, "sbinjectAmfidCandidate",
+                &sbinjectAmfidCandidateUpdated, &sbinjectPayloadError) ||
+            !install_managed_apt_file(
                 sourceSBInjectPreferencesBridge,
                 @"/var/jb/usr/lib/sbinject",
                 @"preferences-bridge.dylib", 4 * 1024 * 1024, 0755,
@@ -6919,7 +7819,7 @@ int main(int argc, char *argv[]) {
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectLaunchdHook, @"/var/jb/usr/lib/sbinject",
-                @"launchdhook-v3.dylib", 16 * 1024 * 1024, 0755,
+                @"launchdhook-v12.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
@@ -6969,6 +7869,7 @@ int main(int argc, char *argv[]) {
         }
         bool sbinjectPayloadUpdated =
             sbinjectGeneralHookUpdated ||
+            sbinjectAmfidHookUpdated || sbinjectAmfidCandidateUpdated ||
             sbinjectPreferencesBridgeUpdated ||
             sbinjectLaunchdHookUpdated ||
             sbinjectLsdRegistrationHookUpdated ||
@@ -6987,21 +7888,38 @@ int main(int argc, char *argv[]) {
             (void)unlink([kSBInjectCrashMarker fileSystemRepresentation]);
             (void)unlink(
                 [kSBInjectPreferencesCrashMarker fileSystemRepresentation]);
+            (void)unlink(
+                [kSBInjectAmfidEnableMarker fileSystemRepresentation]);
+            (void)unlink(
+                [kSBInjectAmfidCrashMarker fileSystemRepresentation]);
+            (void)unlink(
+                [kSBInjectAmfidReadyMarker fileSystemRepresentation]);
+            if (sbinjectLaunchdHookUpdated) {
+                NSString *upgradeMarkerError = nil;
+                if (!ensure_root_owned_empty_file(
+                        [kSBInjectLaunchdUpgradeMarker
+                            fileSystemRepresentation],
+                        0644, &upgradeMarkerError)) {
+                    return fail(upgradeMarkerError, nil);
+                }
+                (void)unlink(
+                    [kSBInjectLaunchdReadyMarker fileSystemRepresentation]);
+            }
         }
-        // A boot-fresh marker describes the hook already live in launchd, not
-        // the inode currently installed at the hook path. Replacing that path
-        // must not discard a still-valid live readiness proof: the injector
-        // sees the old image at the same path, correctly skips a second load,
-        // and therefore has no constructor invocation with which to republish
-        // a marker. The normal boot-time freshness check selects the updated
-        // on-disk hook after the next reboot.
+        // Each hook generation has a unique image path and can rebind launchd
+        // slots owned by the preceding generation. Clear readiness only when
+        // the generation changed so prepare_sbinject_redirect hot-chains the
+        // new image without requiring a reboot.
         log_message("sbinjectPayload updated=%s bundleUpdated=%s "
-                    "preferencesBundleUpdated=%s launchdHookUpdated=%s "
-                    "launchdReadyPreserved=%s candidate=%s "
+                    "preferencesBundleUpdated=%s amfidHookUpdated=%s "
+                    "amfidCandidateUpdated=%s launchdHookUpdated=%s "
+                    "launchdReadyCurrent=%s candidate=%s "
                     "preferencesCandidate=%s dynamicTrustCache=false",
                     sbinjectPayloadUpdated ? "true" : "false",
                     sbinjectBundleUpdated ? "true" : "false",
                     sbinjectPreferencesBundleUpdated ? "true" : "false",
+                    sbinjectAmfidHookUpdated ? "true" : "false",
+                    sbinjectAmfidCandidateUpdated ? "true" : "false",
                     sbinjectLaunchdHookUpdated ? "true" : "false",
                     sbinject_boot_fresh_marker(kSBInjectLaunchdReadyMarker)
                         ? "true"
@@ -7296,6 +8214,8 @@ int main(int argc, char *argv[]) {
         manifest[@"SBInjectPreferencesExecutable"] =
             kPreferencesCandidateExecutable;
         manifest[@"SBInjectGeneralHook"] = kSBInjectGeneralHook;
+        manifest[@"SBInjectAmfidHook"] = kSBInjectAmfidHook;
+        manifest[@"SBInjectAmfidExecutable"] = kAmfidCandidateExecutable;
         manifest[@"SBInjectPreferencesBridge"] = kSBInjectPreferencesBridge;
         manifest[@"SBInjectLaunchdHook"] = kSBInjectLaunchdHook;
         manifest[@"SpringBoardTweakAdmission"] =

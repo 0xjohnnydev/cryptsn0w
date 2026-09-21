@@ -380,7 +380,11 @@ def free_local_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def pull_target_bundles(device: dict[str, str], private_key: Path) -> None:
+def pull_target_bundles(
+    device: dict[str, str],
+    private_key: Path,
+    stage_debs: tuple[Path, ...] = (),
+) -> None:
     local_port = free_local_port()
     staging = TARGET_BUNDLE_ROOT.with_name(f".target-{uuid.uuid4().hex}")
     staging.mkdir(parents=True)
@@ -419,12 +423,45 @@ def pull_target_bundles(device: dict[str, str], private_key: Path) -> None:
         for remote in (
             "/System/Library/CoreServices/SpringBoard.app",
             "/Applications/Preferences.app",
+            "/usr/libexec/amfid",
         ):
             run(["scp", *scp_options, f"root@127.0.0.1:{remote}", str(staging)])
+        if stage_debs:
+            remote_directory = "/var/jb/.codex-cache/stage-debs"
+            validated_packages: list[Path] = []
+            for package in stage_debs:
+                package = package.resolve()
+                if not package.is_file() or package.suffix != ".deb" or not (
+                    re.fullmatch(r"[A-Za-z0-9._+~-]+\.deb", package.name)
+                ):
+                    raise DeployError(f"invalid stage Debian package: {package}")
+                validated_packages.append(package)
+            run([
+                "ssh", *options, "root@127.0.0.1",
+                "/var/jb/bin/mkdir", "-p", remote_directory,
+            ])
+            remote_packages: list[str] = []
+            try:
+                for package in validated_packages:
+                    remote = f"{remote_directory}/{package.name}"
+                    run([
+                        "scp", *scp_options, str(package),
+                        f"root@127.0.0.1:{remote}",
+                    ])
+                    remote_packages.append(remote)
+                run([
+                    "ssh", *options, "root@127.0.0.1",
+                    "/var/jb/usr/bin/dpkg", "-i", *remote_packages,
+                ])
+            finally:
+                subprocess.run([
+                    "ssh", *options, "root@127.0.0.1",
+                    "/var/jb/bin/rm", "-rf", remote_directory,
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if not (staging / "SpringBoard.app" / "SpringBoard").is_file() or not (
             staging / "Preferences.app" / "Preferences"
-        ).is_file():
-            raise DeployError("device app transfer is incomplete")
+        ).is_file() or not (staging / "amfid").is_file():
+            raise DeployError("device executable transfer is incomplete")
         if TARGET_BUNDLE_ROOT.exists():
             shutil.rmtree(TARGET_BUNDLE_ROOT)
         os.replace(staging, TARGET_BUNDLE_ROOT)
@@ -641,6 +678,7 @@ def finish_install(
     base_version: str,
     stage_install: Path,
     enable_host_ssh: bool,
+    stage_debs: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     # Resume is intentionally idempotent: a prior final build/install failure
     # may leave generated context and personalization outputs in this run.
@@ -658,7 +696,7 @@ def finish_install(
     ):
         stale_file.unlink(missing_ok=True)
 
-    pull_target_bundles(device, private_key)
+    pull_target_bundles(device, private_key, stage_debs)
     forward, handoff = start_stage_handoff(device, private_key)
 
     try:
@@ -732,11 +770,13 @@ def install_pair(args: argparse.Namespace, device: dict[str, str]) -> dict[str, 
     install_cryptex(stage, stage_bundle, device, stage_install)
     return finish_install(
         run_dir, device, private_key, base_version, stage_install,
-        args.enable_host_ssh,
+        args.enable_host_ssh, tuple(args.stage_deb),
     )
 
 
-def resume_pair(run_dir: Path, device: dict[str, str]) -> dict[str, Any]:
+def resume_pair(
+    run_dir: Path, device: dict[str, str], stage_debs: tuple[Path, ...]
+) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     runs_root = (SCRIPT_DIR / "out" / "runs").resolve()
     if run_dir.parent != runs_root:
@@ -755,7 +795,7 @@ def resume_pair(run_dir: Path, device: dict[str, str]) -> dict[str, Any]:
         raise DeployError("resume run has no installed SSH stage or private key")
     return finish_install(
         run_dir, device, private_key, stage_version.removesuffix(".1"),
-        stage_install, enable_host_ssh,
+        stage_install, enable_host_ssh, stage_debs,
     )
 
 
@@ -772,6 +812,10 @@ def main() -> int:
         "--enable-host-ssh", action="store_true",
         help="retain the run key and authorize it for root SSH on the device",
     )
+    parser.add_argument(
+        "--stage-deb", action="append", default=[], type=Path,
+        help="install a local .deb over the ephemeral stage SSH CLI before the final mount",
+    )
     args = parser.parse_args()
 
     if args.action == "build":
@@ -783,7 +827,7 @@ def main() -> int:
     if args.action == "resume":
         if args.run is None:
             parser.error("resume requires --run")
-        resume_pair(args.run, device)
+        resume_pair(args.run, device, tuple(args.stage_deb))
     else:
         install_pair(args, device)
     return 0

@@ -82,7 +82,8 @@ EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
-SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v3.dylib"
+SBINJECT_AMFIHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/amfihook.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v12.dylib"
 SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
 SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
 PREFERENCES_BRIDGE_SUPPORT_DIR="$SBINJECT_SOURCE_DIR/PreferenceBridgeSupport"
@@ -93,6 +94,7 @@ SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.ji
 EMBEDDED_SBINJECT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/sbinject"
 EMBEDDED_SBINJECT_JITTERD_PLIST="$EMBEDDED_SBINJECT_ROOT/com.openai.codex.sbinject.jitterd.plist"
 SPRINGBOARD_CANDIDATE_BUILDER="$SCRIPT_DIR/build_springboard_candidate.py"
+AMFID_CANDIDATE_BUILDER="$SCRIPT_DIR/build_amfid_candidate.py"
 TARGET_BUNDLE_ROOT=${CODEX_TARGET_BUNDLE_ROOT:-"$SCRIPT_DIR/../../build/target"}
 SPRINGBOARD_CANDIDATE_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/SpringBoard"}
 SPRINGBOARD_CANDIDATE_INFO_SOURCE=${CODEX_SPRINGBOARD_CANDIDATE_INFO_SOURCE:-"$TARGET_BUNDLE_ROOT/SpringBoard.app/Info.plist"}
@@ -110,6 +112,11 @@ PREFERENCES_CANDIDATE="$PREFERENCES_CANDIDATE_DIRECTORY/notPreferences"
 PREFERENCES_CANDIDATE_INFO="$PREFERENCES_CANDIDATE_DIRECTORY/Info.plist"
 PREFERENCES_CANDIDATE_ENTITLEMENTS="$PREFERENCES_CANDIDATE_DIRECTORY/entitlements.plist"
 PREFERENCES_CANDIDATE_GENERALHOOK="$PREFERENCES_CANDIDATE_DIRECTORY/g"
+AMFID_CANDIDATE_SOURCE=${CODEX_AMFID_CANDIDATE_SOURCE:-"$TARGET_BUNDLE_ROOT/amfid"}
+AMFID_CANDIDATE_DIRECTORY="$EMBEDDED_SBINJECT_ROOT/amfid"
+AMFID_CANDIDATE="$AMFID_CANDIDATE_DIRECTORY/notamfid"
+AMFID_CANDIDATE_ENTITLEMENTS="$AMFID_CANDIDATE_DIRECTORY/notamfid.entitlements.plist"
+AMFID_CANDIDATE_HOOK="$AMFID_CANDIDATE_DIRECTORY/a"
 PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
@@ -365,6 +372,7 @@ mkdir -p \
     "$IMAGE_ROOT/usr/local/lib/sbinject" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap" \
     "$EMBEDDED_SBINJECT_ROOT" \
+    "$AMFID_CANDIDATE_DIRECTORY" \
     "$EMBEDDED_APT_CONFIG_DIR" \
     "$EMBEDDED_KEYRING_DIR" \
     "$TRUSTED_ELLEKIT_ROOT" \
@@ -455,7 +463,7 @@ xcrun --sdk iphoneos clang \
     -I "$SBINJECT_SOURCE_DIR" \
     "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -install_name /var/jb/usr/lib/sbinject/launchdhook-v3.dylib \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook-v12.dylib \
     -o "$SBINJECT_LAUNCHDHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LAUNCHDHOOK"
@@ -477,6 +485,22 @@ xcrun --sdk iphoneos clang \
     -o "$SBINJECT_GENERALHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_GENERALHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fobjc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
+    -I "$SBINJECT_SOURCE_DIR" \
+    "$SBINJECT_SOURCE_DIR/sbinject_amfihook.m" \
+    "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
+    -framework Foundation \
+    -install_name @loader_path/a \
+    -o "$SBINJECT_AMFIHOOK"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_AMFIHOOK"
 
 xcrun --sdk iphoneos clang \
     -arch arm64e \
@@ -606,6 +630,28 @@ python3 "$SPRINGBOARD_CANDIDATE_BUILDER" \
     --load-dylib @loader_path/g \
     --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
 
+# Build a standalone, device-matched amfid copy rather than injecting an
+# ad-hoc dylib into Apple's live system binary. The fixed hook and resigned
+# candidate are immutable Cryptex trust-cache entries; get-task-allow lets the
+# existing jitterd attach/detach lane grant the candidate its debug state.
+[[ -f "$AMFID_CANDIDATE_SOURCE" ]] || \
+    die "missing device-matched amfid source"
+cp "$SBINJECT_AMFIHOOK" "$AMFID_CANDIDATE_HOOK"
+chmod 0755 "$AMFID_CANDIDATE_HOOK"
+python3 "$AMFID_CANDIDATE_BUILDER" \
+    "$AMFID_CANDIDATE_SOURCE" "$AMFID_CANDIDATE" \
+    --load-dylib @loader_path/a \
+    --load-dylib-patcher "$SCRIPT_DIR/patch_load_dylib.py" >/dev/null
+codesign --verify --strict --all-architectures "$AMFID_CANDIDATE" || \
+    die "amfid candidate signature is invalid"
+otool -L "$AMFID_CANDIDATE" | rg -q '^\s+@loader_path/a ' || \
+    die "amfid candidate does not preload its fixed hook"
+ldid -e "$AMFID_CANDIDATE" | rg -q '<key>get-task-allow</key>' || \
+    die "amfid candidate lacks get-task-allow"
+[[ "$(sha256_of "$AMFID_CANDIDATE_HOOK")" == \
+   "$(sha256_of "$SBINJECT_AMFIHOOK")" ]] || \
+    die "amfid hook changed while copying"
+
 zstd -dc "$BOOTSTRAP_ARCHIVE" | \
     tar -xf - -C "$WORK_DIR"
 [[ -d "$WORK_DIR/var/jb" ]] || die "archive did not extract var/jb"
@@ -627,6 +673,21 @@ done
     die "pinned OpenSSH package payload is incomplete"
 ditto --noqtn "$OPENSSH_PACKAGE_ROOT/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
+OPENSSH_CONFIG="$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/etc/ssh/sshd_config"
+grep -qx 'UsePAM yes' "$OPENSSH_CONFIG" || \
+    die "pinned OpenSSH configuration no longer has the expected PAM setting"
+sed -i '' 's/^UsePAM yes$/UsePAM no/' "$OPENSSH_CONFIG"
+grep -qx 'UsePAM no' "$OPENSSH_CONFIG" || \
+    die "could not disable PAM for rootless public-key SSH"
+rg -q '^AuthorizedKeysFile[[:space:]]+\.ssh/authorized_keys$' \
+    "$OPENSSH_CONFIG" || \
+    die "pinned OpenSSH authorized-keys path changed"
+sed -i '' \
+    's#^AuthorizedKeysFile[[:space:]].*$#AuthorizedKeysFile /var/jb/var/root/.ssh/authorized_keys#' \
+    "$OPENSSH_CONFIG"
+rg -q '^AuthorizedKeysFile /var/jb/var/root/\.ssh/authorized_keys$' \
+    "$OPENSSH_CONFIG" || \
+    die "could not select the rootless OpenSSH authorized-keys path"
 typeset -a trusted_openssh_machos=(
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh"
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/bin/ssh-keygen"
@@ -906,6 +967,7 @@ for candidate in \
     "$EXEC_WORKER" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_AMFIHOOK" \
     "$SBINJECT_LSD_REGISTRATION_HOOK" \
     "$SBINJECT_PREFERENCES_BRIDGE" \
     "$SBINJECT_LAUNCHDHOOK" \
@@ -914,6 +976,8 @@ for candidate in \
     "$SPRINGBOARD_CANDIDATE" \
     "$PREFERENCES_CANDIDATE_GENERALHOOK" \
     "$PREFERENCES_CANDIDATE" \
+    "$AMFID_CANDIDATE_HOOK" \
+    "$AMFID_CANDIDATE" \
     "${prepared_sileo_machos[@]}" \
     "${trusted_ellekit_machos[@]}" \
     "${trusted_openssh_machos[@]}"; do
