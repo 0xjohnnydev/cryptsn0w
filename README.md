@@ -141,6 +141,7 @@ MacApp/
   Package.swift                  native SwiftUI installer
   build_app.sh                   release .app/icon/signing packager
   Resources/PineappleLogo.png    installer logo and icon source
+OnDeviceCryptexCore/             iOS-compatible mutable Cryptex payload builder
 ```
 
 Runtime bootstrap diagnostics are written to

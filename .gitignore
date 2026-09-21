@@ -1,6 +1,7 @@
 build/
 dist/
 MacApp/.build/
+OnDeviceCryptexCore/.build/
 cache/
 .venv/
 /out/
