@@ -5717,6 +5717,24 @@ static bool files_are_equal(NSString *left, NSString *right) {
     return equal;
 }
 
+static bool exact_file_pairs(NSString *scope,
+                             NSArray<NSDictionary *> *pairs) {
+    bool allExact = true;
+    for (NSDictionary *pair in pairs) {
+        NSString *source = pair[@"source"];
+        NSString *installed = pair[@"installed"];
+        NSString *name = pair[@"name"] ?: installed;
+        bool exact = files_are_equal(source, installed);
+        log_message("exactFile scope=%s name=%s exact=%s source=%s "
+                    "installed=%s",
+                    [scope UTF8String], [name UTF8String],
+                    exact ? "true" : "false", [source UTF8String],
+                    [installed UTF8String]);
+        allExact &= exact;
+    }
+    return allExact;
+}
+
 static bool install_dopamine_default_sources(NSString *source,
                                              bool *didUpdate,
                                              NSString **errorText) {
@@ -8045,6 +8063,81 @@ int main(int argc, char *argv[]) {
             return fail(dopamineMarkerError, nil);
         }
         log_message("dopamineMarkerReady=true path=/var/jb/.installed_dopamine");
+
+        // A normal reboot only needs the immutable SBInject execution lane to
+        // replace the stock SpringBoard.  Do that before LaunchServices,
+        // package, or repository repair so device autonomy is not delayed by
+        // unrelated work.  Every input is compared byte-for-byte with this
+        // Cryptex first; any mismatch or activation failure simply falls
+        // through to the existing repair path below.
+        if (repairMode) {
+            NSArray<NSDictionary *> *earlyActivationPairs = @[
+                @{@"name" : @"ellekit-compat-loader",
+                  @"source" : sourceElleKitCompatLoader,
+                  @"installed" : kElleKitInjectorExecutable},
+                @{@"name" : @"package-validator",
+                  @"source" : sourceSBInjectPackageValidator,
+                  @"installed" : kSBInjectPackageValidatorExecutable},
+                @{@"name" : @"jitterd",
+                  @"source" : sourceSBInjectJitterd,
+                  @"installed" : kSBInjectJitterdExecutable},
+                @{@"name" : @"jitterd-plist",
+                  @"source" : sourceSBInjectJitterdPlist,
+                  @"installed" : kSBInjectJitterdPlist},
+                @{@"name" : @"general-hook",
+                  @"source" : sourceSBInjectGeneralHook,
+                  @"installed" : kSBInjectGeneralHook},
+                @{@"name" : @"preferences-bridge",
+                  @"source" : sourceSBInjectPreferencesBridge,
+                  @"installed" : kSBInjectPreferencesBridge},
+                @{@"name" : @"launchd-hook",
+                  @"source" : sourceSBInjectLaunchdHook,
+                  @"installed" : kSBInjectLaunchdHook},
+                @{@"name" : @"ellekit-injector",
+                  @"source" : [sourceTrustedElleKitRoot
+                      stringByAppendingPathComponent:
+                          @"usr/lib/ellekit/libinjector.dylib"],
+                  @"installed" : kElleKitInjectorDylib},
+                @{@"name" : @"springboard-candidate",
+                  @"source" : [sourceSBInjectBundle
+                      stringByAppendingPathComponent:@"notSpringBoard"],
+                  @"installed" : kSpringBoardCandidateExecutable},
+                @{@"name" : @"springboard-bundle-hook",
+                  @"source" : [sourceSBInjectBundle
+                      stringByAppendingPathComponent:@"g"],
+                  @"installed" : kSBInjectBundleHook},
+                @{@"name" : @"preferences-candidate",
+                  @"source" : [sourceSBInjectPreferencesBundle
+                      stringByAppendingPathComponent:@"notPreferences"],
+                  @"installed" : kPreferencesCandidateExecutable},
+                @{@"name" : @"preferences-bundle-hook",
+                  @"source" : [sourceSBInjectPreferencesBundle
+                      stringByAppendingPathComponent:@"g"],
+                  @"installed" : kSBInjectPreferencesBundleHook},
+            ];
+            bool earlyPayloadExact = exact_file_pairs(
+                @"early-boot-activation", earlyActivationPairs);
+            NSString *earlyActivationError = nil;
+            bool earlyJitterd = earlyPayloadExact &&
+                install_sbinject_jitterd_job(
+                    sourceSBInjectJitterd, sourceSBInjectJitterdPlist,
+                    false, &earlyActivationError);
+            bool earlySpringBoard =
+                earlyJitterd && activate_sbinject_springboard();
+            bool earlyPreferences =
+                earlySpringBoard && activate_sbinject_preferences();
+            log_message("earlyBootActivation payloadExact=%s jitterd=%s "
+                        "springBoard=%s preferences=%s fallback=%s error=%s",
+                        earlyPayloadExact ? "true" : "false",
+                        earlyJitterd ? "true" : "false",
+                        earlySpringBoard ? "true" : "false",
+                        earlyPreferences ? "true" : "false",
+                        earlySpringBoard ? "continue-repair"
+                                         : "existing-repair-path",
+                        earlyActivationError != nil
+                            ? [[earlyActivationError description] UTF8String]
+                            : "none");
+        }
 
         bool systemSileoBundleUpdated = false;
         NSString *systemSileoBundleError = nil;
