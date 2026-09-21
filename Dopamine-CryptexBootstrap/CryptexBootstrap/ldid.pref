@@ -1,0 +1,15 @@
+Package: ldid
+Pin: version 2.1.5-procursus7
+Pin-Priority: 1001
+
+Package: libplist3
+Pin: version 2.2.0+git20230130.4b50a5a
+Pin-Priority: 1001
+
+Package: libiosexec1
+Pin: version 1.3.1
+Pin-Priority: 1001
+
+Package: libssl3
+Pin: version 3.2.1
+Pin-Priority: 1001

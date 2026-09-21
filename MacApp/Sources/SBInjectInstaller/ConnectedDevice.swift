@@ -11,6 +11,6 @@ struct ConnectedDevice: Identifiable, Hashable, Sendable {
 
     var detail: String {
         let version = systemVersion == "unknown" ? "iOS" : "iOS \(systemVersion)"
-        return "\(version) • \(transport) • \(id)"
+        return "\(version) • \(transport)"
     }
 }

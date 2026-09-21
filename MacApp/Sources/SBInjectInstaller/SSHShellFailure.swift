@@ -20,7 +20,7 @@ enum SSHShellFailure: LocalizedError {
         case .pymobiledeviceMissing:
             "The repository Python environment is missing pymobiledevice3. Run ‘make python’ and try again."
         case .localPortUnavailable(let detail):
-            "CryptexSn0w could not reserve a local SSH port. \(detail)"
+            "CryptSn0w could not reserve a local SSH port. \(detail)"
         case .forwardFailed(let detail):
             "The USB SSH forward could not be started. \(detail)"
         case .terminalFailed(let detail):
