@@ -6,24 +6,17 @@ struct CryptexPrimaryButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.headline)
+            .font(.custom("AvenirNext-DemiBoldItalic", size: 17, relativeTo: .headline))
             .foregroundStyle(.white)
-            .frame(minWidth: 116, minHeight: 36)
-            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .padding(.horizontal, 16)
             .background {
-                Capsule()
-                    .fill(
-                        isEnabled
-                            ? AppTheme.ink.opacity(configuration.isPressed ? 0.78 : 1)
-                            : Color.secondary.opacity(0.42)
-                    )
+                JailbreakBrushView(isEnabled: isEnabled, isPressed: configuration.isPressed)
             }
-            .clipShape(.capsule)
-            .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1)
-            .shadow(
-                color: isEnabled ? .black.opacity(0.14) : .clear,
-                radius: 3,
-                y: 1
+            .contentShape(.rect)
+            .brightness(configuration.isPressed && isEnabled ? -0.06 : 0)
+            .scaleEffect(
+                configuration.isPressed && isEnabled && !reduceMotion ? 0.975 : 1
             )
             .animation(
                 reduceMotion ? nil : .easeOut(duration: 0.12),

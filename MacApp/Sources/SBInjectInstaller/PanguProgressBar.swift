@@ -8,24 +8,48 @@ struct PanguProgressBar: View {
 
     var body: some View {
         Canvas { context, size in
-            let stroke = brushStroke(in: size)
-            context.fill(stroke, with: .color(AppTheme.progressTrack))
+            let bounds = CGRect(origin: .zero, size: size)
+            let stroke = PanguBrushStrokeShape().path(in: bounds)
+            context.fill(
+                stroke,
+                with: .linearGradient(
+                    Gradient(colors: [
+                        AppTheme.progressTrack.opacity(0.72),
+                        AppTheme.progressTrack,
+                    ]),
+                    startPoint: .zero,
+                    endPoint: CGPoint(x: size.width, y: size.height)
+                )
+            )
+            context.stroke(stroke, with: .color(.white.opacity(0.42)), lineWidth: 0.7)
 
             guard normalizedProgress > 0 else { return }
             let filledWidth = size.width * normalizedProgress
-            let filledStroke = brushStroke(
-                in: CGSize(width: filledWidth, height: size.height)
+            let filledStroke = PanguBrushStrokeShape().path(
+                in: CGRect(x: 0, y: 0, width: filledWidth, height: size.height)
             )
             context.fill(
                 filledStroke,
                 with: .linearGradient(
-                    Gradient(colors: [progressColor.opacity(0.78), progressColor]),
+                    Gradient(colors: [
+                        progressColor.opacity(0.72),
+                        progressColor,
+                        progressColor.opacity(0.90),
+                    ]),
                     startPoint: .zero,
                     endPoint: CGPoint(x: filledWidth, y: size.height)
                 )
             )
+            context.fill(
+                filledStroke,
+                with: .linearGradient(
+                    Gradient(colors: [.white.opacity(0.34), .clear, .clear]),
+                    startPoint: CGPoint(x: 0, y: 0),
+                    endPoint: CGPoint(x: 0, y: size.height)
+                )
+            )
         }
-        .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 28)
+        .frame(maxWidth: .infinity, minHeight: 30, maxHeight: 30)
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.38),
             value: normalizedProgress
@@ -40,47 +64,6 @@ struct PanguProgressBar: View {
     }
 
     private var progressColor: Color {
-        switch state {
-        case .idle, .running: AppTheme.accent
-        case .complete: AppTheme.success
-        case .failed: AppTheme.failure
-        }
-    }
-
-    private func brushStroke(in size: CGSize) -> Path {
-        let width = size.width
-        let height = size.height
-        var path = Path()
-        path.move(to: CGPoint(x: width * 0.01, y: height * 0.47))
-        path.addCurve(
-            to: CGPoint(x: width * 0.10, y: height * 0.25),
-            control1: CGPoint(x: width * 0.03, y: height * 0.31),
-            control2: CGPoint(x: width * 0.06, y: height * 0.20)
-        )
-        path.addCurve(
-            to: CGPoint(x: width * 0.57, y: height * 0.20),
-            control1: CGPoint(x: width * 0.25, y: height * 0.12),
-            control2: CGPoint(x: width * 0.44, y: height * 0.29)
-        )
-        path.addCurve(
-            to: CGPoint(x: width * 0.97, y: height * 0.39),
-            control1: CGPoint(x: width * 0.72, y: height * 0.12),
-            control2: CGPoint(x: width * 0.88, y: height * 0.33)
-        )
-        path.addLine(to: CGPoint(x: width, y: height * 0.50))
-        path.addLine(to: CGPoint(x: width * 0.95, y: height * 0.56))
-        path.addCurve(
-            to: CGPoint(x: width * 0.52, y: height * 0.77),
-            control1: CGPoint(x: width * 0.82, y: height * 0.70),
-            control2: CGPoint(x: width * 0.67, y: height * 0.65)
-        )
-        path.addCurve(
-            to: CGPoint(x: width * 0.08, y: height * 0.72),
-            control1: CGPoint(x: width * 0.36, y: height * 0.86),
-            control2: CGPoint(x: width * 0.18, y: height * 0.67)
-        )
-        path.addLine(to: CGPoint(x: 0, y: height * 0.55))
-        path.closeSubpath()
-        return path
+        .black
     }
 }

@@ -1,4 +1,7 @@
 #include <CommonCrypto/CommonDigest.h>
+#include "sbinject_protocol.h"
+#include "litehook_rebind.h"
+
 #include <errno.h>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -13,7 +16,9 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +112,9 @@ extern char **environ;
 extern int csops(pid_t pid, unsigned int operation, void *address,
                  size_t size);
 extern int ptrace(int request, pid_t pid, caddr_t address, int data);
+extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
+                                       const char *service,
+                                       mach_port_t *server_port);
 extern kern_return_t mach_vm_protect(vm_map_t target,
                                      mach_vm_address_t address,
                                      mach_vm_size_t size,
@@ -172,6 +180,262 @@ static bool path_is_managed(const char *path, char resolved[PATH_MAX]) {
            lstat(resolved, &status) == 0 && S_ISREG(status.st_mode) &&
            status.st_size > 0 &&
            (uint64_t)status.st_size <= (uint64_t)CODEX_MAX_PAYLOAD * 16U;
+}
+
+static bool secure_regular_file(const char *path, off_t maximum_size,
+                                struct stat *status_out) {
+    struct stat status = {0};
+    if (path == NULL || lstat(path, &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 0 || status.st_gid != 0 ||
+        status.st_size <= 0 || status.st_size > maximum_size ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    if (status_out != NULL) *status_out = status;
+    return true;
+}
+
+static bool path_is_managed_container_payload(const char *path,
+                                              char resolved[PATH_MAX]) {
+    if (path == NULL || path[0] != '/' || realpath(path, resolved) == NULL ||
+        !secure_regular_file(resolved, (off_t)CODEX_MAX_PAYLOAD * 16, NULL)) {
+        return false;
+    }
+    const char *name = strrchr(resolved, '/');
+    if (name == NULL ||
+        strcmp(name + 1, CODEX_SBINJECT_APP_PAYLOAD_NAME) != 0) {
+        return false;
+    }
+    char bundle[PATH_MAX] = {0};
+    if (strlcpy(bundle, resolved, sizeof(bundle)) >= sizeof(bundle)) {
+        return false;
+    }
+    char *separator = strrchr(bundle, '/');
+    if (separator == NULL || separator == bundle) return false;
+    *separator = '\0';
+    size_t bundle_length = strlen(bundle);
+    if (bundle_length < 4U ||
+        strcmp(bundle + bundle_length - 4U, ".app") != 0) {
+        return false;
+    }
+    char container[PATH_MAX] = {0};
+    if (strlcpy(container, bundle, sizeof(container)) >= sizeof(container)) {
+        return false;
+    }
+    separator = strrchr(container, '/');
+    if (separator == NULL || separator == container) return false;
+    *separator = '\0';
+    char parent[PATH_MAX] = {0};
+    if (strlcpy(parent, container, sizeof(parent)) >= sizeof(parent)) {
+        return false;
+    }
+    separator = strrchr(parent, '/');
+    if (separator == NULL || separator == parent) return false;
+    *separator = '\0';
+    if (strcmp(parent, "/private/var/containers/Bundle/Application") != 0 &&
+        strcmp(parent, "/var/containers/Bundle/Application") != 0) {
+        return false;
+    }
+    char managed_marker[PATH_MAX] = {0};
+    char trollstore_marker[PATH_MAX] = {0};
+    int managed_length = snprintf(
+        managed_marker, sizeof(managed_marker), "%s/%s", container,
+        CODEX_SBINJECT_MANAGED_APP_MARKER);
+    int trollstore_length = snprintf(
+        trollstore_marker, sizeof(trollstore_marker), "%s/_TrollStoreLite",
+        container);
+    struct stat trollstore_status = {0};
+    bool managed = managed_length > 0 &&
+        (size_t)managed_length < sizeof(managed_marker) &&
+        secure_regular_file(managed_marker, 64 * 1024, NULL);
+    bool trollstore = trollstore_length > 0 &&
+        (size_t)trollstore_length < sizeof(trollstore_marker) &&
+        lstat(trollstore_marker, &trollstore_status) == 0 &&
+        S_ISREG(trollstore_status.st_mode) &&
+        !S_ISLNK(trollstore_status.st_mode) &&
+        trollstore_status.st_nlink == 1 && trollstore_status.st_uid == 0 &&
+        trollstore_status.st_gid == 0 && trollstore_status.st_size == 0 &&
+        (trollstore_status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+    return managed || trollstore;
+}
+
+static bool regular_files_equal(const char *left, const char *right) {
+    struct stat left_status = {0};
+    struct stat right_status = {0};
+    if (!secure_regular_file(left, (off_t)CODEX_MAX_PAYLOAD * 16,
+                             &left_status) ||
+        !secure_regular_file(right, (off_t)CODEX_MAX_PAYLOAD * 16,
+                             &right_status) ||
+        left_status.st_size != right_status.st_size) {
+        return false;
+    }
+    int left_fd = open(left, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int right_fd = open(right, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool equal = left_fd >= 0 && right_fd >= 0;
+    uint8_t left_bytes[64 * 1024];
+    uint8_t right_bytes[sizeof(left_bytes)];
+    while (equal) {
+        ssize_t left_amount = read(left_fd, left_bytes, sizeof(left_bytes));
+        ssize_t right_amount = read(right_fd, right_bytes,
+                                    sizeof(right_bytes));
+        if (left_amount < 0 && errno == EINTR) continue;
+        if (right_amount < 0 && errno == EINTR) continue;
+        if (left_amount < 0 || right_amount < 0 ||
+            left_amount != right_amount) {
+            equal = false;
+            break;
+        }
+        if (left_amount == 0) break;
+        if (memcmp(left_bytes, right_bytes, (size_t)left_amount) != 0) {
+            equal = false;
+            break;
+        }
+    }
+    if (left_fd >= 0) close(left_fd);
+    if (right_fd >= 0) close(right_fd);
+    return equal;
+}
+
+static bool managed_app_runtime_path(char runtime_path[PATH_MAX]) {
+    uint32_t executable_size = PATH_MAX;
+    char executable[PATH_MAX] = {0};
+    char resolved[PATH_MAX] = {0};
+    if (_NSGetExecutablePath(executable, &executable_size) != 0 ||
+        realpath(executable, resolved) == NULL ||
+        !regular_files_equal(resolved, CODEX_SBINJECT_APP_LAUNCHER)) {
+        return false;
+    }
+
+    char bundle[PATH_MAX] = {0};
+    if (strlcpy(bundle, resolved, sizeof(bundle)) >= sizeof(bundle)) {
+        return false;
+    }
+    char *separator = strrchr(bundle, '/');
+    if (separator == NULL || separator == bundle) return false;
+    *separator = '\0';
+    size_t bundle_length = strlen(bundle);
+    if (bundle_length < 4U ||
+        strcmp(bundle + bundle_length - 4U, ".app") != 0) {
+        return false;
+    }
+
+    char container[PATH_MAX] = {0};
+    if (strlcpy(container, bundle, sizeof(container)) >= sizeof(container)) {
+        return false;
+    }
+    separator = strrchr(container, '/');
+    if (separator == NULL || separator == container) return false;
+    *separator = '\0';
+    char container_parent[PATH_MAX] = {0};
+    if (strlcpy(container_parent, container, sizeof(container_parent)) >=
+        sizeof(container_parent)) {
+        return false;
+    }
+    separator = strrchr(container_parent, '/');
+    if (separator == NULL || separator == container_parent) return false;
+    *separator = '\0';
+    if (strcmp(container_parent,
+               "/private/var/containers/Bundle/Application") != 0 &&
+        strcmp(container_parent,
+               "/var/containers/Bundle/Application") != 0) {
+        return false;
+    }
+
+    char marker[PATH_MAX] = {0};
+    if (snprintf(marker, sizeof(marker), "%s/%s", container,
+                 CODEX_SBINJECT_MANAGED_APP_MARKER) <= 0 ||
+        !secure_regular_file(marker, 64 * 1024, NULL)) {
+        return false;
+    }
+    char candidate[PATH_MAX] = {0};
+    if (snprintf(candidate, sizeof(candidate), "%s/%s", bundle,
+                 CODEX_SBINJECT_APP_PAYLOAD_NAME) <= 0 ||
+        realpath(candidate, runtime_path) == NULL ||
+        strncmp(runtime_path, bundle, bundle_length) != 0 ||
+        runtime_path[bundle_length] != '/' ||
+        !secure_regular_file(runtime_path,
+                             (off_t)CODEX_MAX_PAYLOAD * 16, NULL)) {
+        return false;
+    }
+    return true;
+}
+
+static bool request_self_debugged(void) {
+    mach_port_t port = MACH_PORT_NULL;
+    if (bootstrap_look_up(bootstrap_port, CODEX_SBINJECT_JITTERD_SERVICE,
+                          &port) != KERN_SUCCESS ||
+        !MACH_PORT_VALID(port)) {
+        return false;
+    }
+    xpc_object_t pipe = xpc_pipe_create_from_port(port, 0);
+    mach_port_deallocate(mach_task_self(), port);
+    if (pipe == NULL) return false;
+    xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+    xpc_dictionary_set_int64(message, "id", CODEX_SBINJECT_JIT_MESSAGE_ID);
+    xpc_dictionary_set_int64(message, "pid", getpid());
+    xpc_object_t reply = NULL;
+    int transport = xpc_pipe_routine(pipe, message, &reply);
+    int64_t result = reply != NULL
+                         ? xpc_dictionary_get_int64(reply, "result")
+                         : -1;
+    if (reply != NULL) xpc_release(reply);
+    xpc_release(message);
+    xpc_release(pipe);
+    return transport == 0 && result == 0;
+}
+
+static void app_launcher_log(const char *format, ...) {
+    int descriptor = open("/var/mobile/.sbinject-app-launcher.log",
+                          O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC |
+                              O_NOFOLLOW,
+                          0600);
+    if (descriptor < 0) return;
+    va_list arguments;
+    va_start(arguments, format);
+    (void)vdprintf(descriptor, format, arguments);
+    va_end(arguments);
+    (void)dprintf(descriptor, "\n");
+    (void)fsync(descriptor);
+    close(descriptor);
+}
+
+typedef int (*codex_posix_spawn_function)(
+    pid_t *restrict, const char *restrict,
+    const posix_spawn_file_actions_t *, const posix_spawnattr_t *restrict,
+    char *const argv[restrict], char *const envp[restrict]);
+
+static codex_posix_spawn_function gTrollStoreOriginalPosixSpawn;
+
+static int trollstore_ui_posix_spawn(
+    pid_t *restrict child, const char *restrict path,
+    const posix_spawn_file_actions_t *actions,
+    const posix_spawnattr_t *restrict attributes,
+    char *const argv[restrict], char *const envp[restrict]) {
+    if (gTrollStoreOriginalPosixSpawn == NULL) return ENOSYS;
+    int result = gTrollStoreOriginalPosixSpawn(
+        child, path, actions, attributes, argv, envp);
+    if (result != EPERM || path == NULL ||
+        !regular_files_equal(path,
+                             CODEX_SBINJECT_TROLLSTORE_BROKER_CLIENT)) {
+        return result;
+    }
+    int retry = gTrollStoreOriginalPosixSpawn(
+        child, path, actions, NULL, argv, envp);
+    app_launcher_log("pid=%d stage=trollstore-helper-spawn "
+                     "personaError=%d retry=%d path=%s",
+                     getpid(), result, retry, path);
+    return retry;
+}
+
+static bool trollstore_ui_payload(const char *runtime_path) {
+    static const char suffix[] =
+        "/TrollStoreLite.app/" CODEX_SBINJECT_APP_PAYLOAD_NAME;
+    if (runtime_path == NULL) return false;
+    size_t length = strlen(runtime_path);
+    size_t suffixLength = sizeof(suffix) - 1U;
+    return length >= suffixLength &&
+        strcmp(runtime_path + length - suffixLength, suffix) == 0;
 }
 
 static bool copy_file_exclusive(const char *source, const char *destination) {
@@ -680,6 +944,39 @@ static bool make_macho_copy(const char *source, char destination[PATH_MAX]) {
     return true;
 }
 
+static bool prepare_app_payload(const char *payload_path) {
+    if (geteuid() != 0 || payload_path == NULL) {
+        errno = EPERM;
+        return false;
+    }
+    char payload[PATH_MAX] = {0};
+    if (!path_is_managed(payload_path, payload) &&
+        !path_is_managed_container_payload(payload_path, payload)) {
+        return false;
+    }
+    const char *payload_name = strrchr(payload, '/');
+    payload_name = payload_name != NULL ? payload_name + 1 : payload;
+    if (strcmp(payload_name, CODEX_SBINJECT_APP_PAYLOAD_NAME) != 0) {
+        errno = EINVAL;
+        return false;
+    }
+    char temporary[PATH_MAX] = {0};
+    int length = snprintf(temporary, sizeof(temporary), "%s.new.%d.%08x",
+                          payload, getpid(), arc4random());
+    if (length <= 0 || (size_t)length >= sizeof(temporary) ||
+        !copy_file_exclusive(payload, temporary)) {
+        return false;
+    }
+    bool prepared = patch_execute_copy(temporary) &&
+                    chown(temporary, 0, 0) == 0 &&
+                    chmod(temporary, 0755) == 0 &&
+                    rename(temporary, payload) == 0;
+    int saved_error = errno;
+    if (!prepared) (void)unlink(temporary);
+    errno = saved_error;
+    return prepared;
+}
+
 static bool attach_slice_signature(int descriptor, const uint8_t *slice,
                                    size_t sliceSize, off_t sliceOffset) {
     if (sliceSize < sizeof(struct mach_header_64)) {
@@ -1095,6 +1392,57 @@ static void *find_main_entry(const struct mach_header_64 *header) {
     return NULL;
 }
 
+static int run_managed_app_payload(const char *runtime_path, int argc,
+                                   char **argv) {
+    uint32_t flags = 0;
+    bool requested = request_self_debugged();
+    bool debugged = requested &&
+        csops(getpid(), CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+        (flags & CODEX_CS_DEBUGGED) != 0 &&
+        (flags & (CODEX_CS_HARD | CODEX_CS_KILL)) == 0;
+    app_launcher_log("pid=%d stage=jitterd requested=%d flags=0x%08x "
+                     "debugged=%d path=%s",
+                     getpid(), requested, flags, debugged, runtime_path);
+    if (!debugged) return 104;
+    if (!install_dyld_validation_bypass()) {
+        app_launcher_log("pid=%d stage=dyld-bypass ready=0 path=%s",
+                         getpid(), runtime_path);
+        return 105;
+    }
+    dlerror();
+    void *handle = dlopen(runtime_path, RTLD_LAZY | RTLD_GLOBAL | RTLD_FIRST);
+    if (handle == NULL) {
+        const char *error = dlerror();
+        app_launcher_log("pid=%d stage=dlopen ready=0 path=%s error=%s",
+                         getpid(), runtime_path,
+                         error != NULL ? error : "unknown");
+        return 106;
+    }
+    const struct mach_header_64 *header = find_loaded_header(runtime_path);
+    if (trollstore_ui_payload(runtime_path)) {
+        gTrollStoreOriginalPosixSpawn =
+            (codex_posix_spawn_function)(uintptr_t)posix_spawn;
+        litehook_rebind_result_t spawn = litehook_rebind_symbol(
+            header, (void *)(uintptr_t)posix_spawn,
+            (void *)(uintptr_t)trollstore_ui_posix_spawn);
+        app_launcher_log("pid=%d stage=trollstore-ui-broker-hook "
+                         "matches=%zu writes=%zu tpro=%zu error=%d",
+                         getpid(), spawn.matches, spawn.writes,
+                         spawn.tpro_writes, spawn.first_error);
+        if (spawn.writes == 0) return 108;
+    }
+    void *entry = find_main_entry(header);
+    if (entry == NULL) {
+        app_launcher_log("pid=%d stage=entry ready=0 path=%s",
+                         getpid(), runtime_path);
+        return 107;
+    }
+    app_launcher_log("pid=%d stage=entry ready=1 address=%p path=%s",
+                     getpid(), entry, runtime_path);
+    return ((int (*)(int, char **, char **))entry)(argc, argv, environ) &
+           0xff;
+}
+
 static int run_child(int control, const char *loadPath, int guestArgc,
                      char **guestArgv) {
     uint8_t ready = 1;
@@ -1144,6 +1492,31 @@ static int run_child(int control, const char *loadPath, int guestArgc,
                 "error=%s\n",
                 getpid(), loadPath, error != NULL ? error : "unknown");
         return 79;
+    }
+
+    const char *guestName = guestArgc > 0 && guestArgv != NULL
+        ? strrchr(guestArgv[0], '/') : NULL;
+    guestName = guestName != NULL ? guestName + 1
+                                  : (guestArgc > 0 ? guestArgv[0] : NULL);
+    if (guestName != NULL &&
+        strcmp(guestName,
+               CODEX_SBINJECT_TROLLSTORE_HELPER_PAYLOAD_NAME) == 0) {
+        dlerror();
+        void *registrationHook = dlopen(
+            CODEX_SBINJECT_TROLLSTORE_REGISTRATION_HOOK,
+            RTLD_NOW | RTLD_GLOBAL);
+        if (registrationHook == NULL) {
+            const char *error = dlerror();
+            dprintf(STDERR_FILENO,
+                    "codex-exec-worker child=%d mode=macho "
+                    "trollstoreHook=false error=%s\n",
+                    getpid(), error != NULL ? error : "unknown");
+            return 84;
+        }
+        dprintf(STDOUT_FILENO,
+                "codex-exec-worker child=%d mode=macho "
+                "trollstoreHook=true\n",
+                getpid());
     }
 
     const struct mach_header_64 *header = find_loaded_header(loadPath);
@@ -1380,8 +1753,21 @@ int main(int argc, char *argv[]) {
         unlink(runtimeCopy);
         return result;
     }
+    if (argc == 3 && strcmp(argv[1], "--prepare-app") == 0) {
+        bool prepared = prepare_app_payload(argv[2]);
+        dprintf(prepared ? STDOUT_FILENO : STDERR_FILENO,
+                "codex-exec-worker mode=prepare-app prepared=%d "
+                "payload=%s errno=%d\n",
+                prepared, argv[2], prepared ? 0 : errno);
+        return prepared ? 0 : 68;
+    }
+    char appRuntime[PATH_MAX] = {0};
+    if (managed_app_runtime_path(appRuntime)) {
+        return run_managed_app_payload(appRuntime, argc, argv);
+    }
     dprintf(STDERR_FILENO,
-            "usage: %s --macho executable [arguments...]\n",
+            "usage: %s --macho executable [arguments...] | "
+            "--prepare-app payload\n",
             argv[0]);
     return 64;
 }
