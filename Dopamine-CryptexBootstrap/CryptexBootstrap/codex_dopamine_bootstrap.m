@@ -410,9 +410,39 @@ static bool prepare_managed_application_source(NSString *bundlePath,
         payloadStatus.st_size <= 256 * 1024 * 1024 &&
         (payloadStatus.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 
-    if (!currentLauncher && !recordedLauncher) {
-        struct stat executableStatus = {0};
-        if (lstat(executable.fileSystemRepresentation, &executableStatus) != 0 ||
+    struct stat executableStatus = {0};
+    errno = 0;
+    bool executablePresent =
+        lstat(executable.fileSystemRepresentation, &executableStatus) == 0;
+    bool resumeInterruptedPreparation = !currentLauncher &&
+        !recordedLauncher && payloadReady && !executablePresent &&
+        errno == ENOENT;
+    if (resumeInterruptedPreparation) {
+        char *prepareArguments[] = {
+            (char *)kExecWorkerExecutable.fileSystemRepresentation,
+            "--prepare-app",
+            (char *)payload.fileSystemRepresentation,
+            NULL,
+        };
+        int prepareStatus = run_and_wait(
+            kExecWorkerExecutable.fileSystemRepresentation,
+            prepareArguments);
+        if (prepareStatus != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed app payload recovery exited %d",
+                    prepareStatus];
+            }
+            return false;
+        }
+        log_message("sbinjectAppLauncherRecovery=true identifier=%s "
+                    "bundle=%s phase=payload-only",
+                    identifier.UTF8String, bundlePath.UTF8String);
+    }
+
+    if (!currentLauncher && !recordedLauncher &&
+        !resumeInterruptedPreparation) {
+        if (!executablePresent ||
             !S_ISREG(executableStatus.st_mode) ||
             S_ISLNK(executableStatus.st_mode) ||
             executableStatus.st_uid != 0 || executableStatus.st_gid != 0 ||
