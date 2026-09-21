@@ -96,6 +96,7 @@ EXEC_WORKER_ENTITLEMENTS="$SCRIPT_DIR/exec-worker-entitlements.plist"
 SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator"
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
+SBINJECT_BOOT_PROGRESS="$IMAGE_ROOT/usr/local/lib/sbinject/boot-progress.dylib"
 SBINJECT_AMFIHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/amfihook.dylib"
 SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v12.dylib"
 SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
@@ -514,6 +515,21 @@ xcrun --sdk iphoneos clang \
     -o "$SBINJECT_GENERALHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_GENERALHOOK"
+
+xcrun --sdk iphoneos clang \
+    -arch arm64e \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -dynamiclib \
+    -fobjc-arc -fblocks \
+    -Os -Wall -Wextra -Werror \
+    "$SBINJECT_SOURCE_DIR/sbinject_boot_progress.m" \
+    -framework Foundation \
+    -framework UIKit \
+    -install_name /var/jb/usr/lib/sbinject/boot-progress.dylib \
+    -o "$SBINJECT_BOOT_PROGRESS"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_BOOT_PROGRESS"
 
 xcrun --sdk iphoneos clang \
     -arch arm64e \
@@ -1044,6 +1060,7 @@ for candidate in \
     "$TROLLSTORE_BROKER_CLIENT" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
+    "$SBINJECT_BOOT_PROGRESS" \
     "$SBINJECT_AMFIHOOK" \
     "$SBINJECT_LSD_REGISTRATION_HOOK" \
     "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK" \

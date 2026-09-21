@@ -30,6 +30,8 @@ static const char *const kDefaultDylib =
     "/var/jb/usr/lib/ellekit/libinjector.dylib";
 static const char *const kSBInjectLaunchdHook =
     "/var/jb/usr/lib/sbinject/launchdhook-v12.dylib";
+static const char *const kSBInjectBootProgressHook =
+    "/var/jb/usr/lib/sbinject/boot-progress.dylib";
 static const char *const kSBInjectLsdRegistrationHook =
     "/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
 static const char *const kSBInjectAmfidHook =
@@ -41,6 +43,7 @@ static const char *const kPreflightPid = "--preflight-pid";
 static const char *const kCheckPidImage = "--check-pid-image";
 static const char *const kInjectPid = "--inject-pid";
 static const char *const kInjectLaunchdHook = "--inject-launchd-hook";
+static const char *const kInjectBootProgress = "--inject-boot-progress";
 
 #define CODEX_PT_DETACH 11
 #define CODEX_PT_ATTACHEXC 14
@@ -505,6 +508,19 @@ static bool path_is_fixed_sbinject_launchd_hook(const char *resolvedPath) {
            (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
+static bool path_is_fixed_sbinject_boot_progress_hook(
+    const char *resolvedPath) {
+    char fixedPath[PATH_MAX] = {0};
+    struct stat status = {0};
+    return resolvedPath != NULL &&
+           realpath(kSBInjectBootProgressHook, fixedPath) != NULL &&
+           strcmp(resolvedPath, fixedPath) == 0 &&
+           lstat(fixedPath, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
 static bool path_is_fixed_sbinject_lsd_registration_hook(
     const char *resolvedPath) {
     char fixedPath[PATH_MAX] = {0};
@@ -574,21 +590,26 @@ int main(int argc, char *argv[]) {
         bool injectLaunchdHook =
             userArgumentCount == 2 &&
             strcmp(argv[1], kInjectLaunchdHook) == 0;
+        bool injectBootProgress =
+            userArgumentCount == 3 &&
+            strcmp(argv[1], kInjectBootProgress) == 0;
         if (!inspectOnly && !preflightOnly && !checkPidImage && !injectPid &&
-            !injectLaunchdHook) {
+            !injectLaunchdHook && !injectBootProgress) {
             fprintf(stderr,
                     "usage: %s --inspect-pid pid|--preflight-pid pid|"
                     "--check-pid-image pid absolute-image-path|"
                     "--inject-pid pid absolute-dylib-path|"
-                    "--inject-launchd-hook\n",
+                    "--inject-launchd-hook|--inject-boot-progress pid\n",
                     argv[0]);
             return 64;
         }
-        bool dylibOperation = checkPidImage || injectPid || injectLaunchdHook;
+        bool dylibOperation = checkPidImage || injectPid || injectLaunchdHook ||
+                              injectBootProgress;
         const char *requestedPath = injectLaunchdHook
-                                        ? kSBInjectLaunchdHook
-                                        : (dylibOperation ? argv[3]
-                                                          : kDefaultDylib);
+            ? kSBInjectLaunchdHook
+            : (injectBootProgress ? kSBInjectBootProgressHook
+                                  : (dylibOperation ? argv[3]
+                                                    : kDefaultDylib));
         if (dylibOperation && requestedPath[0] != '/') {
             fprintf(stderr, "compat-loader: dylib path must be absolute\n");
             return 65;
@@ -606,6 +627,13 @@ int main(int argc, char *argv[]) {
             fprintf(stderr,
                     "compat-loader: launchd injection is restricted to the "
                     "fixed SBInject hook\n");
+            return 65;
+        }
+        if (injectBootProgress &&
+            !path_is_fixed_sbinject_boot_progress_hook(resolvedPath)) {
+            fprintf(stderr,
+                    "compat-loader: boot progress injection is restricted to "
+                    "the fixed SBInject overlay\n");
             return 65;
         }
         if (getuid() != 0) {
@@ -645,6 +673,10 @@ int main(int argc, char *argv[]) {
                    "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
                 0 ||
             fixed_springboard_candidate_path(targetPath);
+        bool stockSpringBoardTarget =
+            strcmp(targetPath,
+                   "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ==
+            0;
         bool lsdTarget = strcmp(targetPath, "/usr/libexec/lsd") == 0;
         if (lsdTarget &&
             (!injectPid ||
@@ -663,13 +695,20 @@ int main(int argc, char *argv[]) {
                     "fixed SBInject hook\n");
             return 65;
         }
+        if (injectBootProgress && !stockSpringBoardTarget) {
+            fprintf(stderr,
+                    "compat-loader: boot progress target must be stock "
+                    "SpringBoard\n");
+            return 65;
+        }
         if (injectPid && springBoardTarget) {
             fprintf(stderr,
                     "compat-loader: post-start SpringBoard mutation is disabled; "
                     "use the SBInject pre-main path\n");
             return 65;
         }
-        bool runtimeMutation = injectPid || injectLaunchdHook;
+        bool runtimeMutation =
+            injectPid || injectLaunchdHook || injectBootProgress;
         bool softened = true;
         if (runtimeMutation && !injectLaunchdHook && !amfidTarget &&
             !isPtrauthChild) {

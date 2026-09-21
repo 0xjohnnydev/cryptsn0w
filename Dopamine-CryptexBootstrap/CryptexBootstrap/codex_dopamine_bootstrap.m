@@ -178,6 +178,8 @@ static NSString *const kSBInjectJitterdPlist =
      "com.openai.codex.sbinject.jitterd.plist";
 static NSString *const kSBInjectGeneralHook =
     @"/var/jb/usr/lib/sbinject/generalhook.dylib";
+static NSString *const kSBInjectBootProgressHook =
+    @"/var/jb/usr/lib/sbinject/boot-progress.dylib";
 static NSString *const kSBInjectAmfidHook =
     @"/var/jb/usr/libexec/sbinject/a";
 static NSString *const kSBInjectPreferencesBridge =
@@ -239,6 +241,8 @@ static NSString *const kElleKitInjectorExecutable =
     @"/var/jb/usr/libexec/codex-ellekit-loader";
 static NSString *const kElleKitInjectorDylib =
     @"/var/jb/usr/lib/ellekit/libinjector.dylib";
+static NSString *const kBootProgressPath =
+    @"/var/mobile/.sbinject-boot-progress.plist";
 
 #define CODEX_SBINJECT_JITTERD_SERVICE \
     "com.openai.codex.sbinject.jitterd.systemwide"
@@ -263,6 +267,7 @@ static NSString *const kElleKitInjectorDylib =
 
 static int gLog = STDERR_FILENO;
 static os_log_t gUnifiedLog;
+static pid_t gBootProgressSpringBoard = -1;
 
 static void log_message(const char *format, ...);
 static int run_and_wait(const char *executable, char *const arguments[]);
@@ -3614,6 +3619,87 @@ static pid_t current_springboard_process(bool *candidateOut) {
     }
     free(processes);
     return result;
+}
+
+static bool write_boot_progress(pid_t springBoard, double progress,
+                                NSString *stage) {
+    if (springBoard <= 1 || stage.length == 0 || stage.length > 120U) {
+        return false;
+    }
+    NSDictionary *state = @{
+        @"Version" : @1,
+        @"SpringBoardPID" : @(springBoard),
+        @"Progress" : @(MAX(0.0, MIN(1.0, progress))),
+        @"Stage" : stage,
+    };
+    if (![state writeToFile:kBootProgressPath atomically:YES]) {
+        log_message("bootProgressWrite=false pid=%d stage=%s", springBoard,
+                    stage.UTF8String);
+        return false;
+    }
+    NSError *attributeError = nil;
+    bool attributesReady = [[NSFileManager defaultManager]
+        setAttributes:@{
+            NSFilePosixPermissions : @0644,
+            NSFileOwnerAccountID : @0,
+            NSFileGroupOwnerAccountID : @501,
+        }
+         ofItemAtPath:kBootProgressPath
+                error:&attributeError];
+    log_message("bootProgressWrite=%s pid=%d progress=%.2f stage=%s error=%s",
+                attributesReady ? "true" : "false", springBoard, progress,
+                stage.UTF8String,
+                attributeError != nil ? attributeError.description.UTF8String
+                                      : "none");
+    return attributesReady;
+}
+
+static void clear_boot_progress(void) {
+    if (unlink(kBootProgressPath.fileSystemRepresentation) != 0 &&
+        errno != ENOENT) {
+        log_message("bootProgressClear=false error=%d", errno);
+    }
+    gBootProgressSpringBoard = -1;
+}
+
+static bool start_boot_progress_overlay(void) {
+    bool candidate = false;
+    pid_t springBoard = current_springboard_process(&candidate);
+    if (springBoard <= 1 || candidate ||
+        !sbinject_managed_file(kSBInjectBootProgressHook, 0755) ||
+        !write_boot_progress(springBoard, 0.08,
+                             @"Checking secure components")) {
+        clear_boot_progress();
+        return false;
+    }
+    char pidText[32] = {0};
+    if (snprintf(pidText, sizeof(pidText), "%d", springBoard) <= 0) {
+        clear_boot_progress();
+        return false;
+    }
+    char *arguments[] = {
+        (char *)kElleKitInjectorExecutable.fileSystemRepresentation,
+        "--inject-boot-progress", pidText, NULL,
+    };
+    int status = run_and_wait_bounded(arguments[0], arguments, 30000);
+    bool sameStockSpringBoard = false;
+    pid_t current = current_springboard_process(&sameStockSpringBoard);
+    bool ready = status == 0 && current == springBoard &&
+                 !sameStockSpringBoard;
+    log_message("bootProgressOverlay=%s pid=%d injection=%d",
+                ready ? "true" : "false", springBoard, status);
+    if (!ready) {
+        clear_boot_progress();
+        return false;
+    }
+    gBootProgressSpringBoard = springBoard;
+    return true;
+}
+
+static void update_boot_progress(double progress, NSString *stage) {
+    if (gBootProgressSpringBoard > 1) {
+        (void)write_boot_progress(gBootProgressSpringBoard, progress, stage);
+    }
 }
 
 static pid_t current_preferences_process(bool *candidateOut) {
@@ -7280,6 +7366,7 @@ static bool install_sileo_root_broker_job(NSString *sourceExecutable,
 
 static int fail(NSString *reason, NSString *partialRoot) {
     log_message("result=failed reason=%s", [reason UTF8String]);
+    clear_boot_progress();
     if (partialRoot != nil && path_is_absent(kVarJb)) {
         NSError *cleanup_error = nil;
         if ([[NSFileManager defaultManager] removeItemAtPath:partialRoot
@@ -7436,6 +7523,12 @@ int main(int argc, char *argv[]) {
         }
         NSString *destinationProcursus = managed_jailbreak_root();
         BOOL repairMode = destinationProcursus != nil;
+        clear_boot_progress();
+        bool bootProgressVisible =
+            repairMode && start_boot_progress_overlay();
+        if (bootProgressVisible) {
+            update_boot_progress(0.10, @"Inspecting the installed runtime");
+        }
         if (!path_is_absent(kVarJb) && !repairMode) {
             return fail(@"refusing unmanaged pre-existing /var/jb", nil);
         }
@@ -7538,6 +7631,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectGeneralHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/generalhook.dylib"];
+        NSString *sourceSBInjectBootProgressHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/boot-progress.dylib"];
         NSString *sourceSBInjectAmfidHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/amfihook.dylib"];
@@ -7716,6 +7812,9 @@ int main(int argc, char *argv[]) {
             lstat([sourceSBInjectGeneralHook fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSBInjectBootProgressHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLaunchdHook fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
@@ -7749,6 +7848,7 @@ int main(int argc, char *argv[]) {
             !S_ISREG(repositoryKeyStatus.st_mode)) {
             return fail(@"repository keyring payload is missing", nil);
         }
+        update_boot_progress(0.18, @"Checking the Cryptex payload");
 
         NSString *manifestHash = boot_manifest_hash();
         if (manifestHash.length == 0) {
@@ -7792,6 +7892,7 @@ int main(int argc, char *argv[]) {
             !isDirectory) {
             return fail(@"active preboot directory unavailable", nil);
         }
+        update_boot_progress(0.28, @"Checking jailbreak files");
 
         if (cleanInstallToken != nil && repairMode) {
             NSString *installedManifestPath = [destinationProcursus
@@ -7956,6 +8057,7 @@ int main(int argc, char *argv[]) {
                     rootlessLaunchctlBackup != nil
                         ? [rootlessLaunchctlBackup UTF8String]
                         : "not-needed");
+        update_boot_progress(0.38, @"Checking launch services");
 
         [[NSFileManager defaultManager]
             removeItemAtPath:@"/private/var/tmp/codex-stage-ssh" error:nil];
@@ -8004,6 +8106,7 @@ int main(int argc, char *argv[]) {
                     rootlessUiopenBackup != nil
                         ? [rootlessUiopenBackup UTF8String]
                         : "not-needed");
+        update_boot_progress(0.46, @"Checking app services");
 
         NSString *rootlessUicacheBackup = nil;
         BOOL uicacheMatches =
@@ -8048,6 +8151,7 @@ int main(int argc, char *argv[]) {
                     rootlessUicacheBackup != nil
                         ? [rootlessUicacheBackup UTF8String]
                         : "not-needed");
+        update_boot_progress(0.54, @"Checking app registration");
 
         setenv("PATH",
                "/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:"
@@ -8087,6 +8191,9 @@ int main(int argc, char *argv[]) {
                 @{@"name" : @"general-hook",
                   @"source" : sourceSBInjectGeneralHook,
                   @"installed" : kSBInjectGeneralHook},
+                @{@"name" : @"boot-progress-overlay",
+                  @"source" : sourceSBInjectBootProgressHook,
+                  @"installed" : kSBInjectBootProgressHook},
                 @{@"name" : @"preferences-bridge",
                   @"source" : sourceSBInjectPreferencesBridge,
                   @"installed" : kSBInjectPreferencesBridge},
@@ -8117,11 +8224,21 @@ int main(int argc, char *argv[]) {
             ];
             bool earlyPayloadExact = exact_file_pairs(
                 @"early-boot-activation", earlyActivationPairs);
+            if (bootProgressVisible) {
+                update_boot_progress(0.64, @"Secure components verified");
+            }
             NSString *earlyActivationError = nil;
             bool earlyJitterd = earlyPayloadExact &&
                 install_sbinject_jitterd_job(
                     sourceSBInjectJitterd, sourceSBInjectJitterdPlist,
                     false, &earlyActivationError);
+            if (bootProgressVisible && earlyJitterd) {
+                update_boot_progress(0.78, @"Injection service is ready");
+                usleep(150 * 1000);
+                update_boot_progress(0.94,
+                                     @"Preparing the custom SpringBoard");
+                usleep(250 * 1000);
+            }
             bool earlySpringBoard =
                 earlyJitterd && activate_sbinject_springboard();
             bool earlyPreferences =
@@ -8137,6 +8254,11 @@ int main(int argc, char *argv[]) {
                         earlyActivationError != nil
                             ? [[earlyActivationError description] UTF8String]
                             : "none");
+            if (earlySpringBoard) {
+                clear_boot_progress();
+            } else if (bootProgressVisible) {
+                update_boot_progress(0.66, @"Repairing required services");
+            }
         }
 
         bool systemSileoBundleUpdated = false;
@@ -8226,6 +8348,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kOpenSSHPlist},
                 @{@"source" : sourceSBInjectGeneralHook,
                   @"installed" : kSBInjectGeneralHook},
+                @{@"source" : sourceSBInjectBootProgressHook,
+                  @"installed" : kSBInjectBootProgressHook},
                 @{@"source" : sourceSBInjectAmfidHook,
                   @"installed" : kSBInjectAmfidHook},
                 @{@"source" : sourceSBInjectAmfidCandidate,
@@ -8435,6 +8559,7 @@ int main(int argc, char *argv[]) {
         char *elleKitDpkgArguments[] = {
             "/var/jb/usr/bin/dpkg", "-i",
             (char *)[sourceElleKit fileSystemRepresentation], NULL};
+        update_boot_progress(0.68, @"Checking runtime packages");
         int elleKitDpkgStatus = run_and_wait_bounded(
             elleKitDpkgArguments[0], elleKitDpkgArguments, 90000);
         log_message("elleKitFixedDpkgExit=%d package=ellekit version=1.2",
@@ -8566,6 +8691,7 @@ int main(int argc, char *argv[]) {
             (char *)[sourceOpenSSHClient fileSystemRepresentation],
             (char *)[sourceOpenSSHSFTPServer fileSystemRepresentation],
             (char *)[sourceOpenSSHServer fileSystemRepresentation], NULL};
+        update_boot_progress(0.74, @"Checking remote access");
         int openSSHDpkgStatus = run_and_wait_bounded(
             openSSHDpkgArguments[0], openSSHDpkgArguments, 120000);
         log_message("openSSHFixedDpkgExit=%d version=9.7p1-1",
@@ -8698,7 +8824,9 @@ int main(int argc, char *argv[]) {
         }
 
         bool runtimeExecWorkerUpdated = false;
+        update_boot_progress(0.80, @"Refreshing runtime services");
         bool sbinjectGeneralHookUpdated = false;
+        bool sbinjectBootProgressHookUpdated = false;
         bool sbinjectAmfidHookUpdated = false;
         bool sbinjectAmfidCandidateUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
@@ -8729,6 +8857,11 @@ int main(int argc, char *argv[]) {
                 @"generalhook.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectGeneralHook", &sbinjectGeneralHookUpdated,
                 &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceSBInjectBootProgressHook, @"/var/jb/usr/lib/sbinject",
+                @"boot-progress.dylib", 4 * 1024 * 1024, 0755,
+                "sbinjectBootProgressHook",
+                &sbinjectBootProgressHookUpdated, &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectAmfidHook, @"/var/jb/usr/libexec/sbinject",
                 @"a", 4 * 1024 * 1024, 0755,
@@ -8805,6 +8938,7 @@ int main(int argc, char *argv[]) {
         }
         bool sbinjectPayloadUpdated =
             runtimeExecWorkerUpdated || sbinjectGeneralHookUpdated ||
+            sbinjectBootProgressHookUpdated ||
             sbinjectAmfidHookUpdated || sbinjectAmfidCandidateUpdated ||
             sbinjectPreferencesBridgeUpdated ||
             sbinjectLaunchdHookUpdated ||
@@ -8876,6 +9010,7 @@ int main(int argc, char *argv[]) {
         // after the SBInject package policy and broker are refreshed. The
         // immutable application itself remains in the Cryptex.
         if (repairMode) {
+            update_boot_progress(0.85, @"Checking Sileo");
             char *sileoRepairArguments[] = {
                 "/var/jb/usr/bin/dpkg", "-i",
                 (char *)[sourceSileo fileSystemRepresentation], NULL};
@@ -8914,6 +9049,7 @@ int main(int argc, char *argv[]) {
         // SpringBoard dylibs execute only in the jitterd-enabled replacement.
         char *dpkgConfigureArguments[] = {
             "/var/jb/usr/bin/dpkg", "--configure", "-a", NULL};
+        update_boot_progress(0.89, @"Checking package state");
         int dpkgConfigureStatus =
             repairMode
                 ? run_and_wait_bounded(dpkgConfigureArguments[0],
@@ -8948,6 +9084,7 @@ int main(int argc, char *argv[]) {
         char *apt_update_arguments[] = {
             "/var/jb/usr/bin/apt-get", "update", "-o",
             "Dpkg::Use-Pty=0", NULL};
+        update_boot_progress(0.92, @"Checking repositories");
         log_message("aptUpdateScope=all reason=%s",
                     repositoryMetadataChanged
                         ? "repository-metadata-changed"
@@ -9004,6 +9141,7 @@ int main(int argc, char *argv[]) {
             return fail(@"Cryptex Sileo executables are unavailable", nil);
         }
         NSString *systemRegistrationError = nil;
+        update_boot_progress(0.95, @"Registering Sileo");
         if (!register_sileo_system_application(
                 kSystemSileoBundlePath, &systemRegistrationError)) {
             return fail(systemRegistrationError, nil);
@@ -9193,6 +9331,7 @@ int main(int argc, char *argv[]) {
         }
 
         NSString *sbinjectJitterdError = nil;
+        update_boot_progress(0.97, @"Starting the injection service");
         bool sbinjectJitterdRestartRequired =
             sbinjectJitterdUpdated || sbinjectJitterdPlistUpdated;
         if (!install_sbinject_jitterd_job(
@@ -9226,6 +9365,7 @@ int main(int argc, char *argv[]) {
         }
 
         NSString *rootBrokerJobError = nil;
+        update_boot_progress(0.98, @"Starting the package service");
         if (!install_sileo_root_broker_job(executable, registeredPath,
                                            destinationProcursus,
                                            &rootBrokerJobError)) {
@@ -9235,6 +9375,7 @@ int main(int argc, char *argv[]) {
         }
 
         NSString *openSSHJobError = nil;
+        update_boot_progress(0.99, @"Starting remote access");
         if (!install_openssh_job(&openSSHJobError)) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
