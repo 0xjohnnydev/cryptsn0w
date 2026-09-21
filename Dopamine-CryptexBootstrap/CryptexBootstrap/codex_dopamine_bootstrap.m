@@ -157,8 +157,18 @@ static NSString *const kRootBrokerPlist =
 static NSString *const kRootlessUicache = @"/var/jb/usr/bin/uicache";
 static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
+static NSString *const kExecWorkerNoKeychainExecutable =
+    @"/var/jb/usr/libexec/codex-exec-worker-no-keychain";
+static NSString *const kExecWorkerNativeSDKExecutable =
+    @"/var/jb/usr/libexec/codex-exec-worker-native-sdk";
+static NSString *const kExecWorkerNativeSDKNoKeychainExecutable =
+    @"/var/jb/usr/libexec/codex-exec-worker-native-sdk-no-keychain";
+static NSString *const kManagedAppSettings =
+    @"/var/jb/var/lib/sbinject/managed-app-settings.plist";
 static NSString *const kTrollStoreBrokerClientExecutable =
     @"/var/jb/usr/libexec/codex-trollstore-broker-client";
+static NSString *const kTrollStoreSettingsHook =
+    @"/var/jb/usr/lib/sbinject/trollstore-settings-hook.dylib";
 static NSString *const kOpenSSHLabel = @"com.openssh.sshd";
 static NSString *const kOpenSSHExecutable = @"/var/jb/usr/sbin/sshd";
 static NSString *const kOpenSSHKeygen = @"/var/jb/usr/bin/ssh-keygen";
@@ -302,6 +312,8 @@ static bool refresh_trollstore_container_applications(const char *reason);
 static bool managed_trollstore_helper_client(pid_t pid, NSString *path,
                                              NSString **helperPayloadOut);
 static bool trollstore_helper_command_allowed(const char *command);
+static bool trollstore_settings_request_allowed(
+    char *const arguments[], uint32_t argumentCount);
 
 static NSString *sha256_for_file(NSString *path) {
     int descriptor = open(path.fileSystemRepresentation,
@@ -375,6 +387,84 @@ static bool install_fixed_copy(NSString *source, NSString *destination,
     return files_are_equal(source, destination);
 }
 
+static NSDictionary *managed_app_settings_dictionary(void) {
+    struct stat status = {0};
+    if (lstat(kManagedAppSettings.fileSystemRepresentation, &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 0 || status.st_gid != 0 ||
+        status.st_size <= 0 || status.st_size > 1024 * 1024 ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return @{};
+    }
+    NSDictionary *settings = [NSDictionary
+        dictionaryWithContentsOfFile:kManagedAppSettings];
+    return [settings isKindOfClass:NSDictionary.class] ? settings : @{};
+}
+
+static bool managed_app_setting_enabled(NSString *identifier,
+                                        NSString *key) {
+    NSDictionary *entry = managed_app_settings_dictionary()[identifier];
+    NSNumber *value = [entry isKindOfClass:NSDictionary.class]
+        ? entry[key] : nil;
+    return [value isKindOfClass:NSNumber.class] ? value.boolValue : true;
+}
+
+static bool update_managed_app_setting(const char *identifierBytes,
+                                       const char *keyBytes,
+                                       const char *valueBytes) {
+    if (identifierBytes == NULL || keyBytes == NULL || valueBytes == NULL) {
+        return false;
+    }
+    NSString *identifier = [NSString stringWithUTF8String:identifierBytes];
+    NSString *key = [NSString stringWithUTF8String:keyBytes];
+    bool allowedKey = [key isEqual:@"BlockExceptionPorts"] ||
+        [key isEqual:@"KeychainIdentity"] || [key isEqual:@"LegacySDK"];
+    NSCharacterSet *invalidIdentifier = [[NSCharacterSet
+        characterSetWithCharactersInString:
+            @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"]
+        invertedSet];
+    if (identifier.length == 0 || identifier.length > 255 || !allowedKey ||
+        [identifier rangeOfCharacterFromSet:invalidIdentifier].location !=
+            NSNotFound ||
+        (strcmp(valueBytes, "0") != 0 && strcmp(valueBytes, "1") != 0)) {
+        return false;
+    }
+    NSMutableDictionary *settings =
+        [managed_app_settings_dictionary() mutableCopy];
+    NSMutableDictionary *entry =
+        [settings[identifier] isKindOfClass:NSDictionary.class]
+            ? [settings[identifier] mutableCopy]
+            : [NSMutableDictionary dictionary];
+    entry[key] = @(strcmp(valueBytes, "1") == 0);
+    settings[identifier] = entry;
+    NSError *error = nil;
+    bool wrote = [settings writeToFile:kManagedAppSettings atomically:YES] &&
+        [[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0644,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:kManagedAppSettings error:&error];
+    log_message("managedAppSetting identifier=%s key=%s value=%s wrote=%s "
+                "error=%s", identifierBytes, keyBytes, valueBytes,
+                wrote ? "true" : "false",
+                error != nil ? error.description.UTF8String : "none");
+    return wrote;
+}
+
+static NSString *managed_app_launcher_for_identifier(NSString *identifier) {
+    bool keychain = managed_app_setting_enabled(identifier,
+                                                 @"KeychainIdentity");
+    bool legacySDK = managed_app_setting_enabled(identifier, @"LegacySDK");
+    if (legacySDK) {
+        return keychain ? kExecWorkerExecutable
+                        : kExecWorkerNoKeychainExecutable;
+    }
+    return keychain ? kExecWorkerNativeSDKExecutable
+                    : kExecWorkerNativeSDKNoKeychainExecutable;
+}
+
 static bool prepare_managed_application_source(NSString *bundlePath,
                                                NSString *identifier,
                                                NSString **errorText) {
@@ -393,6 +483,8 @@ static bool prepare_managed_application_source(NSString *bundlePath,
         stringByAppendingPathComponent:kManagedAppPayloadName];
     NSString *markerPath = [bundlePath
         stringByAppendingPathComponent:kManagedAppSourceMarker];
+    NSString *selectedLauncher =
+        managed_app_launcher_for_identifier(identifier);
     NSDictionary *marker = [NSDictionary dictionaryWithContentsOfFile:
         markerPath];
     NSString *recordedHash = marker[@"LauncherSHA256"];
@@ -402,7 +494,7 @@ static bool prepare_managed_application_source(NSString *bundlePath,
         [marker[@"ExecutableName"] isEqual:executableName] &&
         [recordedHash isKindOfClass:NSString.class] &&
         [currentHash isEqual:recordedHash];
-    bool currentLauncher = files_are_equal(kExecWorkerExecutable,
+    bool currentLauncher = files_are_equal(selectedLauncher,
                                            executable);
     struct stat payloadStatus = {0};
     bool payloadReady = lstat(payload.fileSystemRepresentation,
@@ -422,13 +514,13 @@ static bool prepare_managed_application_source(NSString *bundlePath,
         errno == ENOENT;
     if (resumeInterruptedPreparation) {
         char *prepareArguments[] = {
-            (char *)kExecWorkerExecutable.fileSystemRepresentation,
+            (char *)selectedLauncher.fileSystemRepresentation,
             "--prepare-app",
             (char *)payload.fileSystemRepresentation,
             NULL,
         };
         int prepareStatus = run_and_wait(
-            kExecWorkerExecutable.fileSystemRepresentation,
+            selectedLauncher.fileSystemRepresentation,
             prepareArguments);
         if (prepareStatus != 0) {
             if (errorText != NULL) {
@@ -481,13 +573,13 @@ static bool prepare_managed_application_source(NSString *bundlePath,
             return false;
         }
         char *prepareArguments[] = {
-            (char *)kExecWorkerExecutable.fileSystemRepresentation,
+            (char *)selectedLauncher.fileSystemRepresentation,
             "--prepare-app",
             (char *)payload.fileSystemRepresentation,
             NULL,
         };
         int prepareStatus = run_and_wait(
-            kExecWorkerExecutable.fileSystemRepresentation,
+            selectedLauncher.fileSystemRepresentation,
             prepareArguments);
         if (prepareStatus != 0) {
             (void)rename(payload.fileSystemRepresentation,
@@ -513,7 +605,7 @@ static bool prepare_managed_application_source(NSString *bundlePath,
         return false;
     }
     if (!currentLauncher &&
-        !install_fixed_copy(kExecWorkerExecutable, executable,
+        !install_fixed_copy(selectedLauncher, executable,
                             16 * 1024 * 1024, @"app launcher", errorText)) {
         return false;
     }
@@ -604,7 +696,7 @@ static bool prepare_managed_application_source(NSString *bundlePath,
             return false;
         }
     }
-    NSString *launcherHash = sha256_for_file(kExecWorkerExecutable);
+    NSString *launcherHash = sha256_for_file(selectedLauncher);
     NSMutableDictionary *updatedMarker = [@{
         @"Version" : @1,
         @"BundleIdentifier" : identifier,
@@ -1558,8 +1650,9 @@ static bool load_mobile_container_manager(void) {
     return loaded;
 }
 
-static NSDictionary *managed_app_launcher_entitlements(void) {
-    return @{
+static NSDictionary *managed_app_launcher_entitlements(
+    bool keychainIdentity) {
+    NSMutableDictionary *entitlements = [@{
         @"com.apple.CommCenter.fine-grained" : @[@"data-allowed-write"],
         @"com.apple.backboardd.launchapplications" : @YES,
         @"com.apple.frontboard.launchapplications" : @YES,
@@ -1602,7 +1695,12 @@ static NSDictionary *managed_app_launcher_entitlements(void) {
         @"get-task-allow" : @YES,
         @"platform-application" : @YES,
         @"task_for_pid-allow" : @YES,
-    };
+    } mutableCopy];
+    if (keychainIdentity) {
+        entitlements[@"application-identifier"] =
+            kManagedAppLauncherIdentifier;
+    }
+    return entitlements;
 }
 
 static bool register_prepared_application(NSString *destination,
@@ -1629,7 +1727,8 @@ static bool register_prepared_application(NSString *destination,
         @"CFBundleIdentifier" : identifier,
         @"CodeInfoIdentifier" : kManagedAppLauncherIdentifier,
         @"CompatibilityState" : @0,
-        @"Entitlements" : managed_app_launcher_entitlements(),
+        @"Entitlements" : managed_app_launcher_entitlements(
+            managed_app_setting_enabled(identifier, @"KeychainIdentity")),
         @"IsContainerized" : @NO,
         @"EnvironmentVariables" : @{
             @"CFFIXED_USER_HOME" : dataPath,
@@ -4425,16 +4524,23 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
                  managedHelperPayload,
                  [NSString stringWithUTF8String:request.arguments[0]]) &&
              trollstore_helper_command_allowed(request.arguments[1]));
+        bool settingsRequest = received && managedHelperClient &&
+            trollstore_settings_request_allowed(
+                request.arguments, request.header.argument_count);
         bool allowed = received && managedHelperAllowed &&
             resolve_broker_command(request.arguments[0], jailbreakRoot,
                                    resolved, sizeof(resolved));
         int32_t status = 126 << 8;
         if (allowed) {
-            status = run_root_broker_command(
-                server, client, request.arguments, request.descriptors,
-                request.header.descriptor_numbers,
-                request.header.descriptor_count, NULL, 0, jailbreakRoot,
-                resolved);
+            status = settingsRequest
+                ? (update_managed_app_setting(
+                       request.arguments[2], request.arguments[3],
+                       request.arguments[4]) ? 0 : (64 << 8))
+                : run_root_broker_command(
+                      server, client, request.arguments, request.descriptors,
+                      request.header.descriptor_numbers,
+                      request.header.descriptor_count, NULL, 0,
+                      jailbreakRoot, resolved);
             if (managedHelperClient && WIFEXITED(status) &&
                 WEXITSTATUS(status) == 0 &&
                 !refresh_trollstore_container_applications(
@@ -5165,7 +5271,7 @@ static bool trollstore_helper_command_allowed(const char *command) {
         "refresh-all", "url-scheme", "enable-jit",
         "modify-registration", "transfer-apps", "check-dev-mode",
         "arm-dev-mode", "install-trollstore", "install-ldid",
-        "reboot", "respring",
+        "reboot", "respring", "sbinject-settings",
     };
     if (command == NULL) return false;
     for (size_t index = 0;
@@ -5173,6 +5279,13 @@ static bool trollstore_helper_command_allowed(const char *command) {
         if (strcmp(command, commands[index]) == 0) return true;
     }
     return false;
+}
+
+static bool trollstore_settings_request_allowed(
+    char *const arguments[], uint32_t argumentCount) {
+    return arguments != NULL && argumentCount == 5U &&
+        arguments[1] != NULL &&
+        strcmp(arguments[1], "sbinject-settings") == 0;
 }
 
 static void handle_preferences_xpc_request(xpc_connection_t peer,
@@ -7532,6 +7645,15 @@ int main(int argc, char *argv[]) {
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
+        NSString *sourceExecWorkerNoKeychain =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-exec-worker-no-keychain"];
+        NSString *sourceExecWorkerNativeSDK =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-exec-worker-native-sdk"];
+        NSString *sourceExecWorkerNativeSDKNoKeychain =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-exec-worker-native-sdk-no-keychain"];
         NSString *sourceTrollStoreBrokerClient =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-trollstore-broker-client"];
@@ -7544,6 +7666,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectPreferencesBridge =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/preferences-bridge.dylib"];
+        NSString *sourceTrollStoreSettingsHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/trollstore-settings-hook.dylib"];
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/launchdhook-v12.dylib"];
@@ -7710,7 +7835,20 @@ int main(int argc, char *argv[]) {
             lstat([sourceExecWorker fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceExecWorkerNoKeychain fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceExecWorkerNativeSDK fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceExecWorkerNativeSDKNoKeychain
+                      fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceTrollStoreBrokerClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceTrollStoreSettingsHook fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectGeneralHook fileSystemRepresentation],
@@ -8195,8 +8333,17 @@ int main(int argc, char *argv[]) {
                   @"installed" : kElleKitInjectorExecutable},
                 @{@"source" : sourceExecWorker,
                   @"installed" : kExecWorkerExecutable},
+                @{@"source" : sourceExecWorkerNoKeychain,
+                  @"installed" : kExecWorkerNoKeychainExecutable},
+                @{@"source" : sourceExecWorkerNativeSDK,
+                  @"installed" : kExecWorkerNativeSDKExecutable},
+                @{@"source" : sourceExecWorkerNativeSDKNoKeychain,
+                  @"installed" :
+                      kExecWorkerNativeSDKNoKeychainExecutable},
                 @{@"source" : sourceTrollStoreBrokerClient,
                   @"installed" : kTrollStoreBrokerClientExecutable},
+                @{@"source" : sourceTrollStoreSettingsHook,
+                  @"installed" : kTrollStoreSettingsHook},
                 @{@"source" : [sourceProcursus
                                      stringByAppendingPathComponent:
                                          @"usr/bin/ssh"],
@@ -8720,9 +8867,31 @@ int main(int argc, char *argv[]) {
                 "runtimeExecWorker", &runtimeExecWorkerUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
+                sourceExecWorkerNoKeychain, @"/var/jb/usr/libexec",
+                @"codex-exec-worker-no-keychain", 16 * 1024 * 1024, 0755,
+                "runtimeExecWorkerNoKeychain", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceExecWorkerNativeSDK, @"/var/jb/usr/libexec",
+                @"codex-exec-worker-native-sdk", 16 * 1024 * 1024, 0755,
+                "runtimeExecWorkerNativeSDK", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceExecWorkerNativeSDKNoKeychain,
+                @"/var/jb/usr/libexec",
+                @"codex-exec-worker-native-sdk-no-keychain",
+                16 * 1024 * 1024, 0755,
+                "runtimeExecWorkerNativeSDKNoKeychain", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
                 sourceTrollStoreBrokerClient, @"/var/jb/usr/libexec",
                 @"codex-trollstore-broker-client", 4 * 1024 * 1024, 0755,
                 "trollStoreBrokerClient", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceTrollStoreSettingsHook, @"/var/jb/usr/lib/sbinject",
+                @"trollstore-settings-hook.dylib", 4 * 1024 * 1024, 0755,
+                "trollStoreSettingsHook", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectGeneralHook, @"/var/jb/usr/lib/sbinject",
@@ -9158,8 +9327,15 @@ int main(int argc, char *argv[]) {
         manifest[@"SpringBoardTweakAdmission"] =
             @"sbinject-jit-pre-main-no-dynamic-trust-cache";
         manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
+        manifest[@"RuntimeExecWorkerNoKeychainExecutable"] =
+            kExecWorkerNoKeychainExecutable;
+        manifest[@"RuntimeExecWorkerNativeSDKExecutable"] =
+            kExecWorkerNativeSDKExecutable;
+        manifest[@"RuntimeExecWorkerNativeSDKNoKeychainExecutable"] =
+            kExecWorkerNativeSDKNoKeychainExecutable;
         manifest[@"TrollStoreBrokerClientExecutable"] =
             kTrollStoreBrokerClientExecutable;
+        manifest[@"TrollStoreSettingsHook"] = kTrollStoreSettingsHook;
         manifest[@"OpenSSHVersion"] = @"9.7p1-1";
         manifest[@"OpenSSHExecutable"] = kOpenSSHExecutable;
         manifest[@"OpenSSHLaunchDaemon"] = kOpenSSHPlist;

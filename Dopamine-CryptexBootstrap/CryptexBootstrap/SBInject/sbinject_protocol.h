@@ -26,6 +26,16 @@
     "/var/jb/usr/libexec/codex-sileo-root-broker"
 #define CODEX_SBINJECT_APP_LAUNCHER \
     "/var/jb/usr/libexec/codex-exec-worker"
+#define CODEX_SBINJECT_APP_LAUNCHER_NO_KEYCHAIN \
+    "/var/jb/usr/libexec/codex-exec-worker-no-keychain"
+#define CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK \
+    "/var/jb/usr/libexec/codex-exec-worker-native-sdk"
+#define CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK_NO_KEYCHAIN \
+    "/var/jb/usr/libexec/codex-exec-worker-native-sdk-no-keychain"
+#define CODEX_SBINJECT_MANAGED_APP_SETTINGS \
+    "/var/jb/var/lib/sbinject/managed-app-settings.plist"
+#define CODEX_SBINJECT_TROLLSTORE_SETTINGS_HOOK \
+    "/var/jb/usr/lib/sbinject/trollstore-settings-hook.dylib"
 #define CODEX_SBINJECT_TROLLSTORE_BROKER_CLIENT \
     "/var/jb/usr/libexec/codex-trollstore-broker-client"
 #define CODEX_SBINJECT_TROLLSTORE_REGISTRATION_HOOK \
