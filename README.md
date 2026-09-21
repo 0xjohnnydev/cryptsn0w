@@ -107,16 +107,29 @@ Git. See `MacApp/README.md` for the compact app layout.
 
 ## Runtime design
 
-The Cryptex supplies a fixed-trust system Sileo, ElleKit exception, SSH
-payload, SBInject hooks, jitter daemon, package validator, root broker, and the
-two resigned Apple app candidates. SpringBoard and Settings are redirected
-through SBInject; third-party tweak code remains on its JIT/dyld path rather
-than entering a mutable trust cache.
+The Cryptex supplies fixed-trust system Sileo, ElleKit, the pinned rootless
+`ldid` signing runtime, SSH, SBInject hooks, the jitter daemon, package
+validator, root broker, generic app launcher, and the two resigned Apple app
+candidates. SpringBoard and Settings are redirected through SBInject;
+third-party tweak and app payloads remain on the JIT/dyld path rather than
+being added to a mutable trust cache.
 
-`codex-exec-worker` has one production role: execute Mach-O dpkg maintainer
-scripts for Sileo through the debugged/JIT-compatible child path. Shell
-maintainer scripts run normally. Removing the worker would break package
-lifecycle operations for packages with binary pre/post scripts.
+`codex-exec-worker` is both the Mach-O package-script executor and the generic
+launcher copied into broker-managed app bundles. It obtains the debugged state,
+loads the original binary from `.sbinject-payload`, and hands off to its entry
+point. Its fixed signature carries the union of the functional TrollStore
+UI/root-helper, JIT, debugger, filesystem, and LaunchServices entitlements;
+identity-bound application/team values are deliberately not fabricated.
+
+TrollStore Lite remains an ordinary Sileo package and is not embedded in the
+Cryptex. When present, the bootstrap replaces only its executable and helper
+entry points with fixed broker clients while preserving the upstream payloads.
+The UI retries the exact broker client without TrollStore's root-persona
+attributes when iOS denies that spawn; the root broker performs the privileged
+operation. The original helper signs with the pinned fixed-trust `ldid`, its
+legacy registration is deferred, and the broker normalizes the new container,
+installs the generic launcher, and performs the final System registration.
+No installed app receives a per-app trust-cache entry or provisioning profile.
 
 At each boot the Cryptex launch daemon verifies the installed bytes, restores
 the SBInject jitter and Sileo broker jobs, registers Sileo at its stable system
@@ -136,4 +149,6 @@ translation, dictionary, asset-catalog, and icon resources.
 
 Runtime bootstrap diagnostics are written to
 `/var/tmp/codex-dopamine-cryptex-bootstrap.log`; terminal success and failure
-markers are adjacent in `/var/tmp/`.
+markers are adjacent in `/var/tmp/`. Generic launcher and TrollStore
+registration diagnostics use `/var/mobile/.sbinject-app-launcher.log` and
+`/var/mobile/.sbinject-trollstore-registration.log`.

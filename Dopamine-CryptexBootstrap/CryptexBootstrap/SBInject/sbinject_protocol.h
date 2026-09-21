@@ -24,6 +24,19 @@
 #define CODEX_SBINJECT_AMFID "/var/jb/usr/libexec/sbinject/notamfid"
 #define CODEX_SBINJECT_ROOT_BROKER \
     "/var/jb/usr/libexec/codex-sileo-root-broker"
+#define CODEX_SBINJECT_APP_LAUNCHER \
+    "/var/jb/usr/libexec/codex-exec-worker"
+#define CODEX_SBINJECT_TROLLSTORE_BROKER_CLIENT \
+    "/var/jb/usr/libexec/codex-trollstore-broker-client"
+#define CODEX_SBINJECT_TROLLSTORE_REGISTRATION_HOOK \
+    "/var/jb/usr/lib/sbinject/trollstore-registration-hook.dylib"
+#define CODEX_SBINJECT_APP_LAUNCHER_IDENTIFIER \
+    "com.openai.codex.sbinject.app-launcher"
+#define CODEX_SBINJECT_APP_PAYLOAD_NAME ".sbinject-payload"
+#define CODEX_SBINJECT_TROLLSTORE_HELPER_PAYLOAD_NAME \
+    ".sbinject-root-helper"
+#define CODEX_SBINJECT_MANAGED_APP_MARKER \
+    "_SBInjectManagedApp.plist"
 #define CODEX_SBINJECT_AMFID_HOOK \
     "/var/jb/usr/libexec/sbinject/a"
 #define CODEX_SBINJECT_GENERALHOOK \

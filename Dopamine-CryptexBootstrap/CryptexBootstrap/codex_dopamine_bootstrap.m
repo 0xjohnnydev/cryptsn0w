@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <CommonCrypto/CommonDigest.h>
 #import <IOKit/IOKitLib.h>
 #import <mach-o/dyld.h>
 #import <mach-o/fat.h>
@@ -138,6 +139,11 @@ static NSString *const kTrollStoreLiteIdentifier =
 static NSString *const kManagedApplicationMarker =
     @"_SBInjectManagedApp.plist";
 static NSString *const kTrollStoreLiteMarker = @"_TrollStoreLite";
+static NSString *const kManagedAppLauncherIdentifier =
+    @"com.openai.codex.sbinject.app-launcher";
+static NSString *const kManagedAppPayloadName = @".sbinject-payload";
+static NSString *const kManagedAppSourceMarker =
+    @".sbinject-launcher.plist";
 static NSString *const kRootBrokerLabel =
     @"com.openai.codex.dopamine.sileo-root-broker";
 static NSString *const kRootBrokerExecutable =
@@ -148,6 +154,8 @@ static NSString *const kRootBrokerPlist =
 static NSString *const kRootlessUicache = @"/var/jb/usr/bin/uicache";
 static NSString *const kExecWorkerExecutable =
     @"/var/jb/usr/libexec/codex-exec-worker";
+static NSString *const kTrollStoreBrokerClientExecutable =
+    @"/var/jb/usr/libexec/codex-trollstore-broker-client";
 static NSString *const kOpenSSHLabel = @"com.openssh.sshd";
 static NSString *const kOpenSSHExecutable = @"/var/jb/usr/sbin/sshd";
 static NSString *const kOpenSSHKeygen = @"/var/jb/usr/bin/ssh-keygen";
@@ -175,6 +183,8 @@ static NSString *const kSBInjectLaunchdHook =
     @"/var/jb/usr/lib/sbinject/launchdhook-v12.dylib";
 static NSString *const kSBInjectLsdRegistrationHook =
     @"/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
+static NSString *const kSBInjectTrollStoreRegistrationHook =
+    @"/var/jb/usr/lib/sbinject/trollstore-registration-hook.dylib";
 static NSString *const kSBInjectLsdRegistrationMarker =
     @"/var/mobile/.sbinject-lsd-registration-ready";
 static NSString *const kSBInjectBundle =
@@ -279,11 +289,318 @@ static NSArray<NSString *> *validated_bundle_entries(NSString *root,
                                                       bool requireManaged);
 static bool normalize_bundle_tree(NSString *source, NSString *destination);
 static bool bundle_trees_are_equal(NSString *source, NSString *destination);
+static bool files_are_equal(NSString *left, NSString *right);
 static bool register_managed_rootless_application(NSString *source,
                                                    NSString **targetPath,
                                                    NSString **errorText);
 static bool cleanup_stale_managed_applications(NSSet<NSString *> *active,
                                                 NSString **errorText);
+static bool refresh_trollstore_container_applications(const char *reason);
+static bool managed_trollstore_helper_client(pid_t pid, NSString *path,
+                                             NSString **helperPayloadOut);
+static bool trollstore_helper_command_allowed(const char *command);
+
+static NSString *sha256_for_file(NSString *path) {
+    int descriptor = open(path.fileSystemRepresentation,
+                          O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return nil;
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    uint8_t buffer[64 * 1024];
+    bool complete = true;
+    for (;;) {
+        ssize_t amount = read(descriptor, buffer, sizeof(buffer));
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) {
+            complete = false;
+            break;
+        }
+        if (amount == 0) break;
+        CC_SHA256_Update(&context, buffer, (CC_LONG)amount);
+    }
+    close(descriptor);
+    if (!complete) return nil;
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH] = {0};
+    CC_SHA256_Final(digest, &context);
+    NSMutableString *hex = [NSMutableString
+        stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2U];
+    for (size_t index = 0; index < sizeof(digest); ++index) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+    return hex;
+}
+
+static bool install_fixed_copy(NSString *source, NSString *destination,
+                               off_t maximumSize, NSString *displayName,
+                               NSString **errorText) {
+    NSData *contents = [NSData dataWithContentsOfFile:source
+                                               options:NSDataReadingMappedIfSafe
+                                                 error:nil];
+    if (contents.length == 0 || contents.length > (NSUInteger)maximumSize) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:@"%@ payload is invalid",
+                                                     displayName];
+        }
+        return false;
+    }
+    NSString *temporary = [[destination stringByDeletingLastPathComponent]
+        stringByAppendingPathComponent:[NSString stringWithFormat:
+            @".%@.launcher-%@", destination.lastPathComponent,
+            NSUUID.UUID.UUIDString]];
+    NSError *error = nil;
+    if (![contents writeToFile:temporary
+                       options:NSDataWritingWithoutOverwriting
+                         error:&error] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0755,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:temporary error:&error] ||
+        rename(temporary.fileSystemRepresentation,
+               destination.fileSystemRepresentation) != 0) {
+        int savedError = errno;
+        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"%@ activation failed: %@ (%s)", displayName,
+                error ?: @"none", strerror(savedError)];
+        }
+        return false;
+    }
+    return files_are_equal(source, destination);
+}
+
+static bool prepare_managed_application_source(NSString *bundlePath,
+                                               NSString *identifier,
+                                               NSString **errorText) {
+    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+        [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+    NSString *executableName = info[@"CFBundleExecutable"];
+    if (![executableName isKindOfClass:NSString.class] ||
+        executableName.length == 0 ||
+        ![executableName isEqualToString:executableName.lastPathComponent]) {
+        if (errorText != NULL) *errorText = @"managed app executable is invalid";
+        return false;
+    }
+    NSString *executable = [bundlePath
+        stringByAppendingPathComponent:executableName];
+    NSString *payload = [bundlePath
+        stringByAppendingPathComponent:kManagedAppPayloadName];
+    NSString *markerPath = [bundlePath
+        stringByAppendingPathComponent:kManagedAppSourceMarker];
+    NSDictionary *marker = [NSDictionary dictionaryWithContentsOfFile:
+        markerPath];
+    NSString *recordedHash = marker[@"LauncherSHA256"];
+    NSString *currentHash = sha256_for_file(executable);
+    bool recordedLauncher = [marker[@"Version"] integerValue] == 1 &&
+        [marker[@"BundleIdentifier"] isEqual:identifier] &&
+        [marker[@"ExecutableName"] isEqual:executableName] &&
+        [recordedHash isKindOfClass:NSString.class] &&
+        [currentHash isEqual:recordedHash];
+    bool currentLauncher = files_are_equal(kExecWorkerExecutable,
+                                           executable);
+    struct stat payloadStatus = {0};
+    bool payloadReady = lstat(payload.fileSystemRepresentation,
+                              &payloadStatus) == 0 &&
+        S_ISREG(payloadStatus.st_mode) && !S_ISLNK(payloadStatus.st_mode) &&
+        payloadStatus.st_uid == 0 && payloadStatus.st_gid == 0 &&
+        payloadStatus.st_size > 0 &&
+        payloadStatus.st_size <= 256 * 1024 * 1024 &&
+        (payloadStatus.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+
+    if (!currentLauncher && !recordedLauncher) {
+        struct stat executableStatus = {0};
+        if (lstat(executable.fileSystemRepresentation, &executableStatus) != 0 ||
+            !S_ISREG(executableStatus.st_mode) ||
+            S_ISLNK(executableStatus.st_mode) ||
+            executableStatus.st_uid != 0 || executableStatus.st_gid != 0 ||
+            executableStatus.st_size <= 0 ||
+            executableStatus.st_size > 256 * 1024 * 1024 ||
+            (executableStatus.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+            if (errorText != NULL) *errorText = @"managed app payload is unsafe";
+            return false;
+        }
+        NSString *backup = [bundlePath stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".sbinject-payload.old-%@",
+                                       NSUUID.UUID.UUIDString]];
+        bool backedUp = payloadReady &&
+            rename(payload.fileSystemRepresentation,
+                   backup.fileSystemRepresentation) == 0;
+        if (payloadReady && !backedUp) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed app payload backup failed: %s", strerror(errno)];
+            }
+            return false;
+        }
+        if (rename(executable.fileSystemRepresentation,
+                   payload.fileSystemRepresentation) != 0) {
+            if (backedUp) {
+                (void)rename(backup.fileSystemRepresentation,
+                             payload.fileSystemRepresentation);
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed app payload activation failed: %s", strerror(errno)];
+            }
+            return false;
+        }
+        char *prepareArguments[] = {
+            (char *)kExecWorkerExecutable.fileSystemRepresentation,
+            "--prepare-app",
+            (char *)payload.fileSystemRepresentation,
+            NULL,
+        };
+        int prepareStatus = run_and_wait(
+            kExecWorkerExecutable.fileSystemRepresentation,
+            prepareArguments);
+        if (prepareStatus != 0) {
+            (void)rename(payload.fileSystemRepresentation,
+                         executable.fileSystemRepresentation);
+            if (backedUp) {
+                (void)rename(backup.fileSystemRepresentation,
+                             payload.fileSystemRepresentation);
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"managed app payload preparation exited %d",
+                    prepareStatus];
+            }
+            return false;
+        }
+        if (backedUp) {
+            [[NSFileManager defaultManager] removeItemAtPath:backup error:nil];
+        }
+        payloadReady = true;
+    }
+    if (!payloadReady) {
+        if (errorText != NULL) *errorText = @"managed app payload is missing";
+        return false;
+    }
+    if (!currentLauncher &&
+        !install_fixed_copy(kExecWorkerExecutable, executable,
+                            16 * 1024 * 1024, @"app launcher", errorText)) {
+        return false;
+    }
+    NSString *helperHash = nil;
+    if ([identifier isEqual:kTrollStoreLiteIdentifier]) {
+        NSString *helper = [bundlePath
+            stringByAppendingPathComponent:@"trollstorehelper"];
+        NSString *helperPayload = [bundlePath stringByAppendingPathComponent:
+            @".sbinject-root-helper"];
+        NSString *recordedHelperHash = marker[@"HelperLauncherSHA256"];
+        NSString *currentHelperHash = sha256_for_file(helper);
+        bool recordedHelper = [recordedHelperHash isKindOfClass:NSString.class] &&
+            [currentHelperHash isEqual:recordedHelperHash];
+        bool currentHelper = files_are_equal(
+            kTrollStoreBrokerClientExecutable, helper);
+        struct stat helperPayloadStatus = {0};
+        bool helperPayloadReady =
+            lstat(helperPayload.fileSystemRepresentation,
+                  &helperPayloadStatus) == 0 &&
+            S_ISREG(helperPayloadStatus.st_mode) &&
+            !S_ISLNK(helperPayloadStatus.st_mode) &&
+            helperPayloadStatus.st_uid == 0 &&
+            helperPayloadStatus.st_gid == 0 &&
+            helperPayloadStatus.st_size > 0 &&
+            helperPayloadStatus.st_size <= 64 * 1024 * 1024 &&
+            (helperPayloadStatus.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+        if (!currentHelper && !recordedHelper) {
+            struct stat helperStatus = {0};
+            if (lstat(helper.fileSystemRepresentation, &helperStatus) != 0 ||
+                !S_ISREG(helperStatus.st_mode) ||
+                S_ISLNK(helperStatus.st_mode) || helperStatus.st_uid != 0 ||
+                helperStatus.st_gid != 0 || helperStatus.st_size <= 0 ||
+                helperStatus.st_size > 64 * 1024 * 1024 ||
+                (helperStatus.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+                if (errorText != NULL) {
+                    *errorText = @"TrollStore helper payload is unsafe";
+                }
+                return false;
+            }
+            NSString *backup = [bundlePath stringByAppendingPathComponent:
+                [NSString stringWithFormat:@".sbinject-root-helper.old-%@",
+                                           NSUUID.UUID.UUIDString]];
+            bool backedUp = helperPayloadReady &&
+                rename(helperPayload.fileSystemRepresentation,
+                       backup.fileSystemRepresentation) == 0;
+            if (helperPayloadReady && !backedUp) {
+                if (errorText != NULL) {
+                    *errorText = [NSString stringWithFormat:
+                        @"TrollStore helper backup failed: %s",
+                        strerror(errno)];
+                }
+                return false;
+            }
+            if (rename(helper.fileSystemRepresentation,
+                       helperPayload.fileSystemRepresentation) != 0) {
+                if (backedUp) {
+                    (void)rename(backup.fileSystemRepresentation,
+                                 helperPayload.fileSystemRepresentation);
+                }
+                if (errorText != NULL) {
+                    *errorText = [NSString stringWithFormat:
+                        @"TrollStore helper activation failed: %s",
+                        strerror(errno)];
+                }
+                return false;
+            }
+            if (backedUp) {
+                [[NSFileManager defaultManager]
+                    removeItemAtPath:backup error:nil];
+            }
+            helperPayloadReady = true;
+        }
+        if (!helperPayloadReady ||
+            (!currentHelper &&
+             !install_fixed_copy(kTrollStoreBrokerClientExecutable, helper,
+                                 4 * 1024 * 1024,
+                                 @"TrollStore broker client", errorText))) {
+            if (!helperPayloadReady && errorText != NULL) {
+                *errorText = @"TrollStore helper payload is missing";
+            }
+            return false;
+        }
+        helperHash = sha256_for_file(kTrollStoreBrokerClientExecutable);
+        if (helperHash.length != CC_SHA256_DIGEST_LENGTH * 2U) {
+            if (errorText != NULL) {
+                *errorText = @"TrollStore broker client hash failed";
+            }
+            return false;
+        }
+    }
+    NSString *launcherHash = sha256_for_file(kExecWorkerExecutable);
+    NSMutableDictionary *updatedMarker = [@{
+        @"Version" : @1,
+        @"BundleIdentifier" : identifier,
+        @"ExecutableName" : executableName,
+        @"LauncherSHA256" : launcherHash ?: @"",
+    } mutableCopy];
+    if (helperHash != nil) {
+        updatedMarker[@"HelperLauncherSHA256"] = helperHash;
+    }
+    NSError *markerError = nil;
+    if (launcherHash.length != CC_SHA256_DIGEST_LENGTH * 2U ||
+        ![updatedMarker writeToFile:markerPath atomically:YES] ||
+        ![[NSFileManager defaultManager]
+            setAttributes:@{
+                NSFilePosixPermissions : @0644,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            }
+             ofItemAtPath:markerPath error:&markerError]) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"managed app marker failed: %@", markerError ?: @"none"];
+        }
+        return false;
+    }
+    log_message("sbinjectAppLauncherPrepared=true identifier=%s bundle=%s",
+                identifier.UTF8String, bundlePath.UTF8String);
+    return true;
+}
 
 static bool refresh_rootless_application_registrations(const char *reason) {
     if (!prepare_lsd_registration_hook(reason)) {
@@ -337,6 +654,24 @@ static bool refresh_rootless_application_registrations(const char *reason) {
                         reason, [identifier UTF8String], [path UTF8String]);
             continue;
         }
+        if ([identifier isEqualToString:kSileoIdentifier]) {
+            log_message("sbinjectApplicationRegistration=skipped reason=%s "
+                        "scope=system-sileo identifier=%s path=%s",
+                        reason, identifier.UTF8String, path.UTF8String);
+            continue;
+        }
+        NSString *launcherError = nil;
+        if (!prepare_managed_application_source(path, identifier,
+                                                &launcherError)) {
+            registered = false;
+            log_message("sbinjectApplicationRegistration=false reason=%s "
+                        "phase=launcher identifier=%s path=%s error=%s",
+                        reason, identifier.UTF8String, path.UTF8String,
+                        launcherError != nil
+                            ? launcherError.description.UTF8String
+                            : "unknown");
+            continue;
+        }
         [activeIdentifiers addObject:identifier];
         NSString *verificationPath = nil;
         NSString *directError = nil;
@@ -366,6 +701,9 @@ static bool refresh_rootless_application_registrations(const char *reason) {
                     cleanupError != nil
                         ? [[cleanupError description] UTF8String] : "unknown");
     }
+    bool trollStoreAppsReady =
+        refresh_trollstore_container_applications(reason);
+    registered &= trollStoreAppsReady;
     for (NSDictionary *bundle in bundles) {
         NSString *path = bundle[@"path"];
         NSString *identifier = bundle[@"identifier"];
@@ -1170,6 +1508,152 @@ static bool load_mobile_container_manager(void) {
     return loaded;
 }
 
+static NSDictionary *managed_app_launcher_entitlements(void) {
+    return @{
+        @"com.apple.CommCenter.fine-grained" : @[@"data-allowed-write"],
+        @"com.apple.backboardd.launchapplications" : @YES,
+        @"com.apple.frontboard.launchapplications" : @YES,
+        @"com.apple.frontboard.shutdown" : @YES,
+        @"com.apple.lsapplicationworkspace.rebuildappdatabases" : @YES,
+        @"com.apple.multitasking.termination" : @YES,
+        @"com.apple.private.MobileContainerManager.allowed" : @YES,
+        @"com.apple.private.MobileInstallationHelperService.allowed" : @YES,
+        @"com.apple.private.MobileInstallationHelperService.InstallDaemonOpsEnabled" : @YES,
+        @"com.apple.private.amfi.developer-mode-control" : @YES,
+        @"com.apple.private.coreservices.canmaplsdatabase" : @YES,
+        @"com.apple.private.cs.debugger" : @YES,
+        @"com.apple.private.mobileinstall.allowedSPI" : @[
+            @"InstallForLaunchServices", @"Install",
+            @"UninstallForLaunchServices", @"Uninstall",
+            @"UpdatePlaceholderMetadata",
+        ],
+        @"com.apple.private.persona-mgmt" : @YES,
+        @"com.apple.private.security.container-manager" : @YES,
+        @"com.apple.private.security.container-required" : @NO,
+        @"com.apple.private.security.no-container" : @YES,
+        @"com.apple.private.security.no-sandbox" : @YES,
+        @"com.apple.private.security.sandbox" : @NO,
+        @"com.apple.private.security.storage-exempt.heritable" : @YES,
+        @"com.apple.private.security.storage.AppBundles" : @YES,
+        @"com.apple.private.security.storage.MobileDocuments" : @YES,
+        @"com.apple.private.skip-library-validation" : @YES,
+        @"com.apple.private.uninstall.deletion" : @YES,
+        @"com.apple.runningboard.process-state" : @YES,
+        @"com.apple.security.exception.files.absolute-path.read-write" :
+            @[@"/"],
+        @"com.apple.security.exception.iokit-user-client-class" : @[
+            @"AGXDeviceUserClient", @"IOSurfaceRootUserClient",
+        ],
+        @"com.apple.security.cs.allow-jit" : @YES,
+        @"com.apple.security.cs.disable-library-validation" : @YES,
+        @"com.apple.springboard.launchapplications" : @YES,
+        @"com.apple.springboard.opensensitiveurl" : @YES,
+        @"dynamic-codesigning" : @YES,
+        @"get-task-allow" : @YES,
+        @"platform-application" : @YES,
+        @"task_for_pid-allow" : @YES,
+    };
+}
+
+static bool register_prepared_application(NSString *destination,
+                                          NSDictionary *info,
+                                          NSString *identifier,
+                                          NSString *dataPath,
+                                          NSString **errorText) {
+    (void)registered_application_proxy(identifier);
+    id workspace = [NSClassFromString(@"LSApplicationWorkspace")
+        defaultWorkspace];
+    SEL registrationSelector = @selector(
+        registerContainerizedApplicationWithInfoDictionaries:operationUUID:
+        requestContext:saveObserver:registrationError:);
+    if (workspace == nil ||
+        ![workspace respondsToSelector:registrationSelector]) {
+        if (errorText != NULL) {
+            *errorText = @"LaunchServices embedded registration is unavailable";
+        }
+        return false;
+    }
+    NSMutableDictionary *registration = [info mutableCopy];
+    [registration addEntriesFromDictionary:@{
+        @"ApplicationType" : @"System",
+        @"CFBundleIdentifier" : identifier,
+        @"CodeInfoIdentifier" : kManagedAppLauncherIdentifier,
+        @"CompatibilityState" : @0,
+        @"Entitlements" : managed_app_launcher_entitlements(),
+        @"IsContainerized" : @NO,
+        @"EnvironmentVariables" : @{
+            @"CFFIXED_USER_HOME" : dataPath,
+            @"HOME" : dataPath,
+            @"TMPDIR" : [dataPath stringByAppendingPathComponent:@"tmp"],
+        },
+        @"IsDeletable" : @NO,
+        @"Path" : destination.stringByStandardizingPath,
+        @"SignerOrganization" : @"Apple Inc.",
+        @"SignatureVersion" : @132352,
+        @"SignerIdentity" : @"Apple iPhone OS Application Signing",
+        @"IsAdHocSigned" : @YES,
+        @"LSInstallType" : @1,
+        @"HasMIDBasedSINF" : @NO,
+        @"MissingSINF" : @NO,
+        @"FamilyID" : @0,
+        @"IsOnDemandInstallCapable" : @NO,
+        @"_LSBundlePlugins" : @{},
+    }];
+    Class requestContextClass = NSClassFromString(@"LSOperationRequestContext");
+    id requestContext = requestContextClass != Nil
+        ? [[requestContextClass alloc] init] : nil;
+    if (requestContext == nil) {
+        if (errorText != NULL) {
+            *errorText = @"LaunchServices request context is unavailable";
+        }
+        return false;
+    }
+    [requestContext setValue:@501 forKey:@"targetUserID"];
+    NSError *registrationError = nil;
+    id registrationResult = nil;
+    @try {
+        registrationResult = [workspace
+            registerContainerizedApplicationWithInfoDictionaries:
+                @[registration]
+            operationUUID:NSUUID.UUID
+            requestContext:requestContext
+            saveObserver:nil
+            registrationError:&registrationError];
+    } @catch (NSException *exception) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"LaunchServices registration raised %@", exception];
+        }
+        return false;
+    }
+    (void)notify_post("com.apple.mobile.application_installed");
+    (void)notify_post("com.apple.itunesstored.application_installed");
+    NSString *observed = nil;
+    NSString *applicationType = nil;
+    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
+        id proxy = registered_application_proxy(identifier);
+        observed = [proxy respondsToSelector:@selector(bundleURL)]
+            ? [[proxy bundleURL] path] : nil;
+        applicationType =
+            [proxy respondsToSelector:@selector(applicationType)]
+                ? [proxy applicationType] : nil;
+        if (executable_paths_match(destination, observed) &&
+            [applicationType isEqualToString:@"System"]) {
+            return true;
+        }
+        usleep(25 * 1000);
+    }
+    if (errorText != NULL) {
+        *errorText = [NSString stringWithFormat:
+            @"LaunchServices registration failed (transport=%@ error=%@ "
+             "observed=%@ type=%@)",
+            registrationResult != nil ? @"true" : @"false",
+            registrationError ?: @"none", observed ?: @"none",
+            applicationType ?: @"none"];
+    }
+    return false;
+}
+
 static bool register_managed_rootless_application(NSString *source,
                                                    NSString **targetPath,
                                                    NSString **errorText) {
@@ -1236,88 +1720,8 @@ static bool register_managed_rootless_application(NSString *source,
         return false;
     }
 
-    (void)registered_application_proxy(identifier);
-    id workspace = [NSClassFromString(@"LSApplicationWorkspace")
-        defaultWorkspace];
-    SEL registrationSelector = @selector(
-        registerContainerizedApplicationWithInfoDictionaries:operationUUID:
-        requestContext:saveObserver:registrationError:);
-    if (workspace == nil ||
-        ![workspace respondsToSelector:registrationSelector]) {
-        if (errorText != NULL) {
-            *errorText = @"LaunchServices embedded registration is unavailable";
-        }
-        return false;
-    }
-    NSMutableDictionary *registration = [info mutableCopy];
-    [registration addEntriesFromDictionary:@{
-        @"ApplicationType" : @"User",
-        @"CFBundleIdentifier" : identifier,
-        @"CodeInfoIdentifier" : identifier,
-        @"CompatibilityState" : @0,
-        @"IsContainerized" : @YES,
-        @"Container" : dataPath,
-        @"EnvironmentVariables" : @{
-            @"CFFIXED_USER_HOME" : dataPath,
-            @"HOME" : dataPath,
-            @"TMPDIR" : [dataPath stringByAppendingPathComponent:@"tmp"],
-        },
-        @"IsDeletable" : @YES,
-        @"Path" : [destination stringByStandardizingPath],
-        @"SignerOrganization" : @"Apple Inc.",
-        @"SignatureVersion" : @132352,
-        @"SignerIdentity" : @"Apple iPhone OS Application Signing",
-        @"IsAdHocSigned" : @YES,
-        @"LSInstallType" : @1,
-        @"HasMIDBasedSINF" : @NO,
-        @"MissingSINF" : @NO,
-        @"FamilyID" : @0,
-        @"IsOnDemandInstallCapable" : @NO,
-        @"_LSBundlePlugins" : @{},
-    }];
-    Class requestContextClass = NSClassFromString(@"LSOperationRequestContext");
-    id requestContext = requestContextClass != Nil
-        ? [[requestContextClass alloc] init] : nil;
-    if (requestContext == nil) {
-        if (errorText != NULL) {
-            *errorText = @"LaunchServices request context is unavailable";
-        }
-        return false;
-    }
-    [requestContext setValue:@501 forKey:@"targetUserID"];
-    NSError *registrationError = nil;
-    id registrationResult = nil;
-    @try {
-        registrationResult = [workspace
-            registerContainerizedApplicationWithInfoDictionaries:
-                @[registration]
-            operationUUID:[NSUUID UUID]
-            requestContext:requestContext
-            saveObserver:nil
-            registrationError:&registrationError];
-    } @catch (NSException *exception) {
-        if (errorText != NULL) {
-            *errorText = [NSString stringWithFormat:
-                @"LaunchServices registration raised %@", exception];
-        }
-        return false;
-    }
-    (void)notify_post("com.apple.mobile.application_installed");
-    (void)notify_post("com.apple.itunesstored.application_installed");
-    NSString *observed = nil;
-    for (NSUInteger attempt = 0; attempt < 200; ++attempt) {
-        observed = registered_application_path(identifier);
-        if (executable_paths_match(destination, observed)) return true;
-        usleep(25 * 1000);
-    }
-    if (errorText != NULL) {
-        *errorText = [NSString stringWithFormat:
-            @"LaunchServices registration failed (transport=%@ error=%@ "
-             "observed=%@)",
-            registrationResult != nil ? @"true" : @"false",
-            registrationError ?: @"none", observed ?: @"none"];
-    }
-    return false;
+    return register_prepared_application(destination, info, identifier,
+                                         dataPath, errorText);
 }
 
 static NSDictionary *managed_application_marker(NSString *containerPath) {
@@ -1333,6 +1737,165 @@ static NSDictionary *managed_application_marker(NSString *containerPath) {
     }
     NSDictionary *marker = [NSDictionary dictionaryWithContentsOfFile:path];
     return [marker[@"Version"] integerValue] == 1 ? marker : nil;
+}
+
+static bool exact_trollstore_lite_marker(NSString *containerPath) {
+    NSString *path = [containerPath
+        stringByAppendingPathComponent:kTrollStoreLiteMarker];
+    struct stat status = {0};
+    return lstat(path.fileSystemRepresentation, &status) == 0 &&
+           S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
+           status.st_nlink == 1 && status.st_uid == 0 &&
+           (status.st_gid == 0 || status.st_gid == 33) &&
+           status.st_size == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool normalize_trollstore_bundle_ownership(NSString *bundlePath,
+                                                   NSString **errorText) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithObject:
+        bundlePath];
+    NSDirectoryEnumerator<NSString *> *enumerator =
+        [[NSFileManager defaultManager] enumeratorAtPath:bundlePath];
+    NSUInteger count = 0;
+    for (NSString *relativePath in enumerator) {
+        if (++count > 32768U) {
+            if (errorText != NULL) {
+                *errorText = @"TrollStore app contains too many entries";
+            }
+            return false;
+        }
+        [paths addObject:[bundlePath
+            stringByAppendingPathComponent:relativePath]];
+    }
+    for (NSString *path in paths.reverseObjectEnumerator) {
+        struct stat status = {0};
+        if (lstat(path.fileSystemRepresentation, &status) != 0 ||
+            (!S_ISREG(status.st_mode) && !S_ISDIR(status.st_mode) &&
+             !S_ISLNK(status.st_mode)) ||
+            lchown(path.fileSystemRepresentation, 0, 0) != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"TrollStore app ownership failed for %@: %s", path,
+                    strerror(errno)];
+            }
+            return false;
+        }
+        if (S_ISLNK(status.st_mode)) continue;
+        mode_t mode = S_ISDIR(status.st_mode) ||
+                              (status.st_mode & 0111) != 0
+            ? 0755 : 0644;
+        if (chmod(path.fileSystemRepresentation, mode) != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"TrollStore app mode failed for %@: %s", path,
+                    strerror(errno)];
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool refresh_trollstore_container_applications(const char *reason) {
+    if (!load_mobile_container_manager()) return false;
+    NSString *root = @"/var/containers/Bundle/Application";
+    NSArray<NSString *> *containers = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:root error:nil];
+    Class dataContainerClass = NSClassFromString(@"MCMAppDataContainer");
+    bool ready = true;
+    NSUInteger inspected = 0;
+    NSUInteger prepared = 0;
+    for (NSString *entry in containers) {
+        if (++inspected > 4096U) {
+            ready = false;
+            break;
+        }
+        if ([[NSUUID alloc] initWithUUIDString:entry] == nil) continue;
+        NSString *containerPath = [root stringByAppendingPathComponent:entry];
+        if (!exact_trollstore_lite_marker(containerPath)) continue;
+        NSString *trollStoreMarker = [containerPath
+            stringByAppendingPathComponent:kTrollStoreLiteMarker];
+        if (lchown(trollStoreMarker.fileSystemRepresentation, 0, 0) != 0 ||
+            chmod(trollStoreMarker.fileSystemRepresentation, 0644) != 0) {
+            ready = false;
+            log_message("trollStoreAppPreparation=false reason=%s "
+                        "phase=marker-normalization path=%s error=%s",
+                        reason, trollStoreMarker.UTF8String,
+                        strerror(errno));
+            continue;
+        }
+        NSArray<NSString *> *contents = [[NSFileManager defaultManager]
+            contentsOfDirectoryAtPath:containerPath error:nil];
+        for (NSString *item in contents) {
+            if ([[item pathExtension] caseInsensitiveCompare:@"app"] !=
+                NSOrderedSame) {
+                continue;
+            }
+            NSString *bundlePath = [containerPath
+                stringByAppendingPathComponent:item];
+            NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
+                [bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+            NSString *identifier = info[@"CFBundleIdentifier"];
+            if (![identifier isKindOfClass:NSString.class] ||
+                identifier.length == 0 ||
+                [identifier isEqual:kTrollStoreLiteIdentifier]) {
+                continue;
+            }
+            NSString *errorText = nil;
+            if (!normalize_trollstore_bundle_ownership(bundlePath,
+                                                       &errorText) ||
+                !prepare_managed_application_source(bundlePath, identifier,
+                                                    &errorText) ||
+                !write_managed_application_marker(
+                    containerPath, identifier, bundlePath, bundlePath,
+                    &errorText)) {
+                ready = false;
+                log_message("trollStoreAppPreparation=false reason=%s "
+                            "identifier=%s path=%s error=%s",
+                            reason, identifier.UTF8String,
+                            bundlePath.UTF8String,
+                            errorText != nil
+                                ? errorText.description.UTF8String
+                                : "unknown");
+                continue;
+            }
+            NSError *dataError = nil;
+            id dataContainer = [dataContainerClass
+                containerWithIdentifier:identifier
+                      createIfNecessary:YES
+                                existed:NULL
+                                  error:&dataError];
+            NSString *dataPath =
+                [dataContainer respondsToSelector:@selector(url)]
+                    ? [[dataContainer url] path] : nil;
+            if (dataPath.length == 0 ||
+                !register_prepared_application(
+                    bundlePath, info, identifier, dataPath, &errorText)) {
+                ready = false;
+                log_message("trollStoreAppRegistration=false reason=%s "
+                            "identifier=%s path=%s error=%s dataError=%s",
+                            reason, identifier.UTF8String,
+                            bundlePath.UTF8String,
+                            errorText != nil
+                                ? errorText.description.UTF8String
+                                : "unknown",
+                            dataError != nil
+                                ? dataError.description.UTF8String
+                                : "none");
+                continue;
+            }
+            ++prepared;
+            log_message("trollStoreAppRegistration=true reason=%s "
+                        "identifier=%s path=%s",
+                        reason, identifier.UTF8String,
+                        bundlePath.UTF8String);
+        }
+    }
+    log_message("trollStoreAppRefresh=%s reason=%s apps=%lu",
+                ready ? "true" : "false", reason,
+                (unsigned long)prepared);
+    return ready;
 }
 
 static bool cleanup_stale_managed_applications(NSSet<NSString *> *active,
@@ -1352,10 +1915,15 @@ static bool cleanup_stale_managed_applications(NSSet<NSString *> *active,
         NSString *identifier = marker[@"BundleIdentifier"];
         NSString *sourcePath = marker[@"SourcePath"];
         NSString *bundlePath = marker[@"BundlePath"];
+        bool trollStoreManaged =
+            [sourcePath isKindOfClass:NSString.class] &&
+            [bundlePath isKindOfClass:NSString.class] &&
+            executable_paths_match(sourcePath, bundlePath) &&
+            exact_trollstore_lite_marker(containerPath);
         bool retained = [identifier isKindOfClass:NSString.class] &&
             [sourcePath isKindOfClass:NSString.class] &&
             [bundlePath isKindOfClass:NSString.class] &&
-            [active containsObject:identifier] &&
+            ([active containsObject:identifier] || trollStoreManaged) &&
             [[NSFileManager defaultManager] fileExistsAtPath:sourcePath];
         if (retained) continue;
         if ([bundlePath isKindOfClass:NSString.class] &&
@@ -1900,6 +2468,11 @@ static bool sbinject_infrastructure_ready(const char *reason) {
         0;
     bool loader =
         access([kElleKitInjectorExecutable fileSystemRepresentation], X_OK) == 0;
+    bool trollStoreClient = access(
+        kTrollStoreBrokerClientExecutable.fileSystemRepresentation, X_OK) == 0;
+    bool trollStoreHook = access(
+        kSBInjectTrollStoreRegistrationHook.fileSystemRepresentation, R_OK) ==
+        0;
     bool jitterd =
         access([kSBInjectJitterdExecutable fileSystemRepresentation], X_OK) == 0;
     bool launchdHook =
@@ -1918,11 +2491,14 @@ static bool sbinject_infrastructure_ready(const char *reason) {
         access([kAmfidCandidateExecutable fileSystemRepresentation], X_OK) ==
         0;
     log_message("sbinjectInfrastructure reason=%s validator=%s loader=%s "
+                "trollStoreClient=%s trollStoreHook=%s "
                 "jitterd=%s launchdHook=%s generalHook=%s candidate=%s "
                 "bundleHook=%s elleKit=%s amfidHook=%s amfidCandidate=%s "
                 "dynamicTrustCache=disabled",
                 reason, validator ? "ready" : "missing",
                 loader ? "ready" : "missing",
+                trollStoreClient ? "ready" : "missing",
+                trollStoreHook ? "ready" : "missing",
                 jitterd ? "ready" : "missing",
                 launchdHook ? "ready" : "missing",
                 generalHook ? "ready" : "missing",
@@ -1931,7 +2507,8 @@ static bool sbinject_infrastructure_ready(const char *reason) {
                 elleKit ? "ready" : "missing",
                 amfidHook ? "ready" : "missing",
                 amfidCandidate ? "ready" : "missing");
-    return validator && loader && jitterd && launchdHook && generalHook &&
+    return validator && loader && trollStoreClient && trollStoreHook && jitterd &&
+           launchdHook && generalHook &&
            candidate && bundleHook && amfidHook && amfidCandidate;
 }
 
@@ -3766,14 +4343,22 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
         pid_t peerPid = -1;
         socklen_t peerPidLength = sizeof(peerPid);
         char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
-        bool accepted = getpeereid(client, &peerUser, &peerGroup) == 0 &&
-            peerUser == 501 &&
+        bool peerReady = getpeereid(client, &peerUser, &peerGroup) == 0 &&
             getsockopt(client, SOL_LOCAL, LOCAL_PEERPID, &peerPid,
                        &peerPidLength) == 0 &&
             peerPidLength == sizeof(peerPid) && peerPid > 1 &&
-            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0 &&
+            proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0;
+        NSString *peerPathValue = peerReady
+            ? [NSString stringWithUTF8String:peerPath] : nil;
+        bool sileoClient = peerReady && peerUser == 501 &&
             ([expectedHelper isEqual:[NSString stringWithUTF8String:peerPath]] ||
              [expectedMain isEqual:[NSString stringWithUTF8String:peerPath]]);
+        NSString *managedHelperPayload = nil;
+        bool managedHelperClient = peerReady &&
+            (peerUser == 0 || peerUser == 501) &&
+            managed_trollstore_helper_client(
+                peerPid, peerPathValue, &managedHelperPayload);
+        bool accepted = sileoClient || managedHelperClient;
         if (!accepted) {
             log_message("sileoRootBrokerRejected pid=%d uid=%u path=%s",
                         peerPid, peerUser,
@@ -3784,7 +4369,13 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
         struct codex_root_broker_request request;
         bool received = receive_root_broker_request(client, &request);
         char resolved[PATH_MAX] = {0};
-        bool allowed = received &&
+        bool managedHelperAllowed = !managedHelperClient ||
+            (request.header.argument_count >= 2U &&
+             executable_paths_match(
+                 managedHelperPayload,
+                 [NSString stringWithUTF8String:request.arguments[0]]) &&
+             trollstore_helper_command_allowed(request.arguments[1]));
+        bool allowed = received && managedHelperAllowed &&
             resolve_broker_command(request.arguments[0], jailbreakRoot,
                                    resolved, sizeof(resolved));
         int32_t status = 126 << 8;
@@ -3794,6 +4385,12 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
                 request.header.descriptor_numbers,
                 request.header.descriptor_count, NULL, 0, jailbreakRoot,
                 resolved);
+            if (managedHelperClient && WIFEXITED(status) &&
+                WEXITSTATUS(status) == 0 &&
+                !refresh_trollstore_container_applications(
+                    "trollstore-helper-posthook")) {
+                status = 75 << 8;
+            }
         }
         bool replied = write_all(client, &status, sizeof(status));
         if (received) {
@@ -4475,6 +5072,59 @@ static void schedule_preferences_respring(void) {
     });
 }
 
+static bool managed_trollstore_helper_client(pid_t pid, NSString *path,
+                                             NSString **helperPayloadOut) {
+    if (helperPayloadOut != NULL) *helperPayloadOut = nil;
+    if (pid <= 1 || path.length == 0 ||
+        !files_are_equal(path, kTrollStoreBrokerClientExecutable)) {
+        return false;
+    }
+    NSString *bundlePath = path.stringByDeletingLastPathComponent;
+    if (![bundlePath.lastPathComponent isEqual:@"TrollStoreLite.app"] ||
+        ![path.lastPathComponent isEqual:@"trollstorehelper"]) {
+        return false;
+    }
+    NSString *containerPath = bundlePath.stringByDeletingLastPathComponent;
+    NSDictionary *marker = managed_application_marker(containerPath);
+    NSString *identifier = marker[@"BundleIdentifier"];
+    NSString *registeredBundle = marker[@"BundlePath"];
+    NSString *sourceBundle = marker[@"SourcePath"];
+    if (![identifier isEqual:kTrollStoreLiteIdentifier] ||
+        !executable_paths_match(bundlePath, registeredBundle) ||
+        ![sourceBundle hasPrefix:@"/var/jb/Applications/"] ||
+        ![sourceBundle.lastPathComponent isEqual:@"TrollStoreLite.app"]) {
+        return false;
+    }
+    NSString *helperPayload = [sourceBundle
+        stringByAppendingPathComponent:@".sbinject-root-helper"];
+    struct stat status = {0};
+    if (lstat(helperPayload.fileSystemRepresentation, &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 0 || status.st_gid != 0 ||
+        status.st_size <= 0 || status.st_size > 64 * 1024 * 1024 ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    if (helperPayloadOut != NULL) *helperPayloadOut = helperPayload;
+    return true;
+}
+
+static bool trollstore_helper_command_allowed(const char *command) {
+    static const char *const commands[] = {
+        "install", "uninstall", "uninstall-path", "refresh",
+        "refresh-all", "url-scheme", "enable-jit",
+        "modify-registration", "transfer-apps", "check-dev-mode",
+        "arm-dev-mode", "install-trollstore", "install-ldid",
+        "reboot", "respring",
+    };
+    if (command == NULL) return false;
+    for (size_t index = 0;
+         index < sizeof(commands) / sizeof(commands[0]); ++index) {
+        if (strcmp(command, commands[index]) == 0) return true;
+    }
+    return false;
+}
+
 static void handle_preferences_xpc_request(xpc_connection_t peer,
                                            xpc_object_t message,
                                            pid_t peerPid) {
@@ -4520,7 +5170,8 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
                                      NSString *expectedMain,
                                      NSString *expectedHelper,
                                      NSString *jailbreakRoot,
-                                     bool headlessSileoClient) {
+                                     bool headlessSileoClient,
+                                     NSString *managedHelperPayload) {
     xpc_object_t reply = xpc_dictionary_create_reply(message);
     if (reply == NULL) {
         return;
@@ -4535,7 +5186,7 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
                            (headlessSileoClient &&
                             executable_paths_match(kHeadlessSileoExecutable,
                                                    path));
-        accepted = sileoClient;
+        accepted = sileoClient || managedHelperPayload != nil;
     }
 
     char *arguments[CODEX_ROOT_BROKER_MAX_ARGUMENTS + 1U] = {0};
@@ -4636,8 +5287,22 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     bool resolvedBrokerCommand = valid &&
         resolve_broker_command(arguments[0], jailbreakRoot, resolved,
                                sizeof(resolved));
+    const char *operation = valid
+        ? xpc_dictionary_get_string(message, CODEX_ROOT_BROKER_OPERATION_KEY)
+        : NULL;
+    bool managedHelperRequest = managedHelperPayload != nil;
+    bool managedHelperAllowed = !managedHelperRequest ||
+        (operation != NULL &&
+         strcmp(operation,
+                CODEX_ROOT_BROKER_TROLLSTORE_HELPER_OPERATION) == 0 &&
+         argumentCount >= 2U &&
+         executable_paths_match(
+             managedHelperPayload,
+             [NSString stringWithUTF8String:resolved]) &&
+         trollstore_helper_command_allowed(arguments[1]));
     bool allowed = valid &&
         resolvedBrokerCommand &&
+        managedHelperAllowed &&
         (!headlessSileoClient ||
          headless_sileo_request_allowed(
              arguments, argumentCount, controlEnvironment,
@@ -4653,6 +5318,12 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
             -1, -1, arguments, descriptors, descriptorNumbers,
             descriptorCount, controlEnvironment,
             controlEnvironmentCount, jailbreakRoot, resolved);
+        if (managedHelperRequest && WIFEXITED(status) &&
+            WEXITSTATUS(status) == 0 &&
+            !refresh_trollstore_container_applications(
+                "trollstore-helper-posthook")) {
+            status = 75 << 8;
+        }
     }
     for (uint32_t index = 0; index < descriptorCount; ++index) {
         if (descriptors[index] >= 0) {
@@ -4734,7 +5405,12 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
             executable_paths_match(kHeadlessSileoExecutable, path);
         bool preferencesClient = peerUser == 501 &&
             executable_paths_match(kPreferencesCandidateExecutable, path);
-        bool accepted = sileoClient || headlessSileoClient || preferencesClient;
+        NSString *managedHelperPayload = nil;
+        bool managedHelperClient = (peerUser == 0 || peerUser == 501) &&
+            managed_trollstore_helper_client(
+                peerPid, path, &managedHelperPayload);
+        bool accepted = sileoClient || headlessSileoClient ||
+                        preferencesClient || managedHelperClient;
         if (!accepted) {
             log_message("sileoXpcBrokerRejected pid=%d uid=%u path=%s",
                         peerPid, peerUser,
@@ -4767,7 +5443,8 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
                 } else {
                     handle_sileo_xpc_request(
                         peer, message, peerPid, expectedMain, expectedHelper,
-                        jailbreakRoot, headlessSileoClient);
+                        jailbreakRoot, headlessSileoClient,
+                        managedHelperPayload);
                 }
             }
         });
@@ -6724,6 +7401,10 @@ int main(int argc, char *argv[]) {
         NSString *sourceOpenSSHSFTPServer =
             [payloadRoot stringByAppendingPathComponent:
                              @"openssh-sftp-server.deb"];
+        NSString *sourceLdid =
+            [payloadRoot stringByAppendingPathComponent:@"ldid.deb"];
+        NSString *sourceLibplist =
+            [payloadRoot stringByAppendingPathComponent:@"libplist3.deb"];
         NSString *sourceOpenSSHConfig =
             [sourceProcursus stringByAppendingPathComponent:
                                   @"etc/ssh/sshd_config"];
@@ -6735,6 +7416,18 @@ int main(int argc, char *argv[]) {
         NSString *sourceTrustedElleKitRoot =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ellekit-root/var/jb"];
+        NSString *sourceTrustedLdid =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/ldid-root/var/jb/usr/bin/ldid"];
+        NSString *sourceTrustedLibplist =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/libplist-root/var/jb/usr/lib/libplist-2.0.3.dylib"];
+        NSString *sourceTrustedLdidCrypto =
+            [sourceProcursus stringByAppendingPathComponent:
+                                  @"usr/lib/libcrypto.3.dylib"];
+        NSString *sourceTrustedLdidIOSEXEC =
+            [sourceProcursus stringByAppendingPathComponent:
+                                  @"usr/lib/libiosexec.1.dylib"];
         NSString *sourceTrustedLaunchctl =
             [sourceProcursus stringByAppendingPathComponent:@"usr/bin/launchctl"];
         NSString *sourceTrustedUiopen =
@@ -6756,6 +7449,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSileoPin =
             [payloadRoot stringByAppendingPathComponent:
                              @"apt/99codex-system-sileo"];
+        NSString *sourceLdidPin =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"apt/99codex-fixed-ldid"];
         NSString *sourceAptListNormalizer =
             [payloadRoot stringByAppendingPathComponent:
                              @"normalize-apt-lists.sh"];
@@ -6768,6 +7464,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
+        NSString *sourceTrollStoreBrokerClient =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-trollstore-broker-client"];
         NSString *sourceSBInjectGeneralHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/generalhook.dylib"];
@@ -6783,6 +7482,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectLsdRegistrationHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/lsd-registration-hook.dylib"];
+        NSString *sourceSBInjectTrollStoreRegistrationHook =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/trollstore-registration-hook.dylib"];
         NSString *sourceSBInjectJitterd =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/sbinject-jitterd"];
@@ -6829,6 +7531,9 @@ int main(int argc, char *argv[]) {
                 fileExistsAtPath:sourceOpenSSHServer] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceOpenSSHSFTPServer] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceLdid] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceLibplist] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedSileo
                      isDirectory:&isDirectory] ||
@@ -6843,6 +7548,14 @@ int main(int argc, char *argv[]) {
                 fileExistsAtPath:sourceTrustedUiopen] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedUicache] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedLdid] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedLibplist] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedLdidCrypto] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedLdidIOSEXEC] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceSBInjectAmfidHook] ||
             ![[NSFileManager defaultManager]
@@ -6882,6 +7595,11 @@ int main(int argc, char *argv[]) {
                   &repositoryCompatibilityStatus) != 0 ||
             !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
             return fail(@"system Sileo APT pin is missing", nil);
+        }
+        if (lstat([sourceLdidPin fileSystemRepresentation],
+                  &repositoryCompatibilityStatus) != 0 ||
+            !S_ISREG(repositoryCompatibilityStatus.st_mode)) {
+            return fail(@"fixed ldid APT pin is missing", nil);
         }
         struct stat aptListNormalizerStatus;
         if (lstat([sourceAptListNormalizer fileSystemRepresentation],
@@ -6924,6 +7642,9 @@ int main(int argc, char *argv[]) {
             lstat([sourceExecWorker fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceTrollStoreBrokerClient fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectGeneralHook fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
@@ -6931,6 +7652,10 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLsdRegistrationHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSBInjectTrollStoreRegistrationHook
+                      fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectJitterd fileSystemRepresentation],
@@ -7327,6 +8052,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kElleKitInjectorExecutable},
                 @{@"source" : sourceExecWorker,
                   @"installed" : kExecWorkerExecutable},
+                @{@"source" : sourceTrollStoreBrokerClient,
+                  @"installed" : kTrollStoreBrokerClientExecutable},
                 @{@"source" : [sourceProcursus
                                      stringByAppendingPathComponent:
                                          @"usr/bin/ssh"],
@@ -7557,8 +8284,8 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // ElleKit is the sole package payload admitted by the fixed Cryptex
-        // trust cache.  Installing this repacked, pinned copy before the
+        // ElleKit is a narrowly scoped package payload admitted by the fixed
+        // Cryptex trust cache. Installing this repacked, pinned copy before the
         // broker starts removes the first-tweak chicken-and-egg problem:
         // SpringBoard can enter through SBInject with ElleKit already present,
         // while every third-party tweak dylib remains on the JIT/dyld lane.
@@ -7607,6 +8334,52 @@ int main(int argc, char *argv[]) {
         log_message("elleKitFixedTrustReady=true package=ellekit "
                     "version=1.2 files=%lu dynamicTrustCache=false",
                     (unsigned long)trustedElleKitFiles.count);
+
+        // TrollStore Lite's helper is JIT-loaded, but its nested ldid spawn is
+        // a separate kernel admission. Install the pinned dependency and the
+        // Cryptex-signed ldid build before accepting app-install requests.
+        char *ldidDpkgArguments[] = {
+            "/var/jb/usr/bin/dpkg", "--force-downgrade", "-i",
+            (char *)[sourceLibplist fileSystemRepresentation],
+            (char *)[sourceLdid fileSystemRepresentation], NULL};
+        int ldidDpkgStatus = run_and_wait_bounded(
+            ldidDpkgArguments[0], ldidDpkgArguments, 90000);
+        log_message("ldidFixedDpkgExit=%d package=ldid "
+                    "version=2.1.5-procursus7",
+                    ldidDpkgStatus);
+        NSString *ldidRuntimeError = nil;
+        bool ldidRuntimeReady = install_managed_apt_file(
+            sourceTrustedLdidCrypto, @"/var/jb/usr/lib",
+            @"libcrypto.3.dylib", 16 * 1024 * 1024, 0644,
+            "ldidRuntime", NULL, &ldidRuntimeError) &&
+            install_managed_apt_file(
+                sourceTrustedLdidIOSEXEC, @"/var/jb/usr/lib",
+                @"libiosexec.1.dylib", 4 * 1024 * 1024, 0644,
+                "ldidRuntime", NULL, &ldidRuntimeError);
+        if (ldidDpkgStatus != 0 || !ldidRuntimeReady ||
+            !dpkg_package_version_is_installed(
+                @"libplist3", @"2.2.0+git20230130.4b50a5a") ||
+            !dpkg_package_version_is_installed(
+                @"ldid", @"2.1.5-procursus7") ||
+            !files_are_equal(sourceTrustedLdid, @"/var/jb/usr/bin/ldid") ||
+            !files_are_equal(sourceTrustedLibplist,
+                             @"/var/jb/usr/lib/libplist-2.0.3.dylib") ||
+            !files_are_equal(sourceTrustedLdidCrypto,
+                             @"/var/jb/usr/lib/libcrypto.3.dylib") ||
+            !files_are_equal(sourceTrustedLdidIOSEXEC,
+                             @"/var/jb/usr/lib/libiosexec.1.dylib") ||
+            !sbinject_managed_file(@"/var/jb/usr/bin/ldid", 0755)) {
+            return fail(
+                [NSString stringWithFormat:
+                              @"fixed ldid install exited %d: %@",
+                              ldidDpkgStatus,
+                              ldidRuntimeError != nil ? ldidRuntimeError
+                                                      : @"validation failed"],
+                nil);
+        }
+        log_message("ldidFixedTrustReady=true package=ldid "
+                    "version=2.1.5-procursus7 files=4 "
+                    "dynamicTrustCache=false");
 
         // Install pinned rootless PreferenceLoader/libprefs before launching
         // the resigned Preferences candidate. The fixed Cryptex bridge adapts
@@ -7725,6 +8498,7 @@ int main(int argc, char *argv[]) {
         bool sbinjectAptConfigUpdated = false;
         bool preferenceLoaderPinUpdated = false;
         bool sileoPinUpdated = false;
+        bool ldidPinUpdated = false;
         NSString *repositoryMetadataError = nil;
         if (!install_managed_apt_file(
                 sourceElleKitKey, @"/var/jb/etc/apt/trusted.gpg.d",
@@ -7763,6 +8537,11 @@ int main(int argc, char *argv[]) {
                 sourceSileoPin, @"/var/jb/etc/apt/preferences.d",
                 @"99codex-system-sileo", 64 * 1024, 0644,
                 "sileoPin", &sileoPinUpdated,
+                &repositoryMetadataError) ||
+            !install_managed_apt_file(
+                sourceLdidPin, @"/var/jb/etc/apt/preferences.d",
+                @"99codex-fixed-ldid", 64 * 1024, 0644,
+                "ldidPin", &ldidPinUpdated,
                 &repositoryMetadataError)) {
             return fail(repositoryMetadataError, nil);
         }
@@ -7775,12 +8554,14 @@ int main(int argc, char *argv[]) {
             return fail(defaultSourcesError, nil);
         }
 
+        bool runtimeExecWorkerUpdated = false;
         bool sbinjectGeneralHookUpdated = false;
         bool sbinjectAmfidHookUpdated = false;
         bool sbinjectAmfidCandidateUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
         bool sbinjectLsdRegistrationHookUpdated = false;
+        bool sbinjectTrollStoreRegistrationHookUpdated = false;
         bool sbinjectJitterdUpdated = false;
         bool sbinjectJitterdPlistUpdated = false;
         bool sbinjectPackageValidatorUpdated = false;
@@ -7793,7 +8574,12 @@ int main(int argc, char *argv[]) {
             !install_managed_apt_file(
                 sourceExecWorker, @"/var/jb/usr/libexec",
                 @"codex-exec-worker", 16 * 1024 * 1024, 0755,
-                "runtimeExecWorker", NULL,
+                "runtimeExecWorker", &runtimeExecWorkerUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceTrollStoreBrokerClient, @"/var/jb/usr/libexec",
+                @"codex-trollstore-broker-client", 4 * 1024 * 1024, 0755,
+                "trollStoreBrokerClient", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectGeneralHook, @"/var/jb/usr/lib/sbinject",
@@ -7828,6 +8614,13 @@ int main(int argc, char *argv[]) {
                 @"lsd-registration-hook.dylib", 4 * 1024 * 1024, 0755,
                 "sbinjectLsdRegistrationHook",
                 &sbinjectLsdRegistrationHookUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceSBInjectTrollStoreRegistrationHook,
+                @"/var/jb/usr/lib/sbinject",
+                @"trollstore-registration-hook.dylib", 4 * 1024 * 1024,
+                0755, "sbinjectTrollStoreRegistrationHook",
+                &sbinjectTrollStoreRegistrationHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectJitterd, @"/var/jb/usr/libexec",
@@ -7868,11 +8661,12 @@ int main(int argc, char *argv[]) {
             return fail(sbinjectPreferencesBundleError, nil);
         }
         bool sbinjectPayloadUpdated =
-            sbinjectGeneralHookUpdated ||
+            runtimeExecWorkerUpdated || sbinjectGeneralHookUpdated ||
             sbinjectAmfidHookUpdated || sbinjectAmfidCandidateUpdated ||
             sbinjectPreferencesBridgeUpdated ||
             sbinjectLaunchdHookUpdated ||
             sbinjectLsdRegistrationHookUpdated ||
+            sbinjectTrollStoreRegistrationHookUpdated ||
             sbinjectJitterdUpdated || sbinjectJitterdPlistUpdated ||
             sbinjectPackageValidatorUpdated || sbinjectBundleUpdated ||
             sbinjectPreferencesBundleUpdated;
@@ -8001,7 +8795,7 @@ int main(int argc, char *argv[]) {
             elleKitKeyUpdated || bigBossKeyUpdated ||
             aptListNormalizerUpdated || repositoryCompatibilityUpdated ||
             sbinjectAptConfigUpdated || preferenceLoaderPinUpdated ||
-            sileoPinUpdated || defaultSourcesUpdated;
+            sileoPinUpdated || ldidPinUpdated || defaultSourcesUpdated;
         // A populated Packages file does not prove that APT retained the
         // authenticated Release/InRelease state.  Sileo otherwise reports an
         // opaque exit 100 before the SBInject validator can run.  Refresh the
@@ -8221,6 +9015,8 @@ int main(int argc, char *argv[]) {
         manifest[@"SpringBoardTweakAdmission"] =
             @"sbinject-jit-pre-main-no-dynamic-trust-cache";
         manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
+        manifest[@"TrollStoreBrokerClientExecutable"] =
+            kTrollStoreBrokerClientExecutable;
         manifest[@"OpenSSHVersion"] = @"9.7p1-1";
         manifest[@"OpenSSHExecutable"] = kOpenSSHExecutable;
         manifest[@"OpenSSHLaunchDaemon"] = kOpenSSHPlist;
