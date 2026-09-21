@@ -9,16 +9,21 @@
 #include <os/log.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #define CODEX_PT_DETACH 11
 #define CODEX_PT_ATTACHEXC 14
 #define CODEX_PROC_PIDPATH_MAX 4096
+#define CODEX_CS_OPS_STATUS 0U
+#define CODEX_CS_DEBUGGED 0x10000000U
 
 extern int ptrace(int request, pid_t pid, caddr_t address, int data);
+extern int csops(pid_t pid, unsigned int operation, void *user_address,
+                 size_t user_size);
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffer_size);
 extern kern_return_t bootstrap_check_in(mach_port_t bootstrap_port,
                                         const char *service,
@@ -32,11 +37,30 @@ static os_log_t service_log(void) {
     return log;
 }
 
+static bool exact_root_process(pid_t pid, const char *expected_path) {
+    if (pid <= 1 || expected_path == NULL) return false;
+    char path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    char expected[CODEX_PROC_PIDPATH_MAX] = {0};
+    struct stat status = {0};
+    return proc_pidpath(pid, path, sizeof(path)) > 0 &&
+           realpath(path, observed) != NULL &&
+           realpath(expected_path, expected) != NULL &&
+           strcmp(observed, expected) == 0 &&
+           lstat(expected, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
 static bool safe_candidate(pid_t requested, audit_token_t token) {
     pid_t caller = (pid_t)token.val[5];
     uid_t effective_user = (uid_t)token.val[1];
-    if (requested <= 1 || requested != caller ||
-        (effective_user != 0 && effective_user != 501)) {
+    bool self_request = requested == caller &&
+                        (effective_user == 0 || effective_user == 501);
+    bool broker_amfid_request = effective_user == 0 &&
+        exact_root_process(caller, CODEX_SBINJECT_ROOT_BROKER);
+    if (requested <= 1 || (!self_request && !broker_amfid_request)) {
         return false;
     }
     char path[CODEX_PROC_PIDPATH_MAX] = {0};
@@ -48,18 +72,23 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
     const char *const candidates[] = {
         CODEX_SBINJECT_SPRINGBOARD,
         CODEX_SBINJECT_PREFERENCES,
+        CODEX_SBINJECT_AMFID,
     };
     char configured[CODEX_PROC_PIDPATH_MAX] = {0};
     bool exact = false;
+    size_t matched_index = SIZE_MAX;
     for (size_t index = 0;
          index < sizeof(candidates) / sizeof(candidates[0]); ++index) {
         if (realpath(candidates[index], configured) != NULL &&
             strcmp(configured, observed) == 0) {
             exact = true;
+            matched_index = index;
             break;
         }
     }
-    if (!exact) {
+    if (!exact ||
+        (broker_amfid_request &&
+         matched_index != (sizeof(candidates) / sizeof(candidates[0]) - 1U))) {
         return false;
     }
     struct stat status;
@@ -69,31 +98,75 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
            (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
-static int mark_debugged(pid_t pid) {
+static bool publish_amfid_jit_ready(pid_t pid) {
+    char contents[32] = {0};
+    int length = snprintf(contents, sizeof(contents), "%d\n", pid);
+    if (length <= 0 || (size_t)length >= sizeof(contents)) return false;
+    int marker = open(CODEX_SBINJECT_AMFID_JIT_READY_MARKER,
+                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                      0644);
+    if (marker < 0) return false;
+    bool ready = write(marker, contents, (size_t)length) == (ssize_t)length &&
+                 fchown(marker, 0, 0) == 0 && fchmod(marker, 0644) == 0 &&
+                 fsync(marker) == 0;
+    close(marker);
+    if (!ready) (void)unlink(CODEX_SBINJECT_AMFID_JIT_READY_MARKER);
+    return ready;
+}
+
+static int mark_debugged(pid_t pid, bool publish_amfid_marker) {
+    if (publish_amfid_marker) {
+        (void)unlink(CODEX_SBINJECT_AMFID_JIT_READY_MARKER);
+    }
     errno = 0;
     if (ptrace(CODEX_PT_ATTACHEXC, pid, NULL, 0) != 0) {
         return errno != 0 ? errno : EPERM;
     }
-    int status = 0;
-    bool stopped = false;
+    uint32_t flags = 0;
+    bool debugged = false;
     for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
-        pid_t waited = waitpid(pid, &status, WUNTRACED | WNOHANG);
-        if (waited == pid) {
-            stopped = WIFSTOPPED(status);
-            break;
-        }
-        if (waited < 0 && errno != EINTR) {
+        if (csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+            (flags & CODEX_CS_DEBUGGED) != 0) {
+            debugged = true;
             break;
         }
         usleep(10U * 1000U);
     }
-    int detach_result = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
-    int detach_error = detach_result == 0 ? 0 : errno;
-    (void)kill(pid, SIGCONT);
-    if (!stopped) {
-        return ETIMEDOUT;
+    int detach_result = -1;
+    int detach_error = 0;
+    for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
+        errno = 0;
+        detach_result = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
+        detach_error = detach_result == 0 ? 0 : errno;
+        if (detach_result == 0 ||
+            (detach_error != EBUSY && detach_error != EINTR)) {
+            break;
+        }
+        usleep(10U * 1000U);
     }
-    return detach_result == 0 ? 0 : (detach_error != 0 ? detach_error : EPERM);
+    if (!debugged && detach_result == 0) {
+        flags = 0;
+        debugged = csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+                   (flags & CODEX_CS_DEBUGGED) != 0;
+    }
+    bool marker_ready = !publish_amfid_marker ||
+                        (debugged && detach_result == 0 &&
+                         publish_amfid_jit_ready(pid));
+    (void)kill(pid, SIGCONT);
+    os_log_with_type(service_log(),
+                     debugged && detach_result == 0
+                         ? OS_LOG_TYPE_DEFAULT
+                         : OS_LOG_TYPE_ERROR,
+                     "JIT state pid=%d flags=0x%08x debugged=%{public}s "
+                     "detach=%d detachError=%d marker=%{public}s",
+                     pid, flags, debugged ? "true" : "false",
+                     detach_result, detach_error,
+                     marker_ready ? "true" : "false");
+    if (detach_result != 0) {
+        return detach_error != 0 ? detach_error : EPERM;
+    }
+    if (!marker_ready) return EIO;
+    return debugged ? 0 : ETIMEDOUT;
 }
 
 static void receive_message(mach_port_t port) {
@@ -113,8 +186,9 @@ static void receive_message(mach_port_t port) {
             if (identifier == CODEX_SBINJECT_JIT_MESSAGE_ID && raw_pid > 1 &&
                 raw_pid <= INT_MAX) {
                 requested = (pid_t)raw_pid;
+                bool broker_request = requested != (pid_t)token.val[5];
                 result = safe_candidate(requested, token)
-                             ? mark_debugged(requested)
+                             ? mark_debugged(requested, broker_request)
                              : EPERM;
             }
         }

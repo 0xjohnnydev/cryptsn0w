@@ -19,6 +19,13 @@
     "/Applications/Preferences.app/Preferences"
 #define CODEX_SBINJECT_PREFERENCES \
     "/var/jb/Applications/Preferences.app/notPreferences"
+#define CODEX_SBINJECT_STOCK_AMFID "/usr/libexec/amfid"
+#define CODEX_SBINJECT_XPCPROXY "/usr/libexec/xpcproxy"
+#define CODEX_SBINJECT_AMFID "/var/jb/usr/libexec/sbinject/notamfid"
+#define CODEX_SBINJECT_ROOT_BROKER \
+    "/var/jb/usr/libexec/codex-sileo-root-broker"
+#define CODEX_SBINJECT_AMFID_HOOK \
+    "/var/jb/usr/libexec/sbinject/a"
 #define CODEX_SBINJECT_GENERALHOOK \
     "/var/jb/usr/lib/sbinject/generalhook.dylib"
 #define CODEX_SBINJECT_BUNDLE_HOOK \
@@ -26,9 +33,9 @@
 #define CODEX_SBINJECT_PREFERENCES_HOOK \
     "/var/jb/Applications/Preferences.app/g"
 #define CODEX_SBINJECT_LAUNCHDHOOK \
-    "/var/jb/usr/lib/sbinject/launchdhook-v3.dylib"
+    "/var/jb/usr/lib/sbinject/launchdhook-v12.dylib"
 #define CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK \
-    "/var/jb/usr/lib/sbinject/launchdhook-v2.dylib"
+    "/var/jb/usr/lib/sbinject/launchdhook-v11.dylib"
 #define CODEX_SBINJECT_ELLEKIT \
     "/var/jb/usr/lib/ellekit/libinjector.dylib"
 #define CODEX_SBINJECT_PREFERENCELOADER \
@@ -47,9 +54,23 @@
     "/var/jb/var/lib/sbinject/preferences-enabled"
 #define CODEX_SBINJECT_PREFERENCES_CRASH_MARKER \
     "/var/jb/var/lib/sbinject/preferences-disabled-crash-loop"
+#define CODEX_SBINJECT_AMFID_ENABLE_MARKER \
+    "/var/jb/var/lib/sbinject/amfid-injection-enabled"
+#define CODEX_SBINJECT_AMFID_CRASH_MARKER \
+    "/var/jb/var/lib/sbinject/amfid-injection-disabled-crash-loop"
+#define CODEX_SBINJECT_AMFID_READY_MARKER \
+    "/var/jb/var/lib/sbinject/amfid-hook-ready"
+#define CODEX_SBINJECT_AMFID_FAILURE_MARKER \
+    "/var/jb/var/lib/sbinject/amfid-hook-failure"
+#define CODEX_SBINJECT_AMFID_JIT_READY_MARKER \
+    "/var/jb/var/lib/sbinject/amfid-jit-ready"
 #define CODEX_SBINJECT_LAUNCHD_READY_MARKER \
     "/var/jb/var/lib/sbinject/launchd-hook-ready"
 #define CODEX_SBINJECT_LOG "/var/jb/var/log/sbinject.log"
+#define CODEX_SBINJECT_AMFID_LOG \
+    "/var/jb/var/lib/sbinject/amfid-hook.log"
+#define CODEX_SBINJECT_AMFID_PROFILE \
+    "/var/jb/var/lib/sbinject/amfid-profile.der"
 
 extern xpc_object_t xpc_pipe_create_from_port(mach_port_t port,
                                                uint32_t flags);

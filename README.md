@@ -90,10 +90,10 @@ Build and open the redsn0w-style SwiftUI front end with:
 
 ```sh
 make app
-open dist/CryptexSn0w.app
+open dist/CryptSn0w.app
 ```
 
-CryptexSn0w uses the supplied running-pineapple image as both its logo and
+CryptSn0w uses the supplied running-pineapple image as both its logo and
 macOS application icon. Keep the app in `dist/` and it locates this repository
 automatically; a folder chooser is available if the app is moved. Connect and
 unlock a paired phone, choose it from the device selector, then press
