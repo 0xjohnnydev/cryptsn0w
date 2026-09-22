@@ -4,10 +4,11 @@ import SwiftUI
 struct JailbreakBrushView: View {
     let isEnabled: Bool
     let isPressed: Bool
+    var tint = AppTheme.ink
 
     var body: some View {
         Canvas { context, size in
-            let ink = isEnabled ? AppTheme.ink : AppTheme.mutedInk.opacity(0.58)
+            let ink = isEnabled ? tint : AppTheme.mutedInk.opacity(0.58)
             func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
                 CGPoint(x: size.width * x, y: size.height * y)
             }

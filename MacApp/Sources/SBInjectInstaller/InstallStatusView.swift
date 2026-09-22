@@ -36,6 +36,19 @@ struct InstallStatusView: View {
 
             Spacer(minLength: AppTheme.compactSpacing)
 
+            if model.canManage, model.state != .running {
+                Button(action: model.enterManageMode) {
+                    Label("Manage", systemImage: "slider.horizontal.3")
+                        .labelStyle(.titleAndIcon)
+                        .imageScale(.small)
+                }
+                .buttonStyle(
+                    CryptexSecondaryButtonStyle(expands: true, flat: true)
+                )
+                .frame(width: 124)
+                .help("Open the jailbreak management panel")
+            }
+
             if model.canShowLog {
                 Button("Show Log", systemImage: "doc.text") {
                     model.showLog()

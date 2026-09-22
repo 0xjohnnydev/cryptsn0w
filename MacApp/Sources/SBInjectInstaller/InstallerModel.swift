@@ -19,10 +19,17 @@ final class InstallerModel {
     private(set) var errorTitle = "CryptSn0w"
     private(set) var errorMessage = ""
 
+    private(set) var mode = AppMode.install
+    private(set) var jailbreakState: JailbreakState?
+    private(set) var managedApps: [ManagedApp] = []
+    private(set) var isWorking = false
+    private(set) var manageDetail = ""
+
     @ObservationIgnored private var activeProcess: Process?
     @ObservationIgnored private var installTask: Task<Void, Never>?
     @ObservationIgnored private let deviceDiscovery = DeviceDiscoveryService()
     @ObservationIgnored private let sshSession = SSHShellSessionManager()
+    @ObservationIgnored private let control = DeviceControlService()
 
     init() {
         repositoryURL = RepositoryLocator.locate()
@@ -33,7 +40,7 @@ final class InstallerModel {
             return "Looking for connected devices"
         }
         return switch state {
-        case .idle: "Ready to jailbreak"
+        case .idle: canManage ? "Jailbreak installed" : "Ready to jailbreak"
         case .running: currentStep.title
         case .complete: "Jailbreak complete"
         case .failed: "Installation stopped"
@@ -344,5 +351,145 @@ final class InstallerModel {
         errorTitle = title
         errorMessage = message
         isShowingError = true
+    }
+
+    var canManage: Bool {
+        state != .running && sshShellIsAvailable
+    }
+
+    func enterManageMode() {
+        guard canManage, let repositoryURL, let selectedDevice else { return }
+        mode = .manage
+        manageDetail = "Connecting…"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let key = try sshSession.privateKey(
+                    repositoryURL: repositoryURL,
+                    deviceIdentifier: selectedDevice.id
+                )
+                try await control.connect(
+                    privateKey: key,
+                    repositoryURL: repositoryURL,
+                    device: selectedDevice
+                )
+                await reloadManageState()
+            } catch {
+                mode = .install
+                presentError(
+                    title: "Management Unavailable",
+                    error.localizedDescription
+                )
+            }
+        }
+    }
+
+    func exitManageMode() {
+        control.disconnect()
+        mode = .install
+        jailbreakState = nil
+        managedApps = []
+        manageDetail = ""
+    }
+
+    func reloadManageState() async {
+        do {
+            jailbreakState = try await control.status()
+            managedApps = try await control.applications()
+            manageDetail = jailbreakState?.summary ?? ""
+        } catch {
+            manageDetail = error.localizedDescription
+        }
+    }
+
+    func setSpringBoardRedirect(_ enabled: Bool) {
+        perform(
+            enabled ? "Arming SpringBoard…" : "Restoring stock SpringBoard…",
+            ["springboard", enabled ? "on" : "off"]
+        )
+    }
+
+    func setPreferencesRedirect(_ enabled: Bool) {
+        perform(
+            "Updating Settings…",
+            ["preferences", enabled ? "on" : "off"]
+        )
+    }
+
+    func setSafeMode(_ enabled: Bool) {
+        perform(
+            enabled ? "Entering safe mode…" : "Leaving safe mode…",
+            ["safemode", enabled ? "on" : "off"]
+        )
+    }
+
+    func respring() {
+        perform("Respringing…", ["respring"])
+    }
+
+    func clearCrashMarkers() {
+        perform("Clearing crash markers…", ["clear-crash"])
+    }
+
+    func uninstall(_ app: ManagedApp) {
+        runManaged("Removing \(app.name)…") {
+            _ = try await self.control.uninstall(identifier: app.identifier)
+        }
+    }
+
+    func installDropped(_ url: URL) {
+        runManaged("Installing \(url.lastPathComponent)…") {
+            let prepared = try await Task.detached(priority: .userInitiated) {
+                try BundleImporter.prepare(url)
+            }.value
+            defer {
+                if let scratch = prepared.scratch {
+                    try? FileManager.default.removeItem(at: scratch)
+                }
+            }
+            _ = try await self.control.install(bundle: prepared.bundle)
+        }
+    }
+
+    private func perform(_ detail: String, _ arguments: [String]) {
+        runManaged(detail) {
+            _ = try await self.control.customctl(arguments)
+        }
+    }
+
+    private func runManaged(
+        _ detail: String,
+        _ body: @escaping () async throws -> Void
+    ) {
+        guard !isWorking else { return }
+        isWorking = true
+        manageDetail = detail
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isWorking = false }
+            do {
+                try await body()
+            } catch {
+                manageDetail = error.localizedDescription
+            }
+            await reconnectIfNeeded()
+            try? await Task.sleep(for: .seconds(2))
+            await reloadManageState()
+        }
+    }
+
+    private func reconnectIfNeeded() async {
+        guard mode == .manage, !control.isConnected,
+              let repositoryURL, let selectedDevice,
+              let key = try? sshSession.privateKey(
+                repositoryURL: repositoryURL,
+                deviceIdentifier: selectedDevice.id
+              )
+        else { return }
+        try? await control.connect(
+            privateKey: key,
+            repositoryURL: repositoryURL,
+            device: selectedDevice
+        )
     }
 }

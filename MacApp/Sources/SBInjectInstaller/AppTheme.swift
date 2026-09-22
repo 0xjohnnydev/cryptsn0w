@@ -4,6 +4,7 @@ enum AppTheme {
     static let accent = Color(red: 0.32, green: 0.46, blue: 0.025)
     static let accentBright = Color(red: 0.65, green: 0.90, blue: 0.10)
     static let accentDeep = Color(red: 0.20, green: 0.32, blue: 0.015)
+    static let accentSoft = Color(red: 0.46, green: 0.63, blue: 0.09)
 
     static let ink = Color(red: 0.055, green: 0.065, blue: 0.08)
     static let softInk = Color(red: 0.16, green: 0.18, blue: 0.21)
@@ -42,4 +43,5 @@ enum AppTheme {
     static let contentBottomPadding = 16.0
     static let windowWidth = 640.0
     static let windowHeight = 350.0
+    static let manageWindowHeight = 470.0
 }

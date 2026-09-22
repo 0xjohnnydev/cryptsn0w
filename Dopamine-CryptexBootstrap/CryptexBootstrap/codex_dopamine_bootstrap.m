@@ -7675,6 +7675,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceElleKitCompatLoader =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-ellekit-loader"];
+        NSString *sourceCustomctl =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/customctl"];
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
@@ -8899,6 +8902,10 @@ int main(int argc, char *argv[]) {
                 sourceElleKitCompatLoader, @"/var/jb/usr/libexec",
                 @"codex-ellekit-loader", 16 * 1024 * 1024, 0755,
                 "elleKitInjector", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceCustomctl, @"/var/jb/usr/bin", @"customctl",
+                4 * 1024 * 1024, 0755, "customctl", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceExecWorker, @"/var/jb/usr/libexec",

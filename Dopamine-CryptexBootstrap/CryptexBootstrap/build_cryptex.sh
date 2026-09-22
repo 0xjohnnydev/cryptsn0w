@@ -93,6 +93,7 @@ EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_WORKER_NO_KEYCHAIN="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-no-keychain"
 EXEC_WORKER_NATIVE_SDK="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-native-sdk"
 EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-native-sdk-no-keychain"
+CUSTOMCTL="$IMAGE_ROOT/usr/local/bin/customctl"
 TROLLSTORE_BROKER_CLIENT="$IMAGE_ROOT/usr/local/bin/codex-trollstore-broker-client"
 TROLLSTORE_SETTINGS_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trollstore-settings-hook.dylib"
 ELLEKIT_COMPAT_ENTITLEMENTS="$SCRIPT_DIR/ellekit-compat-loader-entitlements.plist"
@@ -1089,6 +1090,23 @@ codesign --verify --strict --all-architectures \
     "$TROLLSTORE_BROKER_CLIENT" || \
     die "TrollStore broker client signature is invalid"
 
+# customctl holds no privilege of its own: it edits the SBInject markers and
+# runs the entitled tools, so it ships unentitled and root-only.
+xcrun --sdk iphoneos clang \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -fobjc-arc -fblocks \
+    -Wall -Wextra -Werror \
+    -I "$SCRIPT_DIR" \
+    -framework Foundation \
+    "$SCRIPT_DIR/customctl.m" \
+    -o "$CUSTOMCTL"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.customctl "$CUSTOMCTL"
+codesign --verify --strict --all-architectures "$CUSTOMCTL" || \
+    die "customctl signature is invalid"
+
 xcrun --sdk iphoneos clang \
     -arch arm64 \
     -miphoneos-version-min=17.0 \
@@ -1113,6 +1131,7 @@ for candidate in \
     "$EXEC_WORKER_NATIVE_SDK_NO_KEYCHAIN" \
     "$TROLLSTORE_BROKER_CLIENT" \
     "$TROLLSTORE_SETTINGS_HOOK" \
+    "$CUSTOMCTL" \
     "$SBINJECT_PACKAGE_VALIDATOR" \
     "$SBINJECT_GENERALHOOK" \
     "$SBINJECT_AMFIHOOK" \

@@ -7,8 +7,13 @@ struct ContentView: View {
         ZStack {
             CryptexBackgroundView()
             VStack(spacing: 12) {
-                DeviceInstallView(model: model)
-                InstallStatusView(model: model)
+                switch model.mode {
+                case .install:
+                    DeviceInstallView(model: model)
+                    InstallStatusView(model: model)
+                case .manage:
+                    ManageView(model: model)
+                }
                 Spacer(minLength: 0)
                 BrandFooterView()
             }
@@ -16,7 +21,12 @@ struct ContentView: View {
             .padding(.top, AppTheme.contentTopPadding)
             .padding(.bottom, AppTheme.contentBottomPadding)
         }
-        .frame(width: AppTheme.windowWidth, height: AppTheme.windowHeight)
+        .frame(
+            width: AppTheme.windowWidth,
+            height: model.mode == .manage
+                ? AppTheme.manageWindowHeight
+                : AppTheme.windowHeight
+        )
         .foregroundStyle(AppTheme.ink)
         .tint(AppTheme.accent)
         .font(AppTheme.controlFont)

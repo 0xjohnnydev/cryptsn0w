@@ -16,6 +16,13 @@ final class SSHShellSessionManager {
         )) != nil
     }
 
+    func privateKey(repositoryURL: URL, deviceIdentifier: String) throws -> URL {
+        try latestPrivateKey(
+            repositoryURL: repositoryURL,
+            deviceIdentifier: deviceIdentifier
+        )
+    }
+
     func open(repositoryURL: URL, device: ConnectedDevice) async throws {
         let privateKey = try latestPrivateKey(
             repositoryURL: repositoryURL,
