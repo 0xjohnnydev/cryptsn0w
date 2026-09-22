@@ -8743,8 +8743,12 @@ int main(int argc, char *argv[]) {
         log_message("sbinjectPreferencesRepairReset=%s",
                     preferencesCrashMarkerPresent ? "true" : "not-needed");
 
+        // The image ships an adjusted sshd_config, so on upgrade dpkg stops at
+        // a conffile prompt and, with no stdin, exits 1.  Keep the installed
+        // file; install_managed_apt_file below rewrites it anyway.
         char *openSSHDpkgArguments[] = {
             "/var/jb/usr/bin/dpkg", "-i",
+            "--force-confold", "--force-confdef",
             (char *)[sourceOpenSSHClient fileSystemRepresentation],
             (char *)[sourceOpenSSHSFTPServer fileSystemRepresentation],
             (char *)[sourceOpenSSHServer fileSystemRepresentation], NULL};

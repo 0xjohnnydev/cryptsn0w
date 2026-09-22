@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -16,6 +17,7 @@
 #define STAGE_STATE "/private/var/tmp/codex-stage-ssh"
 #define CREATED_MARKER STAGE_STATE "/created-var-jb"
 #define CLEANUP_EXECUTABLE STAGE_STATE "/cleanup"
+#define LINK_ROOT STAGE_STATE "/jb"
 
 extern char **environ;
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffer_size);
@@ -46,6 +48,44 @@ static bool secure_privilege_separation_directory(void) {
     return chown(path, 0, 0) == 0 && chmod(path, 0755) == 0;
 }
 
+static bool mirror_entries(const char *source, const char *destination,
+                           const char *skip) {
+    DIR *directory = opendir(source);
+    if (directory == NULL) return false;
+    bool mirrored = true;
+    const struct dirent *entry;
+    while (mirrored && (entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            (skip != NULL && strcmp(entry->d_name, skip) == 0)) {
+            continue;
+        }
+        char target[PATH_MAX];
+        char link[PATH_MAX];
+        if (snprintf(target, sizeof(target), "%s/%s", source, entry->d_name) >=
+                (int)sizeof(target) ||
+            snprintf(link, sizeof(link), "%s/%s", destination,
+                     entry->d_name) >= (int)sizeof(link)) {
+            mirrored = false;
+            break;
+        }
+        if (symlink(target, link) == 0) continue;
+        if (errno != EEXIST) {
+            mirrored = false;
+            break;
+        }
+        // Repoint a stale symlink from an earlier install's mount path; keep
+        // a real file, which the caller copied in deliberately.
+        struct stat existing;
+        if (lstat(link, &existing) == 0 && S_ISLNK(existing.st_mode) &&
+            (unlink(link) != 0 || symlink(target, link) != 0)) {
+            mirrored = false;
+        }
+    }
+    closedir(directory);
+    return mirrored;
+}
+
 static bool write_all(int descriptor, const void *bytes, size_t size) {
     const unsigned char *cursor = bytes;
     while (size != 0) {
@@ -56,6 +96,80 @@ static bool write_all(int descriptor, const void *bytes, size_t size) {
         size -= (size_t)amount;
     }
     return true;
+}
+
+static bool copy_regular_file(const char *source, const char *destination,
+                              mode_t mode) {
+    int input = open(source, O_RDONLY | O_CLOEXEC);
+    if (input < 0) return false;
+    int output = open(destination,
+                      O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                      mode);
+    if (output < 0) {
+        close(input);
+        return false;
+    }
+    unsigned char buffer[64U * 1024U];
+    bool copied = true;
+    for (;;) {
+        ssize_t amount = read(input, buffer, sizeof(buffer));
+        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) {
+            copied = false;
+            break;
+        }
+        if (amount == 0) break;
+        if (!write_all(output, buffer, (size_t)amount)) {
+            copied = false;
+            break;
+        }
+    }
+    copied = copied && fchown(output, 0, 0) == 0 && fchmod(output, mode) == 0;
+    close(input);
+    close(output);
+    if (!copied) (void)unlink(destination);
+    return copied;
+}
+
+// /var/jb cannot point straight into the read-only cryptex mount: iOS 27.2
+// denies file-write-owner there, so sshd's root-owned privilege-separation
+// directory cannot be prepared, and pwd_mkdb cannot write the user databases
+// libiosexec's ie_getpwnam requires.  Build a small writable root instead and
+// symlink everything else back into the image.
+static bool build_jailbreak_overlay(const char *stage_root) {
+    char stage_var[PATH_MAX];
+    char stage_etc[PATH_MAX];
+    char source[PATH_MAX];
+    if (!ensure_directory(LINK_ROOT, 0755) ||
+        !ensure_directory(LINK_ROOT "/var", 0755) ||
+        !ensure_directory(LINK_ROOT "/var/empty", 0755) ||
+        !ensure_directory(LINK_ROOT "/etc", 0755) ||
+        snprintf(stage_var, sizeof(stage_var), "%s/var", stage_root) >=
+            (int)sizeof(stage_var) ||
+        snprintf(stage_etc, sizeof(stage_etc), "%s/etc", stage_root) >=
+            (int)sizeof(stage_etc)) {
+        return false;
+    }
+    // pwd_mkdb's input, and the group file libiosexec reads, must be real
+    // files here rather than symlinks into the read-only mount.
+    static const char *const copied[] = {"master.passwd", "group"};
+    static const mode_t copied_modes[] = {0600, 0644};
+    for (size_t index = 0; index < sizeof(copied) / sizeof(copied[0]);
+         ++index) {
+        char destination[PATH_MAX];
+        if (snprintf(source, sizeof(source), "%s/%s", stage_etc,
+                     copied[index]) >= (int)sizeof(source) ||
+            snprintf(destination, sizeof(destination), "%s/%s",
+                     LINK_ROOT "/etc", copied[index]) >=
+                (int)sizeof(destination) ||
+            !copy_regular_file(source, destination, copied_modes[index])) {
+            return false;
+        }
+    }
+    // pwd_mkdb -p regenerates "passwd", so it must not be a symlink.
+    return mirror_entries(stage_root, LINK_ROOT, "var") &&
+           mirror_entries(stage_var, LINK_ROOT "/var", "empty") &&
+           mirror_entries(stage_etc, LINK_ROOT "/etc", "passwd");
 }
 
 static bool executable_and_stage_root(char executable[PATH_MAX],
@@ -198,12 +312,42 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // An OS update repoints the active preboot directory, orphaning any
+    // /var/jb a previous install left behind; lstat() does not follow
+    // symlinks, so such a link used to be adopted silently.  Replace it, and
+    // always rebuild our own, whose entries point at a cryptex mount path
+    // that changes with every install.  A link belonging to a live install
+    // still resolves and is left alone, as is a real directory.
     struct stat status;
+    bool create_link = false;
     if (lstat("/var/jb", &status) != 0) {
-        if (errno != ENOENT || symlink(stage_root, "/var/jb") != 0) return 1;
+        if (errno != ENOENT) return 1;
+        create_link = true;
+    } else if (S_ISLNK(status.st_mode)) {
+        char existing[PATH_MAX];
+        ssize_t length = readlink("/var/jb", existing, sizeof(existing) - 1U);
+        if (length > 0) existing[length] = '\0';
+        bool ours = length > 0 && strcmp(existing, LINK_ROOT) == 0;
+        bool orphaned = stat("/var/jb", &status) != 0 && errno == ENOENT;
+        if (ours || orphaned) {
+            os_log(stage_log(), "replacing %{public}s /var/jb symlink",
+                   ours ? "this launcher's own" : "an orphaned");
+            if (unlink("/var/jb") != 0) return 1;
+            create_link = true;
+        }
+    }
+    if (create_link) {
+        if (!build_jailbreak_overlay(stage_root)) {
+            os_log_error(stage_log(),
+                         "could not build the /var/jb overlay errno=%d", errno);
+            return 1;
+        }
+        if (symlink(LINK_ROOT, "/var/jb") != 0) return 1;
+        // A marker from an earlier install would fail the O_EXCL open below.
+        (void)unlink(CREATED_MARKER);
         int marker = open(CREATED_MARKER,
                           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (marker < 0 || !write_all(marker, stage_root, strlen(stage_root)) ||
+        if (marker < 0 || !write_all(marker, LINK_ROOT, strlen(LINK_ROOT)) ||
             !write_all(marker, "\n", 1U)) {
             if (marker >= 0) close(marker);
             (void)unlink("/var/jb");
@@ -241,6 +385,25 @@ int main(int argc, char **argv) {
         return 1;
     }
     setenv("PATH", "/var/jb/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin", 1);
+    // Generate the databases ie_getpwnam reads, the same way prep_bootstrap.sh
+    // does; without them sshd's privilege-separation lookup returns NULL.
+    // Only for our own overlay: a live install has its own.
+    if (create_link) {
+        char pwd_mkdb[PATH_MAX];
+        if (snprintf(pwd_mkdb, sizeof(pwd_mkdb), "%s/usr/sbin/pwd_mkdb",
+                     stage_root) >= (int)sizeof(pwd_mkdb)) {
+            return 1;
+        }
+        char *make_databases[] = {pwd_mkdb, "-p", "/var/jb/etc/master.passwd",
+                                  NULL};
+        int database_status = run_and_log(make_databases);
+        if (database_status != 0) {
+            os_log_error(stage_log(), "pwd_mkdb failed status=%d",
+                         database_status);
+            return database_status;
+        }
+    }
+
     char *preflight[] = {sshd, "-t", "-f", config, "-o", host_option,
                          "-o", authorized_option, NULL};
     int server_status = run_and_log(preflight);
