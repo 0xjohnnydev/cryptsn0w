@@ -134,9 +134,7 @@ static NSString *const kSileoPackageVersion = @"2.5.1+codex1";
 static NSString *const kSystemSileoDataRoot = @"/var/mobile";
 static NSString *const kBundleContainerRoot =
     @"/var/containers/Bundle/Application";
-static NSString *const kSystemSileoBundlePath =
-    @"/var/containers/Bundle/Application/"
-     "D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app";
+static NSString *gSystemSileoBundlePath;
 static NSString *const kTrollStoreLiteIdentifier =
     @"com.opa334.TrollStoreLite";
 static NSString *const kManagedApplicationMarker =
@@ -1294,8 +1292,9 @@ static bool is_sileo_system_bundle_path(NSString *path) {
         ([standardized hasPrefix:privateCryptexPrefix] ||
          [standardized hasPrefix:cryptexPrefix]) &&
         [standardized hasSuffix:@"/Applications/Sileo.app"];
-    bool managedContainerPath =
-        [standardized isEqual:[kSystemSileoBundlePath stringByStandardizingPath]];
+    bool managedContainerPath = gSystemSileoBundlePath != nil &&
+        [standardized isEqual:
+            [gSystemSileoBundlePath stringByStandardizingPath]];
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
         [standardized stringByAppendingPathComponent:@"Info.plist"]];
     bool identifier =
@@ -1648,6 +1647,41 @@ static bool load_mobile_container_manager(void) {
             RTLD_NOW | RTLD_LOCAL) != NULL;
     });
     return loaded;
+}
+
+static NSString *sileo_system_bundle_path(bool create,
+                                          NSString **errorText) {
+    if (gSystemSileoBundlePath != nil) return gSystemSileoBundlePath;
+    if (!load_mobile_container_manager()) {
+        if (errorText != NULL) {
+            *errorText = @"MobileContainerManager is unavailable for Sileo";
+        }
+        return nil;
+    }
+    Class containerClass = NSClassFromString(@"MCMAppContainer");
+    BOOL existed = NO;
+    NSError *error = nil;
+    id container = [containerClass
+        containerWithIdentifier:kSileoIdentifier
+              createIfNecessary:create
+                        existed:&existed
+                          error:&error];
+    NSString *containerPath = [container respondsToSelector:@selector(url)]
+        ? [[container url] path] : nil;
+    if (!managed_app_container_path_is_valid(containerPath)) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"could not obtain the managed Sileo container: %@",
+                error ?: @"unknown"];
+        }
+        return nil;
+    }
+    gSystemSileoBundlePath =
+        [containerPath stringByAppendingPathComponent:@"Sileo.app"];
+    log_message("sileoSystemContainer=true created=%s path=%s",
+                existed ? "false" : "true",
+                containerPath.UTF8String);
+    return gSystemSileoBundlePath;
 }
 
 static NSDictionary *managed_app_launcher_entitlements(
@@ -6346,8 +6380,10 @@ static bool bundle_trees_are_equal(NSString *source, NSString *destination) {
 }
 
 static bool install_sileo_system_bundle_copy(NSString *source,
+                                             NSString **destinationOut,
                                              bool *didUpdate,
                                              NSString **errorText) {
+    if (destinationOut != NULL) *destinationOut = nil;
     if (didUpdate != NULL) *didUpdate = false;
     if (!is_sileo_system_bundle_path(source) ||
         validated_bundle_entries(source, false) == nil) {
@@ -6356,25 +6392,22 @@ static bool install_sileo_system_bundle_copy(NSString *source,
         }
         return false;
     }
-    NSString *destination = kSystemSileoBundlePath;
+    NSString *destination = sileo_system_bundle_path(true, errorText);
+    if (destination == nil) return false;
+    if (destinationOut != NULL) *destinationOut = destination;
     NSString *parent = [destination stringByDeletingLastPathComponent];
     NSFileManager *manager = [NSFileManager defaultManager];
-    NSDictionary *directoryAttributes = @{
-        NSFilePosixPermissions : @0755,
-        NSFileOwnerAccountID : @0,
-        NSFileGroupOwnerAccountID : @0,
-    };
     NSError *error = nil;
-    if (![manager createDirectoryAtPath:parent
-             withIntermediateDirectories:YES
-                              attributes:directoryAttributes
-                                   error:&error] ||
-        ![manager setAttributes:directoryAttributes
-                   ofItemAtPath:parent
-                          error:&error]) {
+    struct stat parentStatus = {0};
+    NSString *metadata = [parent stringByAppendingPathComponent:
+        @".com.apple.mobile_container_manager.metadata.plist"];
+    struct stat metadataStatus = {0};
+    if (lstat(parent.fileSystemRepresentation, &parentStatus) != 0 ||
+        !S_ISDIR(parentStatus.st_mode) || S_ISLNK(parentStatus.st_mode) ||
+        lstat(metadata.fileSystemRepresentation, &metadataStatus) != 0 ||
+        !S_ISREG(metadataStatus.st_mode) || S_ISLNK(metadataStatus.st_mode)) {
         if (errorText != NULL) {
-            *errorText = [NSString stringWithFormat:
-                @"system Sileo container preparation failed: %@", error];
+            *errorText = @"managed Sileo container validation failed";
         }
         return false;
     }
@@ -8277,10 +8310,12 @@ int main(int argc, char *argv[]) {
                             : "none");
         }
 
+        NSString *systemSileoBundlePath = nil;
         bool systemSileoBundleUpdated = false;
         NSString *systemSileoBundleError = nil;
         if (!install_sileo_system_bundle_copy(
-                sourceTrustedSileo, &systemSileoBundleUpdated,
+                sourceTrustedSileo, &systemSileoBundlePath,
+                &systemSileoBundleUpdated,
                 &systemSileoBundleError)) {
             return fail(systemSileoBundleError, nil);
         }
@@ -8306,7 +8341,7 @@ int main(int argc, char *argv[]) {
                     @".codex-cryptex-bootstrap.plist"];
             NSDictionary *installedManifest = [NSDictionary
                 dictionaryWithContentsOfFile:installedManifestPath];
-            NSString *fastRegisteredPath = kSystemSileoBundlePath;
+            NSString *fastRegisteredPath = systemSileoBundlePath;
             NSString *fastDataContainer = kSystemSileoDataRoot;
             NSString *fastRegistrationError = nil;
             bool fastSystemMode =
@@ -9174,7 +9209,7 @@ int main(int argc, char *argv[]) {
         }
         NSString *systemRegistrationError = nil;
         if (!register_sileo_system_application(
-                kSystemSileoBundlePath, &systemRegistrationError)) {
+                systemSileoBundlePath, &systemRegistrationError)) {
             return fail(systemRegistrationError, nil);
         }
         NSString *registeredPath = registered_application_path(
@@ -9183,7 +9218,7 @@ int main(int argc, char *argv[]) {
                     registeredPath != nil ? [registeredPath UTF8String]
                                           : "none");
         if (!is_sileo_system_bundle_path(registeredPath) ||
-            !executable_paths_match(kSystemSileoBundlePath, registeredPath) ||
+            !executable_paths_match(systemSileoBundlePath, registeredPath) ||
             !bundle_trees_are_equal(sourceTrustedSileo, registeredPath)) {
             return fail(@"LaunchServices did not retain the managed fixed-trust "
                          "Sileo system path", nil);
