@@ -937,7 +937,12 @@ chmod 0755 "$SYSTEM_SILEO_APP" "$SYSTEM_SILEO_APP/Sileo" \
 # /var/jb. The Cryptex is the authoritative signed source; the boot daemon
 # maintains one byte-verified, root-owned copy in the standard app container.
 rm -rf "$APP_DIR"
-dpkg-deb -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null
+SILEO_STATE_DIR="$PACKAGE_ROOT/var/jb/usr/share/codex-bootstrap"
+mkdir -p "$SILEO_STATE_DIR"
+printf '%s\n' "$SILEO_PACKAGE_VERSION" \
+    >"$SILEO_STATE_DIR/sileo-system-app"
+chmod 0644 "$SILEO_STATE_DIR/sileo-system-app"
+dpkg-deb --root-owner-group -b "$PACKAGE_ROOT" "$REPACKED_SILEO" >/dev/null
 [[ "$(dpkg-deb -f "$REPACKED_SILEO" Version)" == \
     "$SILEO_PACKAGE_VERSION" ]] || \
     die "fixed system Sileo metadata package version mismatch"
