@@ -106,10 +106,24 @@ static bool managed_app_launcher_process(pid_t pid) {
     char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
     char observed[CODEX_PROC_PIDPATH_MAX] = {0};
     if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
-        realpath(raw_path, observed) == NULL ||
-        !regular_files_equal(observed, CODEX_SBINJECT_APP_LAUNCHER)) {
+        realpath(raw_path, observed) == NULL) {
         return false;
     }
+    static const char *const launchers[] = {
+        CODEX_SBINJECT_APP_LAUNCHER,
+        CODEX_SBINJECT_APP_LAUNCHER_NO_KEYCHAIN,
+        CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK,
+        CODEX_SBINJECT_APP_LAUNCHER_NATIVE_SDK_NO_KEYCHAIN,
+    };
+    bool launcher = false;
+    for (size_t index = 0;
+         index < sizeof(launchers) / sizeof(launchers[0]); ++index) {
+        if (regular_files_equal(observed, launchers[index])) {
+            launcher = true;
+            break;
+        }
+    }
+    if (!launcher) return false;
     char bundle[CODEX_PROC_PIDPATH_MAX] = {0};
     if (strlcpy(bundle, observed, sizeof(bundle)) >= sizeof(bundle)) {
         return false;

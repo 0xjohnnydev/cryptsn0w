@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>application-identifier</key>
+    <string>com.openai.codex.sbinject.app-launcher</string>
     <key>com.apple.CommCenter.fine-grained</key>
     <array>
         <string>data-allowed-write</string>
