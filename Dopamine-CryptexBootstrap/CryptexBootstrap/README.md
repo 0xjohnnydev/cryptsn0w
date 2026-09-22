@@ -32,10 +32,11 @@ preboot directory. Repair mode accepts it only when ownership, symlink target,
 manifest, and active preboot parent match this installer.
 
 The authoritative Sileo bundle lives in the read-only Cryptex. The boot daemon
-maintains an exact root-owned copy at:
+maintains an exact root-owned copy in an application container created by
+MobileContainerManager:
 
 ```text
-/var/containers/Bundle/Application/D7A9C65A-1FD8-4D9C-AC8D-4E8E5143A191/Sileo.app
+/var/containers/Bundle/Application/<managed UUID>/Sileo.app
 ```
 
 LaunchServices registers that path under the original
@@ -48,7 +49,8 @@ falls back to the existing `lsd` registration hook; other hardware keeps the
 hook-first behavior.
 
 The Debian `org.coolstar.sileo` package contains dependency and maintainer
-metadata, not a second mutable application bundle. APT pins the local
+metadata, plus one state marker that keeps the package in dpkg's database. It
+does not contain a second mutable application bundle. APT pins the local
 `2.5.1+codex1` version. Sileo updates therefore ship in a new Cryptex.
 
 ## Package operations
