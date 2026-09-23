@@ -8743,8 +8743,24 @@ int main(int argc, char *argv[]) {
         log_message("sbinjectPreferencesRepairReset=%s",
                     preferencesCrashMarkerPresent ? "true" : "not-needed");
 
+        // The clean Procursus root still records OpenSSH's old prerm with a
+        // system /bin/sh shebang. dpkg runs that script while upgrading the
+        // pinned OpenSSH package, but iOS 27 has no system shell there.
+        // Rewrite only this installed script before the upgrade. The normal
+        // package-maintainer pass handles the newly installed copy later.
+        NSString *openSSHMaintainerError = nil;
+        if (!sbinject_prepare_installed_maintainers(
+                @[@"openssh-server"], false, &openSSHMaintainerError)) {
+            return fail(
+                [NSString stringWithFormat:
+                              @"OpenSSH maintainer preparation failed: %@",
+                              openSSHMaintainerError],
+                nil);
+        }
+
         char *openSSHDpkgArguments[] = {
-            "/var/jb/usr/bin/dpkg", "-i",
+            "/var/jb/usr/bin/dpkg", "--force-confdef", "--force-confold",
+            "-i",
             (char *)[sourceOpenSSHClient fileSystemRepresentation],
             (char *)[sourceOpenSSHSFTPServer fileSystemRepresentation],
             (char *)[sourceOpenSSHServer fileSystemRepresentation], NULL};
@@ -9022,6 +9038,28 @@ int main(int argc, char *argv[]) {
             sbinjectPreferencesBridgeUpdated ||
             sbinjectPreferencesBundleUpdated;
         if (sbinjectPayloadUpdated) {
+            NSString *sbinjectStateDirectory = @"/var/jb/var/lib/sbinject";
+            NSDictionary *sbinjectStateDirectoryAttributes = @{
+                NSFilePosixPermissions : @0755,
+                NSFileOwnerAccountID : @0,
+                NSFileGroupOwnerAccountID : @0,
+            };
+            NSError *sbinjectStateDirectoryError = nil;
+            if (![[NSFileManager defaultManager]
+                    createDirectoryAtPath:sbinjectStateDirectory
+              withIntermediateDirectories:YES
+                               attributes:sbinjectStateDirectoryAttributes
+                                    error:&sbinjectStateDirectoryError] ||
+                ![[NSFileManager defaultManager]
+                    setAttributes:sbinjectStateDirectoryAttributes
+                     ofItemAtPath:sbinjectStateDirectory
+                            error:&sbinjectStateDirectoryError]) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"SBInject state directory failed: %@",
+                                  sbinjectStateDirectoryError],
+                    nil);
+            }
             (void)unlink([kSBInjectEnableMarker fileSystemRepresentation]);
             (void)unlink(
                 [kSBInjectPreferencesEnableMarker fileSystemRepresentation]);
