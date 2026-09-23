@@ -15,7 +15,7 @@
 
 #define STAGE_STATE "/private/var/tmp/codex-stage-ssh"
 #define CREATED_MARKER STAGE_STATE "/created-var-jb"
-#define CLEANUP_EXECUTABLE STAGE_STATE "/cleanup"
+#define STAGE_PRIVSEP "/var/tmp/cdx-priv"
 
 extern char **environ;
 extern int proc_pidpath(int pid, void *buffer, uint32_t buffer_size);
@@ -37,7 +37,8 @@ static bool ensure_directory(const char *path, mode_t mode) {
 }
 
 static bool secure_privilege_separation_directory(void) {
-    static const char path[] = "/var/jb/var/empty";
+    static const char path[] = STAGE_PRIVSEP;
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) return false;
     struct stat status;
     if (lstat(path, &status) != 0 || !S_ISDIR(status.st_mode) ||
         S_ISLNK(status.st_mode)) {
@@ -74,37 +75,6 @@ static bool executable_and_stage_root(char executable[PATH_MAX],
                           executable);
     *location = '/';
     return length > 0 && length < PATH_MAX;
-}
-
-static bool install_cleanup_copy(const char *source) {
-    char temporary[] = STAGE_STATE "/.cleanup.XXXXXX";
-    int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    int output = mkstemp(temporary);
-    if (input < 0 || output < 0) {
-        if (input >= 0) close(input);
-        if (output >= 0) close(output);
-        return false;
-    }
-    unsigned char buffer[64U * 1024U];
-    bool copied = true;
-    for (;;) {
-        ssize_t amount = read(input, buffer, sizeof(buffer));
-        if (amount < 0 && errno == EINTR) continue;
-        if (amount < 0) copied = false;
-        if (amount <= 0) break;
-        if (!write_all(output, buffer, (size_t)amount)) {
-            copied = false;
-            break;
-        }
-    }
-    copied = copied && fchmod(output, 0700) == 0 && fchown(output, 0, 0) == 0;
-    close(input);
-    close(output);
-    if (!copied || rename(temporary, CLEANUP_EXECUTABLE) != 0) {
-        (void)unlink(temporary);
-        return false;
-    }
-    return true;
 }
 
 static int run_and_log(char *const arguments[]) {
@@ -192,13 +162,53 @@ int main(int argc, char **argv) {
 
     char executable[PATH_MAX] = {0};
     char stage_root[PATH_MAX] = {0};
-    if (!executable_and_stage_root(executable, stage_root) ||
-        !install_cleanup_copy(executable)) {
+    if (!executable_and_stage_root(executable, stage_root)) {
         os_log_error(stage_log(), "stage path setup failed errno=%d", errno);
         return 1;
     }
 
+    FILE *previous_marker = fopen(CREATED_MARKER, "r");
+    if (previous_marker != NULL) {
+        char expected[PATH_MAX] = {0};
+        char target[PATH_MAX] = {0};
+        bool read_expected =
+            fgets(expected, sizeof(expected), previous_marker) != NULL;
+        fclose(previous_marker);
+        expected[strcspn(expected, "\r\n")] = '\0';
+        ssize_t length = readlink("/var/jb", target, sizeof(target) - 1U);
+        if (!read_expected || length <= 0 ||
+            (size_t)length >= sizeof(target) ||
+            strcmp(target, expected) != 0) {
+            os_log_error(stage_log(), "existing stage /var/jb marker mismatch");
+            return 1;
+        }
+        if (strcmp(target, stage_root) != 0 &&
+            (unlink("/var/jb") != 0 || unlink(CREATED_MARKER) != 0)) {
+            os_log_error(stage_log(), "could not remove old stage /var/jb link");
+            return 1;
+        }
+    }
+
     struct stat status;
+    if (lstat("/var/jb", &status) == 0 && S_ISLNK(status.st_mode)) {
+        static const char prefix[] =
+            "/private/var/run/com.apple.security.cryptexd/mnt/"
+            "com.openai.codex.dopamine.bootstrap.";
+        static const char suffix[] =
+            "/usr/local/share/codex-stage-ssh/root";
+        char target[PATH_MAX] = {0};
+        ssize_t length = readlink("/var/jb", target, sizeof(target) - 1U);
+        if (length > (ssize_t)(strlen(prefix) + strlen(suffix)) &&
+            strncmp(target, prefix, strlen(prefix)) == 0 &&
+            strcmp(target + length - strlen(suffix), suffix) == 0 &&
+            strcmp(target, stage_root) != 0) {
+            if (unlink("/var/jb") != 0) {
+                os_log_error(stage_log(),
+                             "could not remove stale stage /var/jb link");
+                return 1;
+            }
+        }
+    }
     if (lstat("/var/jb", &status) != 0) {
         if (errno != ENOENT || symlink(stage_root, "/var/jb") != 0) return 1;
         int marker = open(CREATED_MARKER,
@@ -211,9 +221,15 @@ int main(int argc, char **argv) {
         }
         close(marker);
     }
+    char active_target[PATH_MAX] = {0};
+    ssize_t target_length =
+        readlink("/var/jb", active_target, sizeof(active_target) - 1U);
+    os_log(stage_log(), "stage root=%{public}s /var/jb target=%{public}s",
+           stage_root, target_length > 0 ? active_target : "not a link");
     if (!secure_privilege_separation_directory()) {
         os_log_error(stage_log(),
-                     "could not secure sshd privilege-separation directory");
+                     "could not secure sshd privilege-separation directory errno=%d",
+                     errno);
         return 1;
     }
 

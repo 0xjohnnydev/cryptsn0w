@@ -219,17 +219,21 @@ build_ssh_stage() {
     local launcher="$stage_image/usr/local/bin/codex-dopamine-bootstrap"
     local stage_host_key="$STAGE_WORK_DIR/host-key"
     local stage_sshd="$stage_payload/root/usr/sbin/sshd"
+    local stage_shell="$stage_payload/root/usr/bin/zsh"
+    local stage_libiosexec="$stage_payload/root/usr/lib/libiosexec.1.dylib"
     local stage_sshd_entitlements="$STAGE_WORK_DIR/sshd-entitlements.plist"
     local bundle trustcache trustcache_dump image image_bytes entry_count
     local -a stage_variants
 
-    for tool in awk curl ditto ldid plutil python3 shasum ssh-keygen stat tar xcrun zstd; do
+    for tool in awk curl ditto install_name_tool ldid plutil python3 shasum ssh-keygen stat tar xcrun zstd; do
         command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
     done
     [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
     [[ -f "$authorized_key" ]] || die "CODEX_STAGE_AUTHORIZED_KEY is required"
     [[ -f "$SCRIPT_DIR/stage_ssh_launcher.c" ]] || \
         die "missing stage SSH launcher"
+    [[ -f "$SCRIPT_DIR/stage_libiosexec.c" ]] || \
+        die "missing stage libiosexec shim"
     plutil -lint "$SCRIPT_DIR/com.openai.codex.dopamine.bootstrap.plist" >/dev/null || \
         die "invalid stage SSH launch daemon"
 
@@ -241,9 +245,15 @@ build_ssh_stage() {
         "$stage_unsigned"
     zstd -dc "$BOOTSTRAP_ARCHIVE" | tar -xf - -C "$stage_extract"
     [[ -x "$stage_extract/var/jb/usr/sbin/sshd" && \
-       -x "$stage_extract/var/jb/usr/bin/ssh-keygen" ]] || \
+       -x "$stage_extract/var/jb/usr/bin/ssh-keygen" && \
+       -x "$stage_extract/var/jb/usr/bin/zsh" ]] || \
         die "SSH bootstrap payload is incomplete"
     ditto --noqtn "$stage_extract/var/jb" "$stage_payload/root"
+    xcrun --sdk iphoneos clang -arch arm64 \
+        -miphoneos-version-min=17.0 -Os -Wall -Wextra -Werror \
+        -dynamiclib -install_name @rpath/libiosexec.1.dylib \
+        "$SCRIPT_DIR/stage_libiosexec.c" -o "$stage_libiosexec"
+    ldid -S -Cadhoc "$stage_libiosexec"
     ldid -e "$stage_sshd" >"$stage_sshd_entitlements"
     plutil -lint "$stage_sshd_entitlements" >/dev/null || \
         die "could not preserve temporary sshd entitlements"
@@ -258,6 +268,14 @@ replacement = b"root\0Privilege separation user %s does not exist"
 if data.count(needle) != 1:
     raise SystemExit("temporary sshd privilege-separation marker is not unique")
 data[:] = data.replace(needle, replacement)
+
+# The Cryptex is read-only. Keep sshd's root-owned privilege-separation
+# directory in writable device storage instead of its embedded bootstrap.
+privsep_directory = b"/var/jb/var/empty\0"
+writable_privsep_directory = b"/var/tmp/cdx-priv\0"
+if data.count(privsep_directory) != 1:
+    raise SystemExit("temporary sshd privilege-separation path is not unique")
+data[:] = data.replace(privsep_directory, writable_privsep_directory)
 
 # This pinned Procursus sshd always chroots its pre-auth child.  A Cryptex
 # launch daemon cannot perform that operation on iOS, and this isolated stage
@@ -283,7 +301,14 @@ if data[sandbox_child_entry:sandbox_child_entry + 4] != expected_prologue:
 data[sandbox_child_entry:sandbox_child_entry + 4] = return_instruction
 path.write_bytes(data)
 PY
+    install_name_tool -rpath /var/jb/usr/lib @loader_path/../lib \
+        "$stage_sshd"
     ldid -S"$stage_sshd_entitlements" -Cadhoc "$stage_sshd"
+    # Keep the temporary account shell and its rootless libraries inside this
+    # Cryptex when a persistent /var/jb from an earlier run is still present.
+    install_name_tool -rpath /var/jb/usr/lib @loader_path/../lib \
+        "$stage_shell"
+    ldid -S -Cadhoc "$stage_shell"
     cp "$authorized_key" "$stage_payload/authorized_keys"
     ssh-keygen -q -t ed25519 -N '' -f "$stage_host_key"
     cp "$stage_host_key" "$stage_payload/host-key"

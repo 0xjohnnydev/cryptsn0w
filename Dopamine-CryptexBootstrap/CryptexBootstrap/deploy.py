@@ -512,7 +512,9 @@ def start_stage_handoff(
     handoff = subprocess.Popen(
         [
             "ssh", *options, "root@127.0.0.1",
-            "/private/var/tmp/codex-stage-ssh/cleanup --cleanup",
+            "stage_mount=${SHELL%/usr/local/share/codex-stage-ssh/root/usr/bin/zsh}; "
+            "exec \"$stage_mount/usr/local/bin/codex-dopamine-bootstrap\" "
+            "--cleanup",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
