@@ -5243,6 +5243,8 @@ static bool respring_sbinject_springboard(const char *reason) {
 static xpc_connection_t gSileoXpcListener;
 static pthread_mutex_t gPreferencesRespringLock = PTHREAD_MUTEX_INITIALIZER;
 static bool gPreferencesRespringPending;
+static pthread_mutex_t gSileoRespringLock = PTHREAD_MUTEX_INITIALIZER;
+static bool gSileoRespringPending;
 
 static void schedule_preferences_respring(void) {
     pthread_mutex_lock(&gPreferencesRespringLock);
@@ -5261,6 +5263,63 @@ static void schedule_preferences_respring(void) {
         pthread_mutex_lock(&gPreferencesRespringLock);
         gPreferencesRespringPending = false;
         pthread_mutex_unlock(&gPreferencesRespringLock);
+    });
+}
+
+static void schedule_sileo_respring(pid_t sileoPid,
+                                    NSString *expectedExecutable) {
+    pthread_mutex_lock(&gSileoRespringLock);
+    bool alreadyPending = gSileoRespringPending;
+    gSileoRespringPending = true;
+    pthread_mutex_unlock(&gSileoRespringLock);
+    if (alreadyPending) {
+        log_message("sileoRespringRequest coalesced=true pid=%d", sileoPid);
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool exited = false;
+        for (unsigned int attempt = 0; attempt < 100U; ++attempt) {
+            char path[CODEX_PROC_PIDPATH_MAX] = {0};
+            NSString *currentExecutable =
+                proc_pidpath(sileoPid, path, sizeof(path)) > 0
+                    ? [NSString stringWithUTF8String:path]
+                    : nil;
+            if (!executable_paths_match(expectedExecutable,
+                                        currentExecutable)) {
+                exited = true;
+                break;
+            }
+            usleep(10U * 1000U);
+        }
+        if (!exited) {
+            int signalStatus = kill(sileoPid, SIGTERM);
+            log_message("sileoRespringCallerExit pid=%d action=terminate "
+                        "status=%d error=%d",
+                        sileoPid, signalStatus,
+                        signalStatus == 0 ? 0 : errno);
+            for (unsigned int attempt = 0; attempt < 100U; ++attempt) {
+                char path[CODEX_PROC_PIDPATH_MAX] = {0};
+                NSString *currentExecutable =
+                    proc_pidpath(sileoPid, path, sizeof(path)) > 0
+                        ? [NSString stringWithUTF8String:path]
+                        : nil;
+                if (!executable_paths_match(expectedExecutable,
+                                            currentExecutable)) {
+                    exited = true;
+                    break;
+                }
+                usleep(10U * 1000U);
+            }
+        }
+        bool resprung = exited &&
+            respring_sbinject_springboard("sileo-button");
+        log_message("sileoRespringRequest pid=%d callerExited=%s result=%s",
+                    sileoPid, exited ? "true" : "false",
+                    resprung ? "success" : "failed");
+        pthread_mutex_lock(&gSileoRespringLock);
+        gSileoRespringPending = false;
+        pthread_mutex_unlock(&gSileoRespringLock);
     });
 }
 
@@ -5324,6 +5383,23 @@ static bool trollstore_settings_request_allowed(
         strcmp(arguments[1], "sbinject-settings") == 0;
 }
 
+static bool sileo_respring_request_allowed(
+    char *const arguments[], uint32_t argumentCount,
+    NSString *jailbreakRoot, const char *resolvedCommand) {
+    if (arguments == NULL || argumentCount != 2U ||
+        arguments[1] == NULL ||
+        strcmp(arguments[1], "--sbinject-respring") != 0 ||
+        jailbreakRoot.length == 0 || resolvedCommand == NULL ||
+        resolvedCommand[0] == '\0') {
+        return false;
+    }
+    NSString *expected = [jailbreakRoot
+        stringByAppendingPathComponent:
+            @"usr/libexec/codex-sileo-root-broker"];
+    NSString *resolved = [NSString stringWithUTF8String:resolvedCommand];
+    return executable_paths_match(expected, resolved);
+}
+
 static void handle_preferences_xpc_request(xpc_connection_t peer,
                                            xpc_object_t message,
                                            pid_t peerPid) {
@@ -5377,10 +5453,12 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
     }
     int32_t status = 126 << 8;
     bool accepted = false;
+    bool mainSileoClient = false;
     char peerPath[CODEX_PROC_PIDPATH_MAX] = {0};
     if (peerPid > 1 && proc_pidpath(peerPid, peerPath, sizeof(peerPath)) > 0) {
         NSString *path = [NSString stringWithUTF8String:peerPath];
-        bool sileoClient = executable_paths_match(expectedMain, path) ||
+        mainSileoClient = executable_paths_match(expectedMain, path);
+        bool sileoClient = mainSileoClient ||
                            executable_paths_match(expectedHelper, path) ||
                            (headlessSileoClient &&
                             executable_paths_match(kHeadlessSileoExecutable,
@@ -5507,16 +5585,23 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
              arguments, argumentCount, controlEnvironment,
              controlEnvironmentCount, descriptorNumbers, descriptorCount,
              resolved));
+    bool deferredSileoRespring = allowed && mainSileoClient &&
+        !managedHelperRequest && !headlessSileoClient &&
+        sileo_respring_request_allowed(
+            arguments, argumentCount, jailbreakRoot, resolved);
     log_message("sileoXpcBrokerRequestStart pid=%d accepted=%s valid=%s "
-                "allowed=%s command=%s",
+                "allowed=%s deferredRespring=%s command=%s",
                 peerPid, accepted ? "true" : "false",
                 valid ? "true" : "false", allowed ? "true" : "false",
+                deferredSileoRespring ? "true" : "false",
                 resolved[0] != '\0' ? resolved : "none");
     if (allowed) {
-        status = run_root_broker_command(
-            -1, -1, arguments, descriptors, descriptorNumbers,
-            descriptorCount, controlEnvironment,
-            controlEnvironmentCount, jailbreakRoot, resolved);
+        status = deferredSileoRespring
+            ? 0
+            : run_root_broker_command(
+                  -1, -1, arguments, descriptors, descriptorNumbers,
+                  descriptorCount, controlEnvironment,
+                  controlEnvironmentCount, jailbreakRoot, resolved);
         if (managedHelperRequest && WIFEXITED(status) &&
             WEXITSTATUS(status) == 0 &&
             !refresh_trollstore_container_applications(
@@ -5541,6 +5626,9 @@ static void handle_sileo_xpc_request(xpc_connection_t peer,
                 resolved[0] != '\0' ? resolved : "none",
                 status,
                 controlEnvironmentCount);
+    if (deferredSileoRespring) {
+        schedule_sileo_respring(peerPid, expectedMain);
+    }
 }
 
 static bool start_sileo_xpc_broker(NSString *registeredPath,
