@@ -51,8 +51,6 @@ does not contain a second mutable application bundle. APT pins the local
 
 The authenticated root broker accepts the bounded command shapes used by
 Sileo. Package archives are validated before the no-download APT transaction.
-Every Mach-O architecture must pass strict static signature validation before
-APT can install the archive or request a respring.
 Shell maintainer scripts use the rootless shell; Mach-O maintainers are wrapped
 through `codex-exec-worker --macho`. Install, remove, reinstall, and update all
 prepare the resulting tweak state. Sileo’s bottom-sheet action performs the
