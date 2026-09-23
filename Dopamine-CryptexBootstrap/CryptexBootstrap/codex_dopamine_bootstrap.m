@@ -52,7 +52,7 @@ extern int memorystatus_control(uint32_t command, int32_t pid, uint32_t flags,
 #define CODEX_MEMORYSTATUS_CMD_SET_JETSAM_HIGH_WATER_MARK 5
 #define CODEX_MEMORYSTATUS_CMD_SET_MEMLIMIT_PROPERTIES 7
 #define CODEX_MEMORYSTATUS_CMD_GET_MEMLIMIT_PROPERTIES 8
-#define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 64
+#define CODEX_BOOTSTRAP_MEMORY_LIMIT_MB 128
 
 typedef struct codex_memorystatus_memlimit_properties {
     int32_t memlimit_active;
@@ -2566,7 +2566,57 @@ typedef struct codex_payload_classification {
     bool contains_macho;
     bool contains_springboard_tweak;
     bool contains_ellekit_injector;
+    bool signatures_valid;
 } codex_payload_classification_t;
+
+typedef int32_t (*codex_sec_static_code_create_function)(
+    CFURLRef path, uint32_t flags, CFTypeRef *staticCode);
+typedef int32_t (*codex_sec_static_code_check_function)(
+    CFTypeRef staticCode, uint32_t flags, CFTypeRef requirement);
+
+static bool macho_signature_is_valid(NSString *path) {
+    static codex_sec_static_code_create_function createStaticCode;
+    static codex_sec_static_code_check_function checkStaticCode;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *security = dlopen(
+            "/System/Library/Frameworks/Security.framework/Security",
+            RTLD_LAZY | RTLD_LOCAL);
+        if (security != NULL) {
+            createStaticCode =
+                (codex_sec_static_code_create_function)dlsym(
+                    security, "SecStaticCodeCreateWithPath");
+            checkStaticCode =
+                (codex_sec_static_code_check_function)dlsym(
+                    security, "SecStaticCodeCheckValidity");
+        }
+    });
+    if (createStaticCode == NULL || checkStaticCode == NULL) {
+        log_message("sbinjectPackageSignature path=%s status=unavailable",
+                    [path UTF8String]);
+        return false;
+    }
+
+    CFTypeRef staticCode = NULL;
+    int32_t createStatus = createStaticCode(
+        (__bridge CFURLRef)[NSURL fileURLWithPath:path], 0, &staticCode);
+    // Validate every architecture and its executable page hashes. Do not allow
+    // certificate checks to use the network during an APT transaction.
+    const uint32_t validationFlags =
+        (1U << 0) | (1U << 4) | (1U << 29);
+    int32_t checkStatus = createStatus == 0 && staticCode != NULL
+        ? checkStaticCode(staticCode, validationFlags, NULL)
+        : createStatus;
+    if (staticCode != NULL) {
+        CFRelease(staticCode);
+    }
+    bool valid = createStatus == 0 && checkStatus == 0;
+    log_message("sbinjectPackageSignature path=%s createStatus=%d "
+                "checkStatus=%d valid=%s",
+                [path UTF8String], createStatus, checkStatus,
+                valid ? "true" : "false");
+    return valid;
+}
 
 static NSString *normalized_sbinject_payload_path(NSString *relativePath) {
     while ([relativePath hasPrefix:@"./"] || [relativePath hasPrefix:@"/"]) {
@@ -2607,7 +2657,9 @@ static bool relative_path_is_ellekit_injector(NSString *relativePath) {
 }
 
 static codex_payload_classification_t classify_payload(NSString *path) {
-    codex_payload_classification_t classification = {0};
+    codex_payload_classification_t classification = {
+        .signatures_valid = true,
+    };
     struct stat status;
     const char *fileSystemPath = [path fileSystemRepresentation];
     if (stat(fileSystemPath, &status) != 0) {
@@ -2615,6 +2667,10 @@ static codex_payload_classification_t classify_payload(NSString *path) {
     }
     if (S_ISREG(status.st_mode)) {
         classification.contains_macho = broker_command_is_macho(fileSystemPath);
+        if (classification.contains_macho) {
+            classification.signatures_valid =
+                macho_signature_is_valid(path);
+        }
         classification.contains_springboard_tweak =
             classification.contains_macho &&
             relative_path_is_springboard_tweak([path lastPathComponent]);
@@ -2633,11 +2689,13 @@ static codex_payload_classification_t classify_payload(NSString *path) {
         if (lstat([candidate fileSystemRepresentation], &status) == 0 &&
             S_ISREG(status.st_mode) &&
             broker_command_is_macho([candidate fileSystemRepresentation])) {
+            bool signatureValid = macho_signature_is_valid(candidate);
             bool springBoardTweak =
                 relative_path_is_springboard_tweak(relativePath);
             bool elleKitInjector =
                 relative_path_is_ellekit_injector(relativePath);
             classification.contains_macho = true;
+            classification.signatures_valid &= signatureValid;
             classification.contains_springboard_tweak |= springBoardTweak;
             classification.contains_ellekit_injector |= elleKitInjector;
         }
@@ -2841,8 +2899,16 @@ static bool sbinject_validate_deb_paths(NSArray<NSString *> *paths,
             ? classify_payload(staging)
             : (codex_payload_classification_t){0};
     bool containsMachO = classification.contains_macho;
+    bool signaturesValid =
+        !containsMachO || classification.signatures_valid;
     bool requiresSBInject = classification.contains_springboard_tweak ||
                             classification.contains_ellekit_injector;
+    if (success && !signaturesValid) {
+        log_message("sbinjectPackageAdmission=false reason=%s "
+                    "cause=invalid-macho-signature",
+                    reason);
+        success = false;
+    }
     bool elleKitAvailable =
         classification.contains_ellekit_injector ||
         access([kElleKitInjectorDylib fileSystemRepresentation], R_OK) == 0;
@@ -2898,6 +2964,7 @@ static bool sbinject_validate_deb_paths(NSArray<NSString *> *paths,
             @"Archives" : paths,
             @"ArchiveCount" : @(extracted),
             @"ContainsMachO" : @(containsMachO),
+            @"PayloadSignaturesValid" : @(signaturesValid),
             @"ContainsSpringBoardTweak" :
                 @(classification.contains_springboard_tweak),
             @"ContainsElleKitInjector" :
@@ -2926,11 +2993,13 @@ static bool sbinject_validate_deb_paths(NSArray<NSString *> *paths,
                     [[cleanupError description] UTF8String]);
     }
     log_message("sbinjectPackageResult reason=%s archives=%lu macho=%s "
+                "signaturesValid=%s "
                 "springBoardTweak=%s sbinjectAdmission=%s "
                 "admissionStatus=%d backend=sbinject-jit-v1 "
                 "dynamicTrustCache=false respringMarked=%s status=%s",
                 reason, (unsigned long)extracted,
                 containsMachO ? "true" : "false",
+                signaturesValid ? "true" : "false",
                 classification.contains_springboard_tweak ? "true" : "false",
                 sbinjectReady ? "true" : "false", admissionStatus,
                 respringMarked ? "true" : "false",
@@ -4511,6 +4580,7 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
         [registeredPath stringByAppendingPathComponent:@"Sileo"];
     log_message("sileoRootBrokerServing=true socketFd=%d", server);
     for (;;) {
+        @autoreleasepool {
         int client = accept(server, NULL, NULL);
         if (client < 0) {
             if (errno != EINTR) {
@@ -4593,6 +4663,7 @@ static void serve_sileo_broker(int server, NSString *registeredPath,
                     allowed ? "true" : "false",
                     resolved[0] != '\0' ? resolved : "none", status,
                     replied ? "true" : "false");
+        }
     }
 }
 
