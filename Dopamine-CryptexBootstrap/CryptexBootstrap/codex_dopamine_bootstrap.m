@@ -3545,6 +3545,117 @@ static NSArray<NSString *> *sbinject_deb_paths_from_arguments(
     return paths.array;
 }
 
+static NSArray<NSString *> *sbinject_cached_apt_install_archives(
+    char *const arguments[], NSString **errorText) {
+    bool installAction = false;
+    NSMutableOrderedSet<NSString *> *packages =
+        [NSMutableOrderedSet orderedSet];
+    for (NSUInteger index = 1;
+         index <= CODEX_ROOT_BROKER_MAX_ARGUMENTS &&
+         arguments[index] != NULL;
+         ++index) {
+        const char *argument = arguments[index];
+        if (strcmp(argument, "install") == 0 ||
+            strcmp(argument, "reinstall") == 0) {
+            installAction = true;
+            continue;
+        }
+        if (!installAction || argument[0] == '-') continue;
+        bool removal = false;
+        NSString *name = sbinject_package_name_from_spec(argument, &removal);
+        if (name != nil && !removal) [packages addObject:name];
+    }
+    NSString *archiveDirectory = @"/var/jb/var/cache/apt/archives";
+    NSError *directoryError = nil;
+    NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:archiveDirectory error:&directoryError];
+    if (entries == nil) {
+        if (![[NSFileManager defaultManager]
+                fileExistsAtPath:archiveDirectory]) {
+            return @[];
+        }
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"APT archive directory read failed: %@", directoryError];
+        }
+        return nil;
+    }
+    NSMutableArray<NSString *> *archives = [NSMutableArray array];
+    for (NSString *entry in entries) {
+        if ([[entry pathExtension] caseInsensitiveCompare:@"deb"] !=
+            NSOrderedSame) {
+            continue;
+        }
+        bool requested = false;
+        for (NSString *packageName in packages) {
+            if ([entry hasPrefix:
+                    [packageName stringByAppendingString:@"_"]]) {
+                requested = true;
+                break;
+            }
+        }
+        if (!requested) {
+            continue;
+        }
+        if (archives.count >= 128U) {
+            if (errorText != NULL) {
+                *errorText = @"too many authenticated APT archives";
+            }
+            return nil;
+        }
+        NSString *path =
+            [archiveDirectory stringByAppendingPathComponent:entry];
+        struct stat status;
+        if (lstat([path fileSystemRepresentation], &status) != 0 ||
+            !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+            status.st_nlink != 1 || status.st_size <= 0 ||
+            status.st_size > (off_t)(1024ULL * 1024ULL * 1024ULL) ||
+            (status.st_mode & 0022) != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"unsafe authenticated APT archive: %@", path];
+            }
+            return nil;
+        }
+        [archives addObject:path];
+    }
+    return archives;
+}
+
+static bool sbinject_move_apt_archives(
+    NSArray<NSString *> *archives, NSString *staging, bool restore,
+    NSString **errorText) {
+    NSUInteger moved = 0;
+    for (NSString *archive in archives) {
+        NSString *staged =
+            [staging stringByAppendingPathComponent:archive.lastPathComponent];
+        NSString *source = restore ? staged : archive;
+        NSString *destination = restore ? archive : staged;
+        if (rename([source fileSystemRepresentation],
+                   [destination fileSystemRepresentation]) != 0) {
+            int moveError = errno;
+            if (!restore) {
+                for (NSUInteger index = 0; index < moved; ++index) {
+                    NSString *prior = archives[index];
+                    NSString *priorStaged = [staging
+                        stringByAppendingPathComponent:prior.lastPathComponent];
+                    (void)rename([priorStaged fileSystemRepresentation],
+                                 [prior fileSystemRepresentation]);
+                }
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"APT archive %@ failed for %@: %s",
+                    restore ? @"restore" : @"staging",
+                    archive.lastPathComponent, strerror(moveError)];
+            }
+            return false;
+        }
+        ++moved;
+    }
+    return true;
+}
+
 static NSArray<NSString *> *sbinject_apt_removal_packages(
     char *const arguments[], bool *scanAllOut) {
     if (scanAllOut != NULL) {
@@ -3981,9 +4092,51 @@ static int32_t run_root_broker_command(
         : @[];
 
     if (aptCommand && aptDownloadMutation && !aptSimulation) {
+        NSString *cacheError = nil;
+        NSArray<NSString *> *preservedArchives =
+            sbinject_cached_apt_install_archives(arguments, &cacheError);
+        if (preservedArchives == nil) {
+            log_message("sileoRootBrokerAptCachePreserve=false command=%s "
+                        "error=%s",
+                        resolvedCommand,
+                        cacheError != nil
+                            ? [cacheError UTF8String] : "unknown");
+            return 73 << 8;
+        }
+        NSString *staging = nil;
+        if (preservedArchives.count != 0) {
+            char stagingTemplate[] =
+                "/var/jb/var/cache/sbinject-apt-preserve.XXXXXX";
+            char *stagingBytes = mkdtemp(stagingTemplate);
+            if (stagingBytes == NULL) {
+                return 73 << 8;
+            }
+            staging = [NSString stringWithUTF8String:stagingBytes];
+            if (!sbinject_move_apt_archives(
+                    preservedArchives, staging, false, &cacheError)) {
+                (void)rmdir([staging fileSystemRepresentation]);
+                log_message("sileoRootBrokerAptCachePreserve=false "
+                            "command=%s error=%s", resolvedCommand,
+                            [cacheError UTF8String]);
+                return 73 << 8;
+            }
+        }
         char *cleanArguments[] = {(char *)resolvedCommand, "clean", NULL};
         int cleanStatus = run_and_wait_bounded(
             resolvedCommand, cleanArguments, 30000);
+        bool restored = staging == nil || sbinject_move_apt_archives(
+            preservedArchives, staging, true, &cacheError);
+        if (restored && staging != nil) {
+            (void)rmdir([staging fileSystemRepresentation]);
+        }
+        log_message("sileoRootBrokerAptCachePreserve=%s command=%s "
+                    "archives=%lu error=%s",
+                    restored ? "true" : "false", resolvedCommand,
+                    (unsigned long)preservedArchives.count,
+                    cacheError != nil ? [cacheError UTF8String] : "none");
+        if (!restored) {
+            return 73 << 8;
+        }
         log_message("sileoRootBrokerAptCacheClean command=%s status=%d "
                     "transactionScoped=true",
                     resolvedCommand, cleanStatus);
