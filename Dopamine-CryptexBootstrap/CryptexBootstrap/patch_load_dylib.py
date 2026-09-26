@@ -156,8 +156,11 @@ def patch_slice(data: bytearray, offset: int, size: int, dylib: str) -> bool:
     _, _, _, file_type, command_count, command_bytes, _, _ = struct.unpack_from(
         f"{endian}IIIIIIII", data, offset
     )
-    if file_type != 2:  # MH_EXECUTE
-        raise MachOError(f"Mach-O slice is not an executable: {file_type}")
+    if file_type not in {2, 6}:  # MH_EXECUTE or MH_DYLIB
+        raise MachOError(
+            f"Mach-O slice is not an executable or dynamic library: "
+            f"{file_type}"
+        )
     commands_start = offset + MACH_HEADER_64_SIZE
     commands_end = commands_start + command_bytes
     slice_end = offset + size

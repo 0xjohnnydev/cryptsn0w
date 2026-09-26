@@ -276,6 +276,15 @@ static void record_tweak_image(const struct mach_header *header,
     destination->name[length] = '\0';
     atomic_store_explicit(&g_tweak_image_count, count + 1U,
                           memory_order_release);
+    int descriptor = open("/var/mobile/.sbinject-generalhook.log",
+                          O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC |
+                              O_NOFOLLOW,
+                          0600);
+    if (descriptor >= 0) {
+        (void)dprintf(descriptor, "pid=%d stage=tweak-image name=%s\n",
+                      getpid(), destination->name);
+        close(descriptor);
+    }
 }
 
 static const char *signal_tweak_name(uintptr_t address) {

@@ -14,19 +14,25 @@ static NSString *const kOptionKeys[] = {
     @"BlockExceptionPorts",
     @"KeychainIdentity",
     @"LegacySDK",
+    @"TweakInjection",
 };
 
 static NSString *const kOptionNames[] = {
     @"Crashlytics workaround",
     @"Keychain compatibility",
     @"iOS 18.5 compatibility",
+    @"Tweak injection",
 };
 
 static NSString *const kOptionDetails[] = {
     @"Stops Crashlytics from taking control of the app exception ports.",
     @"Gives the shared launcher a default keychain identity.",
     @"Uses pre-iOS-26 Foundation behavior for older apps.",
+    @"Loads enabled jailbreak tweaks before this app starts.",
 };
+
+static const NSInteger kOptionCount =
+    sizeof(kOptionKeys) / sizeof(kOptionKeys[0]);
 
 static NSDictionary *managed_settings(void) {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:
@@ -38,7 +44,9 @@ static BOOL option_enabled(NSString *bundleIdentifier, NSString *key) {
     NSDictionary *entry = managed_settings()[bundleIdentifier];
     NSNumber *value = [entry isKindOfClass:NSDictionary.class]
         ? entry[key] : nil;
-    return [value isKindOfClass:NSNumber.class] ? value.boolValue : YES;
+    BOOL defaultValue = ![key isEqualToString:@"TweakInjection"];
+    return [value isKindOfClass:NSNumber.class]
+        ? value.boolValue : defaultValue;
 }
 
 @interface CodexManagedAppSettingsController : UITableViewController
@@ -75,7 +83,7 @@ static BOOL option_enabled(NSString *bundleIdentifier, NSString *key) {
  numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     (void)section;
-    return 3;
+    return kOptionCount;
 }
 
 - (NSString *)tableView:(UITableView *)tableView
@@ -117,7 +125,7 @@ static BOOL option_enabled(NSString *bundleIdentifier, NSString *key) {
 
 - (void)optionChanged:(UISwitch *)toggle {
     NSInteger row = toggle.tag;
-    if (row < 0 || row >= 3) return;
+    if (row < 0 || row >= kOptionCount) return;
     BOOL requested = toggle.on;
     toggle.enabled = NO;
     NSString *bundleIdentifier = self.bundleIdentifier;
