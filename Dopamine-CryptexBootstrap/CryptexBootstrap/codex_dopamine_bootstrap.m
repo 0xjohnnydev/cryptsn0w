@@ -124,6 +124,10 @@ static const char *const kFailurePath =
 static const char *const kVarJb = "/var/jb";
 static NSString *const kInstallerIdentifier =
     @"com.openai.codex.dopamine.bootstrap";
+static NSString *const kPersistentBackupDirectory =
+    @"/private/var/db/com.openai.codex.dopamine.bootstrap";
+static NSString *const kPersistentRootArchive =
+    @"/private/var/db/com.openai.codex.dopamine.bootstrap/root.tar";
 #ifndef CODEX_SILEO_BUNDLE_IDENTIFIER
 #define CODEX_SILEO_BUNDLE_IDENTIFIER @"org.coolstar.SileoStore"
 #endif
@@ -1051,6 +1055,59 @@ static bool path_is_absent(const char *path) {
     return errno == ENOENT;
 }
 
+static bool exact_hex_component(NSString *value, NSUInteger length) {
+    if (value.length != length) {
+        return false;
+    }
+    static NSCharacterSet *invalidHexCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        invalidHexCharacters = [[NSCharacterSet
+            characterSetWithCharactersInString:@"0123456789abcdefABCDEF"]
+            invertedSet];
+    });
+    return [value rangeOfCharacterFromSet:invalidHexCharacters].location ==
+           NSNotFound;
+}
+
+static NSString *stale_managed_var_jb_target(void) {
+    struct stat linkStatus;
+    if (lstat(kVarJb, &linkStatus) != 0 ||
+        !S_ISLNK(linkStatus.st_mode)) {
+        return nil;
+    }
+
+    char targetBytes[PATH_MAX + 1] = {0};
+    ssize_t targetLength = readlink(
+        kVarJb, targetBytes, sizeof(targetBytes) - 1U);
+    if (targetLength <= 0 ||
+        (size_t)targetLength >= sizeof(targetBytes)) {
+        return nil;
+    }
+    targetBytes[targetLength] = '\0';
+    NSString *target = [NSString stringWithUTF8String:targetBytes];
+    NSArray<NSString *> *components = [target pathComponents];
+    if (target == nil || components.count != 6U ||
+        ![components[0] isEqual:@"/"] ||
+        ![components[1] isEqual:@"private"] ||
+        ![components[2] isEqual:@"preboot"] ||
+        !exact_hex_component(components[3], 96U) ||
+        ![components[4] hasPrefix:@"dopamine-"] ||
+        components[4].length != 15U ||
+        !exact_hex_component([components[4] substringFromIndex:9U], 6U) ||
+        ![components[5] isEqual:@"procursus"] ||
+        ![[target stringByStandardizingPath] isEqual:target]) {
+        return nil;
+    }
+
+    struct stat targetStatus;
+    if (lstat([target fileSystemRepresentation], &targetStatus) == 0 ||
+        errno != ENOENT) {
+        return nil;
+    }
+    return target;
+}
+
 static bool apt_package_lists_are_populated(void) {
     NSError *error = nil;
     NSArray<NSString *> *entries = [[NSFileManager defaultManager]
@@ -1090,6 +1147,242 @@ static NSString *managed_jailbreak_root(void) {
         return nil;
     }
     return resolved;
+}
+
+static bool persistent_backup_directory_is_safe(NSString **errorText) {
+    struct stat status;
+    if (lstat([kPersistentBackupDirectory fileSystemRepresentation],
+              &status) == 0) {
+        bool safe = S_ISDIR(status.st_mode) && !S_ISLNK(status.st_mode) &&
+                    status.st_uid == 0 && status.st_gid == 0 &&
+                    (status.st_mode & 07777) == 0700;
+        if (!safe && errorText != NULL) {
+            *errorText = @"persistent backup directory has unsafe metadata";
+        }
+        return safe;
+    }
+    if (errno != ENOENT) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent backup directory status failed: %s",
+                strerror(errno)];
+        }
+        return false;
+    }
+    NSError *error = nil;
+    if (![[NSFileManager defaultManager]
+            createDirectoryAtPath:kPersistentBackupDirectory
+      withIntermediateDirectories:NO
+                       attributes:@{
+                           NSFilePosixPermissions : @0700,
+                           NSFileOwnerAccountID : @0,
+                           NSFileGroupOwnerAccountID : @0,
+                       }
+                            error:&error] ||
+        lstat([kPersistentBackupDirectory fileSystemRepresentation],
+              &status) != 0 ||
+        !S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_uid != 0 || status.st_gid != 0 ||
+        (status.st_mode & 07777) != 0700) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent backup directory creation failed: %@",
+                error != nil ? error : @"metadata validation failed"];
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool root_archive_is_valid(NSString *archive, NSString *tarExecutable,
+                                  NSString **errorText) {
+    struct stat status;
+    if (lstat([archive fileSystemRepresentation], &status) != 0) {
+        if (errno == ENOENT) {
+            return false;
+        }
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root archive status failed: %s",
+                strerror(errno)];
+        }
+        return false;
+    }
+    bool safe = S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode) &&
+                status.st_nlink == 1 && status.st_uid == 0 &&
+                status.st_gid == 0 && (status.st_mode & 07777) == 0600 &&
+                status.st_size >= 1024 &&
+                status.st_size <= (off_t)(16ULL * 1024ULL * 1024ULL * 1024ULL);
+    if (!safe) {
+        if (errorText != NULL) {
+            *errorText = @"persistent root archive has unsafe metadata";
+        }
+        return false;
+    }
+
+    int nullDescriptor = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (nullDescriptor < 0) {
+        if (errorText != NULL) {
+            *errorText = @"could not open /dev/null for archive validation";
+        }
+        return false;
+    }
+    char *arguments[] = {
+        (char *)[tarExecutable fileSystemRepresentation], "-tf",
+        (char *)[archive fileSystemRepresentation], NULL};
+    int archiveStatus = run_and_wait_bounded_to_fd(
+        arguments[0], arguments, 120000, nullDescriptor);
+    close(nullDescriptor);
+    if (archiveStatus != 0) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root archive validation exited %d",
+                archiveStatus];
+        }
+        return false;
+    }
+    return true;
+}
+
+static NSString *persistent_root_archive(NSString *tarExecutable,
+                                         NSString **errorText) {
+    if (errorText != NULL) {
+        *errorText = nil;
+    }
+    struct stat status;
+    if (lstat([kPersistentRootArchive fileSystemRepresentation], &status) !=
+        0) {
+        if (errno != ENOENT && errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root archive status failed: %s",
+                strerror(errno)];
+        }
+        return nil;
+    }
+    if (!persistent_backup_directory_is_safe(errorText) ||
+        !root_archive_is_valid(kPersistentRootArchive, tarExecutable,
+                               errorText)) {
+        return nil;
+    }
+    return kPersistentRootArchive;
+}
+
+static bool create_persistent_root_backup(NSString *jailbreakRoot,
+                                          NSString **errorText) {
+    NSString *managedRoot = managed_jailbreak_root();
+    if (managedRoot == nil || ![managedRoot isEqual:jailbreakRoot]) {
+        if (errorText != NULL) {
+            *errorText = @"persistent backup refused an unmanaged root";
+        }
+        return false;
+    }
+    if (!persistent_backup_directory_is_safe(errorText)) {
+        return false;
+    }
+
+    NSString *tarExecutable =
+        [jailbreakRoot stringByAppendingPathComponent:@"usr/bin/tar"];
+    NSString *temporary = [kPersistentBackupDirectory
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@".root-%@.tar",
+                                       [[NSUUID UUID] UUIDString]]];
+    char *arguments[] = {
+        (char *)[tarExecutable fileSystemRepresentation], "-cpf",
+        (char *)[temporary fileSystemRepresentation],
+        "--exclude=./.codex-cache", "--exclude=./tmp",
+        "--exclude=./var/run", "--exclude=./var/tmp",
+        "--exclude=./var/cache/apt/archives/partial", "-C",
+        (char *)[jailbreakRoot fileSystemRepresentation], ".", NULL};
+    int backupStatus = run_and_wait_bounded(
+        arguments[0], arguments, 300000);
+    if (backupStatus != 0 ||
+        chown([temporary fileSystemRepresentation], 0, 0) != 0 ||
+        chmod([temporary fileSystemRepresentation], 0600) != 0) {
+        int savedError = errno;
+        (void)unlink([temporary fileSystemRepresentation]);
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root backup failed: status=%d error=%s",
+                backupStatus, strerror(savedError)];
+        }
+        return false;
+    }
+
+    NSString *validationError = nil;
+    if (!root_archive_is_valid(temporary, tarExecutable,
+                               &validationError)) {
+        (void)unlink([temporary fileSystemRepresentation]);
+        if (errorText != NULL) {
+            *errorText = validationError;
+        }
+        return false;
+    }
+    int archiveDescriptor = open([temporary fileSystemRepresentation],
+                                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool synced = archiveDescriptor >= 0 && fsync(archiveDescriptor) == 0;
+    if (archiveDescriptor >= 0) {
+        close(archiveDescriptor);
+    }
+    if (!synced ||
+        rename([temporary fileSystemRepresentation],
+               [kPersistentRootArchive fileSystemRepresentation]) != 0) {
+        int savedError = errno;
+        (void)unlink([temporary fileSystemRepresentation]);
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root backup activation failed: %s",
+                strerror(savedError)];
+        }
+        return false;
+    }
+    int directoryDescriptor = open(
+        [kPersistentBackupDirectory fileSystemRepresentation],
+        O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (directoryDescriptor >= 0) {
+        (void)fsync(directoryDescriptor);
+        close(directoryDescriptor);
+    }
+    NSString *archiveHash = sha256_for_file(kPersistentRootArchive);
+    log_message("persistentRootBackup=true path=%s sha256=%s",
+                [kPersistentRootArchive UTF8String],
+                archiveHash != nil ? [archiveHash UTF8String] : "unknown");
+    return true;
+}
+
+static bool restore_persistent_root_backup(
+    NSString *archive, NSString *tarExecutable, NSString *destination,
+    NSString *priorRoot, NSString **errorText) {
+    char *arguments[] = {
+        (char *)[tarExecutable fileSystemRepresentation], "-xpf",
+        (char *)[archive fileSystemRepresentation], "-C",
+        (char *)[destination fileSystemRepresentation], NULL};
+    int restoreStatus = run_and_wait_bounded(
+        arguments[0], arguments, 300000);
+    NSString *manifestPath = [destination
+        stringByAppendingPathComponent:@".codex-cryptex-bootstrap.plist"];
+    NSDictionary *manifest = [NSDictionary
+        dictionaryWithContentsOfFile:manifestPath];
+    NSString *priorRandomizedRoot =
+        [priorRoot stringByDeletingLastPathComponent];
+    bool manifestValid =
+        restoreStatus == 0 &&
+        [manifest[@"Installer"] isEqual:kInstallerIdentifier] &&
+        [manifest[@"JailbreakRoot"] isEqual:priorRoot] &&
+        [manifest[@"RandomizedRoot"] isEqual:priorRandomizedRoot] &&
+        [manifest[@"VarJbCreated"] isEqual:@YES];
+    if (!manifestValid) {
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"persistent root restore validation failed: status=%d",
+                restoreStatus];
+        }
+        return false;
+    }
+    log_message("persistentRootRestored=true archive=%s priorRoot=%s "
+                "destination=%s",
+                [archive UTF8String], [priorRoot UTF8String],
+                [destination UTF8String]);
+    return true;
 }
 
 static bool uninstall_managed_jailbreak_root(NSString *activePreboot,
@@ -4690,6 +4983,15 @@ static int32_t run_root_broker_command(
                         ? [[cleanupError description] UTF8String]
                         : "none");
     }
+    if (packageMutation && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        NSString *backupError = nil;
+        bool backedUp = create_persistent_root_backup(jailbreakRoot,
+                                                       &backupError);
+        log_message("sileoRootBrokerPersistentBackup=%s command=%s error=%s",
+                    backedUp ? "true" : "false", resolvedCommand,
+                    backupError != nil
+                        ? [[backupError description] UTF8String] : "none");
+    }
     return status;
 }
 
@@ -8058,8 +8360,14 @@ int main(int argc, char *argv[]) {
         }
         NSString *destinationProcursus = managed_jailbreak_root();
         BOOL repairMode = destinationProcursus != nil;
+        NSString *staleVarJbTarget = nil;
         if (!path_is_absent(kVarJb) && !repairMode) {
-            return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            staleVarJbTarget = stale_managed_var_jb_target();
+            if (staleVarJbTarget == nil) {
+                return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            }
+            log_message("staleManagedVarJbDetected=true target=%s",
+                        [staleVarJbTarget UTF8String]);
         }
         log_message("mode=%s", repairMode ? "registration-repair"
                                            : "fresh-bootstrap");
@@ -8092,6 +8400,8 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:@"hookkit.deb"];
         NSString *sourceHookKitGum =
             [payloadRoot stringByAppendingPathComponent:@"hookkit-gum.deb"];
+        NSString *sourceAltList =
+            [payloadRoot stringByAppendingPathComponent:@"altlist.deb"];
         NSString *sourceOpenSSHClient =
             [payloadRoot stringByAppendingPathComponent:@"openssh-client.deb"];
         NSString *sourceOpenSSHServer =
@@ -8126,6 +8436,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceTrustedHookKitGumRoot =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/hookkit-gum-root/var/jb"];
+        NSString *sourceTrustedAltListRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/altlist-root/var/jb"];
         NSString *sourceTrustedLdid =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ldid-root/var/jb/usr/bin/ldid"];
@@ -8258,6 +8571,7 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceHookKit] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceHookKitGum] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceAltList] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceOpenSSHClient] ||
             ![[NSFileManager defaultManager]
@@ -8289,6 +8603,10 @@ int main(int argc, char *argv[]) {
             !isDirectory ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedHookKitGumRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedAltListRoot
                      isDirectory:&isDirectory] ||
             !isDirectory ||
             ![[NSFileManager defaultManager]
@@ -8506,6 +8824,16 @@ int main(int argc, char *argv[]) {
                 log_message("cleanInstallAlreadyApplied=true token=%s",
                             [cleanInstallToken UTF8String]);
             } else {
+                NSString *backupError = nil;
+                if (!create_persistent_root_backup(destinationProcursus,
+                                                   &backupError)) {
+                    return fail(
+                        [NSString stringWithFormat:
+                                      @"clean install backup failed: %@",
+                                      backupError != nil
+                                          ? backupError : @"unknown error"],
+                        nil);
+                }
                 NSString *uninstallError = nil;
                 if (!uninstall_managed_jailbreak_root(activePreboot,
                                                        &uninstallError)) {
@@ -8516,6 +8844,34 @@ int main(int argc, char *argv[]) {
                 log_message("cleanInstallReset=true token=%s",
                             [cleanInstallToken UTF8String]);
             }
+        }
+
+        NSString *persistentArchive = nil;
+        if (staleVarJbTarget != nil) {
+            NSString *archiveError = nil;
+            NSString *sourceTar =
+                [sourceProcursus stringByAppendingPathComponent:@"usr/bin/tar"];
+            persistentArchive = persistent_root_archive(sourceTar,
+                                                        &archiveError);
+            if (archiveError != nil) {
+                return fail(archiveError, nil);
+            }
+            if (persistentArchive == nil) {
+                return fail(@"old jailbreak root is missing and no persistent "
+                             "backup is available; refusing a fresh reset",
+                            nil);
+            }
+            if (unlink(kVarJb) != 0) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"stale /var/jb removal failed: %s",
+                                  strerror(errno)],
+                    nil);
+            }
+            log_message("staleManagedVarJbRemoved=true target=%s "
+                        "persistentBackup=%s",
+                        [staleVarJbTarget UTF8String],
+                        "available");
         }
 
         NSString *randomizedRoot =
@@ -8556,6 +8912,21 @@ int main(int argc, char *argv[]) {
                     [NSString stringWithFormat:@"bootstrap copy failed: %@",
                                                copy_error],
                     randomizedRoot);
+            }
+            if (persistentArchive != nil) {
+                NSString *restoreError = nil;
+                NSString *sourceTar = [sourceProcursus
+                    stringByAppendingPathComponent:@"usr/bin/tar"];
+                if (!restore_persistent_root_backup(
+                        persistentArchive, sourceTar,
+                        destinationProcursus, staleVarJbTarget,
+                        &restoreError)) {
+                    [[NSFileManager defaultManager]
+                        removeItemAtPath:randomizedRoot error:nil];
+                    (void)symlink(
+                        [staleVarJbTarget fileSystemRepresentation], kVarJb);
+                    return fail(restoreError, nil);
+                }
             }
             NSString *cachedSileo =
                 [destinationProcursus stringByAppendingPathComponent:
@@ -9271,17 +9642,15 @@ int main(int argc, char *argv[]) {
                     "version=1.2 files=%lu dynamicTrustCache=false",
                     (unsigned long)trustedElleKitFiles.count);
 
-        // Keep an installed Shadow 4.0.1 runtime byte-identical to the valid
-        // arm64e signatures in this Cryptex trust cache. Do not add Shadow to
-        // a device that did not already request the package.
-        bool shadowRuntimeRequested =
-            dpkg_package_version_is_installed(@"me.jjolano.shadow", @"4.0.1");
-        if (shadowRuntimeRequested) {
+        // Install the pinned Shadow 4.0.1 package and keep its runtime
+        // byte-identical to the signatures in this Cryptex trust cache.
+        {
             char *shadowDpkgArguments[] = {
                 "/var/jb/usr/bin/dpkg", "--force-downgrade", "-i",
                 (char *)[sourceLibSandy fileSystemRepresentation],
                 (char *)[sourceHookKit fileSystemRepresentation],
                 (char *)[sourceHookKitGum fileSystemRepresentation],
+                (char *)[sourceAltList fileSystemRepresentation],
                 (char *)[sourceShadow fileSystemRepresentation], NULL};
             int shadowDpkgStatus = run_and_wait_bounded(
                 shadowDpkgArguments[0], shadowDpkgArguments, 90000);
@@ -9335,6 +9704,10 @@ int main(int argc, char *argv[]) {
                 @{ @"source" : [sourceTrustedHookKitGumRoot
                         stringByAppendingPathComponent:@"usr/lib/HKGum.dylib"],
                    @"path" : @"usr/lib/HKGum.dylib" },
+                @{ @"source" : [sourceTrustedAltListRoot
+                        stringByAppendingPathComponent:
+                            @"Library/Frameworks/AltList.framework/AltList"],
+                   @"path" : @"Library/Frameworks/AltList.framework/AltList" },
             ];
             bool shadowPayloadExact = shadowDpkgStatus == 0 &&
                 dpkg_package_version_is_installed(
@@ -9343,6 +9716,8 @@ int main(int argc, char *argv[]) {
                     @"me.jjolano.fmwk.hookkit", @"3.0.5-1") &&
                 dpkg_package_version_is_installed(
                     @"me.jjolano.fmwk.hookkit.gum", @"3.0.5-1") &&
+                dpkg_package_version_is_installed(
+                    @"com.opa334.altlist", @"1.0.11") &&
                 dpkg_package_version_is_installed(
                     @"me.jjolano.shadow", @"4.0.1");
             for (NSDictionary *entry in trustedShadowFiles) {
@@ -9364,8 +9739,6 @@ int main(int argc, char *argv[]) {
                         "package=me.jjolano.shadow version=4.0.1 files=%lu "
                         "dynamicTrustCache=false",
                         (unsigned long)trustedShadowFiles.count);
-        } else {
-            log_message("shadowFixedTrustReady=not-requested version=4.0.1");
         }
 
         // TrollStore Lite's helper is JIT-loaded, but its nested ldid spawn is
@@ -10163,6 +10536,20 @@ int main(int argc, char *argv[]) {
             close(broker);
             (void)unlink([brokerPath fileSystemRepresentation]);
             return fail(@"could not update rollback manifest", nil);
+        }
+
+        NSString *persistentBackupError = nil;
+        if (!create_persistent_root_backup(destinationProcursus,
+                                           &persistentBackupError)) {
+            close(broker);
+            (void)unlink([brokerPath fileSystemRepresentation]);
+            return fail(
+                [NSString stringWithFormat:
+                              @"persistent root backup failed: %@",
+                              persistentBackupError != nil
+                                  ? persistentBackupError
+                                  : @"unknown error"],
+                nil);
         }
 
         NSString *sbinjectJitterdError = nil;

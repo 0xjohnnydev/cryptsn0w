@@ -30,6 +30,8 @@ HOOKKIT_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-
 HOOKKIT_SHA256=cab797601e64be87ba88f93fe536293af2d20750e8da84d32449df97824e435a
 HOOKKIT_GUM_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-rootless-gum.deb
 HOOKKIT_GUM_SHA256=619e245d1590609a9ad63cf2fde8b69b92c5d158e4ca2af09128b99569944738
+ALTLIST_URL=https://raw.githubusercontent.com/opa334/opa334.github.io/86d057401672b119d363c3e43c9eb5a0d8a40e2f/debs/com.opa334.altlist_1.0.11_iphoneos-arm64.deb
+ALTLIST_SHA256=5835a6b0eacd5d99d272b3f74a744b28b1c4c16ada03aade36d0a636bca5e1f0
 SHADOW_URL=https://raw.githubusercontent.com/0xjohnnydev/beta/1d3cda4bb1ac40c09251c198ce3bf5f34832c6d8/debs/me.jjolano.shadow_4.0.1_iphoneos-arm64.deb
 SHADOW_SHA256=a9d6ce36b0fe6d688ba764cf7abf7f47e9fc973a1663bd0daf2c8d3e2ed2a1c9
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
@@ -62,6 +64,7 @@ PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.3.3_iphoneos-arm64.deb"
 LIBSANDY_DEB="$CACHE_DIR/libsandy_1.1.6-4_iphoneos-arm64.deb"
 HOOKKIT_DEB="$CACHE_DIR/hookkit_3.0.5-1_iphoneos-arm64.deb"
 HOOKKIT_GUM_DEB="$CACHE_DIR/hookkit-gum_3.0.5-1_iphoneos-arm64.deb"
+ALTLIST_DEB="$CACHE_DIR/altlist_1.0.11_iphoneos-arm64.deb"
 SHADOW_DEB="$CACHE_DIR/shadow_4.0.1_iphoneos-arm64.deb"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
@@ -93,6 +96,7 @@ EMBEDDED_SHADOW_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/shadow.deb"
 EMBEDDED_LIBSANDY_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/libsandy.deb"
 EMBEDDED_HOOKKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/hookkit.deb"
 EMBEDDED_HOOKKIT_GUM_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/hookkit-gum.deb"
+EMBEDDED_ALTLIST_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/altlist.deb"
 EMBEDDED_OPENSSH_CLIENT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-client.deb"
 EMBEDDED_OPENSSH_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-server.deb"
 EMBEDDED_OPENSSH_SFTP_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-sftp-server.deb"
@@ -106,6 +110,7 @@ TRUSTED_SHADOW_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/shadow-
 TRUSTED_LIBSANDY_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/libsandy-root"
 TRUSTED_HOOKKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/hookkit-root"
 TRUSTED_HOOKKIT_GUM_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/hookkit-gum-root"
+TRUSTED_ALTLIST_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/altlist-root"
 SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
 SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
 SILEO_ASSET_INFO="$WORK_DIR/sileo-asset-info.json"
@@ -177,6 +182,7 @@ SHADOW_PACKAGE_ROOT="$WORK_DIR/shadow-package"
 LIBSANDY_PACKAGE_ROOT="$WORK_DIR/libsandy-package"
 HOOKKIT_PACKAGE_ROOT="$WORK_DIR/hookkit-package"
 HOOKKIT_GUM_PACKAGE_ROOT="$WORK_DIR/hookkit-gum-package"
+ALTLIST_PACKAGE_ROOT="$WORK_DIR/altlist-package"
 OPENSSH_PACKAGE_ROOT="$WORK_DIR/openssh-package"
 LDID_PACKAGE_ROOT="$WORK_DIR/ldid-package"
 LIBPLIST_PACKAGE_ROOT="$WORK_DIR/libplist-package"
@@ -185,6 +191,7 @@ REPACKED_SHADOW="$WORK_DIR/shadow.cryptex-signed.deb"
 REPACKED_LIBSANDY="$WORK_DIR/libsandy.cryptex-signed.deb"
 REPACKED_HOOKKIT="$WORK_DIR/hookkit.cryptex-signed.deb"
 REPACKED_HOOKKIT_GUM="$WORK_DIR/hookkit-gum.cryptex-signed.deb"
+REPACKED_ALTLIST="$WORK_DIR/altlist.cryptex-signed.deb"
 REPACKED_LDID="$WORK_DIR/ldid.cryptex-signed.deb"
 REPACKED_LIBPLIST="$WORK_DIR/libplist.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
@@ -404,6 +411,7 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 fetch_pinned "$LIBSANDY_URL" "$LIBSANDY_SHA256" "$LIBSANDY_DEB"
 fetch_pinned "$HOOKKIT_URL" "$HOOKKIT_SHA256" "$HOOKKIT_DEB"
 fetch_pinned "$HOOKKIT_GUM_URL" "$HOOKKIT_GUM_SHA256" "$HOOKKIT_GUM_DEB"
+fetch_pinned "$ALTLIST_URL" "$ALTLIST_SHA256" "$ALTLIST_DEB"
 fetch_pinned "$SHADOW_URL" "$SHADOW_SHA256" "$SHADOW_DEB"
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
@@ -412,12 +420,14 @@ zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
     "$SHADOW_PACKAGE_ROOT" "$LIBSANDY_PACKAGE_ROOT" \
     "$HOOKKIT_PACKAGE_ROOT" "$HOOKKIT_GUM_PACKAGE_ROOT" \
+    "$ALTLIST_PACKAGE_ROOT" \
     "$OPENSSH_PACKAGE_ROOT" "$LDID_PACKAGE_ROOT" \
     "$LIBPLIST_PACKAGE_ROOT" "$LDID_SOURCE_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
     "$REPACKED_ELLEKIT" "$REPACKED_SHADOW" "$REPACKED_LIBSANDY" \
     "$REPACKED_HOOKKIT" "$REPACKED_HOOKKIT_GUM" \
+    "$REPACKED_ALTLIST" \
     "$REPACKED_LDID" "$REPACKED_LIBPLIST" \
     "$TRUSTED_RUNTIME_CDHASHES" \
     "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_ASSET_INFO" \
@@ -440,6 +450,7 @@ mkdir -p \
     "$TRUSTED_LIBSANDY_ROOT" \
     "$TRUSTED_HOOKKIT_ROOT" \
     "$TRUSTED_HOOKKIT_GUM_ROOT" \
+    "$TRUSTED_ALTLIST_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
     "$LDID_SOURCE_ROOT" \
     "$PACKAGE_ROOT" \
@@ -537,10 +548,15 @@ done
    "$(dpkg-deb -f "$HOOKKIT_GUM_DEB" Version)" == 3.0.5-1 && \
    "$(dpkg-deb -f "$HOOKKIT_GUM_DEB" Architecture)" == \
        iphoneos-arm64 ]] || die "pinned HookKit gum package identity changed"
+[[ "$(dpkg-deb -f "$ALTLIST_DEB" Package)" == com.opa334.altlist && \
+   "$(dpkg-deb -f "$ALTLIST_DEB" Version)" == 1.0.11 && \
+   "$(dpkg-deb -f "$ALTLIST_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned AltList package identity changed"
 dpkg-deb -R "$SHADOW_DEB" "$SHADOW_PACKAGE_ROOT"
 dpkg-deb -R "$LIBSANDY_DEB" "$LIBSANDY_PACKAGE_ROOT"
 dpkg-deb -R "$HOOKKIT_DEB" "$HOOKKIT_PACKAGE_ROOT"
 dpkg-deb -R "$HOOKKIT_GUM_DEB" "$HOOKKIT_GUM_PACKAGE_ROOT"
+dpkg-deb -R "$ALTLIST_DEB" "$ALTLIST_PACKAGE_ROOT"
 SHADOW_CORE="$SHADOW_PACKAGE_ROOT/var/jb/usr/lib/ShadowCore.dylib"
 SHADOW_PRIVATE_SANDY="$SHADOW_PACKAGE_ROOT/var/jb/usr/lib/s.dylib"
 cp "$LIBSANDY_PACKAGE_ROOT/var/jb/usr/lib/libsandy.dylib" \
@@ -561,8 +577,9 @@ while IFS= read -r -d '' candidate; do
     fi
 done < <(find "$SHADOW_PACKAGE_ROOT" "$LIBSANDY_PACKAGE_ROOT" \
     "$HOOKKIT_PACKAGE_ROOT" "$HOOKKIT_GUM_PACKAGE_ROOT" \
+    "$ALTLIST_PACKAGE_ROOT" \
     -type f -print0)
-(( ${#shadow_package_machos} >= 11 )) || \
+(( ${#shadow_package_machos} >= 12 )) || \
     die "pinned Shadow runtime has an incomplete Mach-O set"
 for candidate in "${shadow_package_machos[@]}"; do
     codesign --force --sign - --timestamp=none --pagesize 4096 \
@@ -579,16 +596,21 @@ dpkg-deb --root-owner-group -b "$HOOKKIT_PACKAGE_ROOT" \
     "$REPACKED_HOOKKIT" >/dev/null
 dpkg-deb --root-owner-group -b "$HOOKKIT_GUM_PACKAGE_ROOT" \
     "$REPACKED_HOOKKIT_GUM" >/dev/null
+dpkg-deb --root-owner-group -b "$ALTLIST_PACKAGE_ROOT" \
+    "$REPACKED_ALTLIST" >/dev/null
 cp "$REPACKED_SHADOW" "$EMBEDDED_SHADOW_DEB"
 cp "$REPACKED_LIBSANDY" "$EMBEDDED_LIBSANDY_DEB"
 cp "$REPACKED_HOOKKIT" "$EMBEDDED_HOOKKIT_DEB"
 cp "$REPACKED_HOOKKIT_GUM" "$EMBEDDED_HOOKKIT_GUM_DEB"
+cp "$REPACKED_ALTLIST" "$EMBEDDED_ALTLIST_DEB"
 chmod 0644 "$EMBEDDED_SHADOW_DEB" "$EMBEDDED_LIBSANDY_DEB" \
-    "$EMBEDDED_HOOKKIT_DEB" "$EMBEDDED_HOOKKIT_GUM_DEB"
+    "$EMBEDDED_HOOKKIT_DEB" "$EMBEDDED_HOOKKIT_GUM_DEB" \
+    "$EMBEDDED_ALTLIST_DEB"
 dpkg-deb -x "$REPACKED_SHADOW" "$TRUSTED_SHADOW_ROOT"
 dpkg-deb -x "$REPACKED_LIBSANDY" "$TRUSTED_LIBSANDY_ROOT"
 dpkg-deb -x "$REPACKED_HOOKKIT" "$TRUSTED_HOOKKIT_ROOT"
 dpkg-deb -x "$REPACKED_HOOKKIT_GUM" "$TRUSTED_HOOKKIT_GUM_ROOT"
+dpkg-deb -x "$REPACKED_ALTLIST" "$TRUSTED_ALTLIST_ROOT"
 typeset -a trusted_shadow_machos
 while IFS= read -r -d '' candidate; do
     if lipo -archs "$candidate" >/dev/null 2>&1; then
@@ -596,8 +618,9 @@ while IFS= read -r -d '' candidate; do
     fi
 done < <(find "$TRUSTED_SHADOW_ROOT" "$TRUSTED_LIBSANDY_ROOT" \
     "$TRUSTED_HOOKKIT_ROOT" "$TRUSTED_HOOKKIT_GUM_ROOT" \
+    "$TRUSTED_ALTLIST_ROOT" \
     -type f -print0)
-(( ${#trusted_shadow_machos} >= 11 )) || \
+(( ${#trusted_shadow_machos} >= 12 )) || \
     die "pinned Shadow runtime has an incomplete Mach-O set"
 for package_candidate in "${shadow_package_machos[@]}"; do
     package_relative=${package_candidate#*/var/jb/}
