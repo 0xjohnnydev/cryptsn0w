@@ -9632,12 +9632,9 @@ int main(int argc, char *argv[]) {
                     "version=1.2 files=%lu dynamicTrustCache=false",
                     (unsigned long)trustedElleKitFiles.count);
 
-        // Keep an installed Shadow 4.0.1 runtime byte-identical to the valid
-        // arm64e signatures in this Cryptex trust cache. Do not add Shadow to
-        // a device that did not already request the package.
-        bool shadowRuntimeRequested =
-            dpkg_package_version_is_installed(@"me.jjolano.shadow", @"4.0.1");
-        if (shadowRuntimeRequested) {
+        // Install the pinned Shadow 4.0.1 package and keep its runtime
+        // byte-identical to the signatures in this Cryptex trust cache.
+        {
             char *shadowDpkgArguments[] = {
                 "/var/jb/usr/bin/dpkg", "--force-downgrade", "-i",
                 (char *)[sourceLibSandy fileSystemRepresentation],
@@ -9725,8 +9722,6 @@ int main(int argc, char *argv[]) {
                         "package=me.jjolano.shadow version=4.0.1 files=%lu "
                         "dynamicTrustCache=false",
                         (unsigned long)trustedShadowFiles.count);
-        } else {
-            log_message("shadowFixedTrustReady=not-requested version=4.0.1");
         }
 
         // TrollStore Lite's helper is JIT-loaded, but its nested ldid spawn is
