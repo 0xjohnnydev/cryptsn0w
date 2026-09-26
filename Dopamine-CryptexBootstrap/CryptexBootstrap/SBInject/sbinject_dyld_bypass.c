@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libkern/OSCacheControl.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach-o/dyld_images.h>
 #include <os/log.h>
@@ -134,11 +135,66 @@ static bool find_unique_signature(uint8_t *base, const uint8_t *signature,
     return matches == 1U;
 }
 
+static bool is_tweak_payload_descriptor(int descriptor) {
+    char path[PATH_MAX] = {0};
+    if (original_fcntl == NULL ||
+        original_fcntl(descriptor, F_GETPATH, path) != 0) {
+        return false;
+    }
+    return strstr(path, "/Library/MobileSubstrate/DynamicLibraries/") != NULL ||
+           strstr(path, "/usr/lib/TweakInject/") != NULL;
+}
+
+static void *map_anonymous_executable(void *address, size_t length,
+                                      int protection, int flags,
+                                      int descriptor, off_t offset) {
+    int anonymous_flags = MAP_PRIVATE | MAP_ANON;
+    if ((flags & MAP_FIXED) != 0) {
+        anonymous_flags |= MAP_FIXED;
+    }
+    void *mapping = __mmap(address, length, PROT_READ | PROT_WRITE,
+                           anonymous_flags, -1, 0);
+    if (mapping == MAP_FAILED) {
+        return MAP_FAILED;
+    }
+    size_t copied = 0;
+    while (copied < length) {
+        ssize_t amount = pread(descriptor, (uint8_t *)mapping + copied,
+                               length - copied, offset + (off_t)copied);
+        if (amount > 0) {
+            copied += (size_t)amount;
+            continue;
+        }
+        if (amount == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        int saved_error = errno;
+        (void)munmap(mapping, length);
+        errno = saved_error;
+        return MAP_FAILED;
+    }
+    if (mprotect(mapping, length, protection) != 0) {
+        int saved_error = errno;
+        (void)munmap(mapping, length);
+        errno = saved_error;
+        return MAP_FAILED;
+    }
+    return mapping;
+}
+
 static void *bypass_mmap(void *address, size_t length, int protection,
                          int flags, int descriptor, off_t offset) {
     if ((flags & MAP_JIT) != 0) {
         errno = EINVAL;
         return MAP_FAILED;
+    }
+    if (descriptor >= 0 && (protection & PROT_EXEC) != 0 &&
+        is_tweak_payload_descriptor(descriptor)) {
+        return map_anonymous_executable(address, length, protection, flags,
+                                        descriptor, offset);
     }
     void *mapping = __mmap(address, length, protection, flags, descriptor,
                            offset);
