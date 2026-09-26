@@ -1051,6 +1051,66 @@ static bool path_is_absent(const char *path) {
     return errno == ENOENT;
 }
 
+static bool exact_hex_component(NSString *value, NSUInteger length) {
+    if (value.length != length) {
+        return false;
+    }
+    static NSCharacterSet *invalidHexCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        invalidHexCharacters = [[NSCharacterSet
+            characterSetWithCharactersInString:@"0123456789abcdefABCDEF"]
+            invertedSet];
+    });
+    return [value rangeOfCharacterFromSet:invalidHexCharacters].location ==
+           NSNotFound;
+}
+
+static bool remove_stale_managed_var_jb_symlink(void) {
+    struct stat linkStatus;
+    if (lstat(kVarJb, &linkStatus) != 0 ||
+        !S_ISLNK(linkStatus.st_mode)) {
+        return false;
+    }
+
+    char targetBytes[PATH_MAX + 1] = {0};
+    ssize_t targetLength = readlink(
+        kVarJb, targetBytes, sizeof(targetBytes) - 1U);
+    if (targetLength <= 0 ||
+        (size_t)targetLength >= sizeof(targetBytes)) {
+        return false;
+    }
+    targetBytes[targetLength] = '\0';
+    NSString *target = [NSString stringWithUTF8String:targetBytes];
+    NSArray<NSString *> *components = [target pathComponents];
+    if (target == nil || components.count != 6U ||
+        ![components[0] isEqual:@"/"] ||
+        ![components[1] isEqual:@"private"] ||
+        ![components[2] isEqual:@"preboot"] ||
+        !exact_hex_component(components[3], 96U) ||
+        ![components[4] hasPrefix:@"dopamine-"] ||
+        components[4].length != 15U ||
+        !exact_hex_component([components[4] substringFromIndex:9U], 6U) ||
+        ![components[5] isEqual:@"procursus"] ||
+        ![[target stringByStandardizingPath] isEqual:target]) {
+        return false;
+    }
+
+    struct stat targetStatus;
+    if (lstat([target fileSystemRepresentation], &targetStatus) == 0 ||
+        errno != ENOENT) {
+        return false;
+    }
+    if (unlink(kVarJb) != 0) {
+        log_message("staleManagedVarJbRemoved=false target=%s error=%s",
+                    [target UTF8String], strerror(errno));
+        return false;
+    }
+    log_message("staleManagedVarJbRemoved=true target=%s",
+                [target UTF8String]);
+    return true;
+}
+
 static bool apt_package_lists_are_populated(void) {
     NSError *error = nil;
     NSArray<NSString *> *entries = [[NSFileManager defaultManager]
@@ -8059,7 +8119,9 @@ int main(int argc, char *argv[]) {
         NSString *destinationProcursus = managed_jailbreak_root();
         BOOL repairMode = destinationProcursus != nil;
         if (!path_is_absent(kVarJb) && !repairMode) {
-            return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            if (!remove_stale_managed_var_jb_symlink()) {
+                return fail(@"refusing unmanaged pre-existing /var/jb", nil);
+            }
         }
         log_message("mode=%s", repairMode ? "registration-repair"
                                            : "fresh-bootstrap");
