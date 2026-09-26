@@ -351,19 +351,15 @@ def connected_devices() -> list[dict[str, str]]:
 def configure_target_build_environment(device: dict[str, str]) -> None:
     os.environ.setdefault("CODEX_TARGET_UDID", device["udid"])
     os.environ["CODEX_TARGET_BUNDLE_ROOT"] = str(TARGET_BUNDLE_ROOT)
-    # The marketing iPhone 18 generation identifies itself as iPhone19,*.
-    # Keep the registration workaround scoped to that hardware on iOS 27;
-    # older products retain the existing lsd-hook-first path.
-    direct_registration = (
-        device["product"].startswith(IPHONE_18_PRODUCT_PREFIX)
-        and device["version"].split(".", 1)[0] == "27"
-    )
+    # iOS 27 requires the direct LaunchServices registration path. The legacy
+    # lsd-hook-first path is not specific to older hardware.
+    direct_registration = device["version"].split(".", 1)[0] == "27"
     os.environ["CODEX_PREFER_DIRECT_SILEO_REGISTRATION"] = (
         "1" if direct_registration else "0"
     )
     if direct_registration:
         note(
-            "Using the iPhone 18-generation direct LaunchServices "
+            "Using the iOS 27 direct LaunchServices "
             "registration path"
         )
 

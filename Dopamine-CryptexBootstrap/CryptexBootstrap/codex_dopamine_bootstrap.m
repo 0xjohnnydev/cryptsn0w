@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
@@ -184,6 +185,8 @@ static NSString *const kSBInjectJitterdExecutable =
 static NSString *const kSBInjectJitterdPlist =
     @"/var/jb/Library/LaunchDaemons/"
      "com.openai.codex.sbinject.jitterd.plist";
+static NSString *const kSBInjectJitterdShadowSocket =
+    @"/var/jb/var/run/sbinject-jitterd-shadow.sock";
 static NSString *const kSBInjectGeneralHook =
     @"/var/jb/usr/lib/sbinject/generalhook.dylib";
 static NSString *const kSBInjectAmfidHook =
@@ -191,7 +194,9 @@ static NSString *const kSBInjectAmfidHook =
 static NSString *const kSBInjectPreferencesBridge =
     @"/var/jb/usr/lib/sbinject/preferences-bridge.dylib";
 static NSString *const kSBInjectLaunchdHook =
-    @"/var/jb/usr/lib/sbinject/launchdhook-v12.dylib";
+    @"/var/jb/usr/lib/sbinject/launchdhook-v41.dylib";
+static NSString *const kSBInjectShadowBootstrap =
+    @"/var/jb/usr/lib/sbinject/shadow-bootstrap.dylib";
 static NSString *const kSBInjectLsdRegistrationHook =
     @"/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
 static NSString *const kSBInjectTrollStoreRegistrationHook =
@@ -245,6 +250,8 @@ static NSString *const kHeadlessSileoExecutable =
     @"/var/jb/Applications/Sileo.app/Sileo";
 static NSString *const kElleKitInjectorExecutable =
     @"/var/jb/usr/libexec/codex-ellekit-loader";
+static NSString *const kCoreEntitlementsLdidExecutable =
+    @"/var/jb/usr/libexec/codex-ldid-ce";
 static NSString *const kElleKitInjectorDylib =
     @"/var/jb/usr/lib/ellekit/libinjector.dylib";
 
@@ -416,7 +423,8 @@ static bool update_managed_app_setting(const char *identifierBytes,
     NSString *identifier = [NSString stringWithUTF8String:identifierBytes];
     NSString *key = [NSString stringWithUTF8String:keyBytes];
     bool allowedKey = [key isEqual:@"BlockExceptionPorts"] ||
-        [key isEqual:@"KeychainIdentity"] || [key isEqual:@"LegacySDK"];
+        [key isEqual:@"KeychainIdentity"] || [key isEqual:@"LegacySDK"] ||
+        [key isEqual:@"TweakInjection"];
     NSCharacterSet *invalidIdentifier = [[NSCharacterSet
         characterSetWithCharactersInString:
             @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"]
@@ -2600,6 +2608,54 @@ static bool relative_path_is_springboard_tweak(NSString *relativePath) {
                caseInsensitiveCompare:@"dylib"] == NSOrderedSame;
 }
 
+static NSUInteger prepare_installed_tweak_payloads(void) {
+    NSArray<NSString *> *directories = @[
+        @"/var/jb/Library/MobileSubstrate/DynamicLibraries",
+        @"/var/jb/Library/TweakInject",
+        @"/var/jb/usr/lib/TweakInject",
+    ];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    NSUInteger changed = 0;
+    for (NSString *directory in directories) {
+        NSArray<NSString *> *entries = [[NSFileManager defaultManager]
+            contentsOfDirectoryAtPath:directory error:nil];
+        for (NSString *entry in entries) {
+            if ([[entry pathExtension]
+                    caseInsensitiveCompare:@"dylib"] != NSOrderedSame) {
+                continue;
+            }
+            NSString *path = [directory stringByAppendingPathComponent:entry];
+            NSString *canonical = [path stringByResolvingSymlinksInPath];
+            if ([visited containsObject:canonical]) continue;
+            [visited addObject:canonical];
+            struct stat status;
+            if (stat(canonical.fileSystemRepresentation, &status) != 0 ||
+                !S_ISREG(status.st_mode) ||
+                !broker_command_is_macho(canonical.fileSystemRepresentation) ||
+                (status.st_mode & 0111) != 0) {
+                continue;
+            }
+            char *signArguments[] = {
+                "/var/jb/usr/bin/ldid", "-S", "-Cadhoc",
+                (char *)canonical.fileSystemRepresentation, NULL,
+            };
+            int signStatus = run_and_wait_bounded(
+                signArguments[0], signArguments, 30000);
+            if (signStatus == 0 &&
+                chmod(canonical.fileSystemRepresentation,
+                      (status.st_mode & 07777) | 0111) == 0) {
+                ++changed;
+            } else {
+                log_message("sbinjectTweakPreparation=false path=%s "
+                            "signStatus=%d error=%d",
+                            canonical.fileSystemRepresentation, signStatus,
+                            errno);
+            }
+        }
+    }
+    return changed;
+}
+
 static bool relative_path_is_ellekit_injector(NSString *relativePath) {
     relativePath = normalized_sbinject_payload_path(relativePath);
     return [relativePath
@@ -2651,6 +2707,8 @@ static bool sbinject_infrastructure_ready(const char *reason) {
         0;
     bool loader =
         access([kElleKitInjectorExecutable fileSystemRepresentation], X_OK) == 0;
+    bool shadowSigner = access(
+        [kCoreEntitlementsLdidExecutable fileSystemRepresentation], X_OK) == 0;
     bool trollStoreClient = access(
         kTrollStoreBrokerClientExecutable.fileSystemRepresentation, X_OK) == 0;
     bool trollStoreHook = access(
@@ -2674,12 +2732,14 @@ static bool sbinject_infrastructure_ready(const char *reason) {
         access([kAmfidCandidateExecutable fileSystemRepresentation], X_OK) ==
         0;
     log_message("sbinjectInfrastructure reason=%s validator=%s loader=%s "
+                "shadowSigner=%s "
                 "trollStoreClient=%s trollStoreHook=%s "
                 "jitterd=%s launchdHook=%s generalHook=%s candidate=%s "
                 "bundleHook=%s elleKit=%s amfidHook=%s amfidCandidate=%s "
                 "dynamicTrustCache=disabled",
                 reason, validator ? "ready" : "missing",
                 loader ? "ready" : "missing",
+                shadowSigner ? "ready" : "missing",
                 trollStoreClient ? "ready" : "missing",
                 trollStoreHook ? "ready" : "missing",
                 jitterd ? "ready" : "missing",
@@ -2690,7 +2750,8 @@ static bool sbinject_infrastructure_ready(const char *reason) {
                 elleKit ? "ready" : "missing",
                 amfidHook ? "ready" : "missing",
                 amfidCandidate ? "ready" : "missing");
-    return validator && loader && trollStoreClient && trollStoreHook && jitterd &&
+    return validator && loader && shadowSigner && trollStoreClient &&
+           trollStoreHook && jitterd &&
            launchdHook && generalHook &&
            candidate && bundleHook && amfidHook && amfidCandidate;
 }
@@ -3545,6 +3606,90 @@ static NSArray<NSString *> *sbinject_deb_paths_from_arguments(
     return paths.array;
 }
 
+static NSArray<NSString *> *sbinject_cached_apt_install_archives(
+    char *const arguments[], NSString **errorText) {
+    (void)arguments;
+    NSString *archiveDirectory = @"/var/jb/var/cache/apt/archives";
+    NSError *directoryError = nil;
+    NSArray<NSString *> *entries = [[[NSFileManager defaultManager]
+        contentsOfDirectoryAtPath:archiveDirectory error:&directoryError]
+        sortedArrayUsingSelector:@selector(compare:)];
+    if (entries == nil) {
+        if (![[NSFileManager defaultManager]
+                fileExistsAtPath:archiveDirectory]) {
+            return @[];
+        }
+        if (errorText != NULL) {
+            *errorText = [NSString stringWithFormat:
+                @"APT archive directory read failed: %@", directoryError];
+        }
+        return nil;
+    }
+    NSMutableArray<NSString *> *archives = [NSMutableArray array];
+    for (NSString *entry in entries) {
+        if ([[entry pathExtension] caseInsensitiveCompare:@"deb"] !=
+            NSOrderedSame) {
+            continue;
+        }
+        if (archives.count >= 128U) {
+            if (errorText != NULL) {
+                *errorText = @"too many Sileo transaction APT archives";
+            }
+            return nil;
+        }
+        NSString *path =
+            [archiveDirectory stringByAppendingPathComponent:entry];
+        struct stat status;
+        if (lstat([path fileSystemRepresentation], &status) != 0 ||
+            !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+            status.st_nlink != 1 || status.st_size <= 0 ||
+            status.st_size > (off_t)(1024ULL * 1024ULL * 1024ULL) ||
+            (status.st_mode & 0022) != 0) {
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"unsafe Sileo transaction APT archive: %@", path];
+            }
+            return nil;
+        }
+        [archives addObject:path];
+    }
+    return archives;
+}
+
+static bool sbinject_move_apt_archives(
+    NSArray<NSString *> *archives, NSString *staging, bool restore,
+    NSString **errorText) {
+    NSUInteger moved = 0;
+    for (NSString *archive in archives) {
+        NSString *staged =
+            [staging stringByAppendingPathComponent:archive.lastPathComponent];
+        NSString *source = restore ? staged : archive;
+        NSString *destination = restore ? archive : staged;
+        if (rename([source fileSystemRepresentation],
+                   [destination fileSystemRepresentation]) != 0) {
+            int moveError = errno;
+            if (!restore) {
+                for (NSUInteger index = 0; index < moved; ++index) {
+                    NSString *prior = archives[index];
+                    NSString *priorStaged = [staging
+                        stringByAppendingPathComponent:prior.lastPathComponent];
+                    (void)rename([priorStaged fileSystemRepresentation],
+                                 [prior fileSystemRepresentation]);
+                }
+            }
+            if (errorText != NULL) {
+                *errorText = [NSString stringWithFormat:
+                    @"APT archive %@ failed for %@: %s",
+                    restore ? @"restore" : @"staging",
+                    archive.lastPathComponent, strerror(moveError)];
+            }
+            return false;
+        }
+        ++moved;
+    }
+    return true;
+}
+
 static NSArray<NSString *> *sbinject_apt_removal_packages(
     char *const arguments[], bool *scanAllOut) {
     if (scanAllOut != NULL) {
@@ -3890,6 +4035,7 @@ static bool finish_sbinject_package_transaction(pid_t springBoardBefore,
         !exact_empty_root_marker(kSBInjectRespringMarker)) {
         return true;
     }
+    NSUInteger preparedTweaks = prepare_installed_tweak_payloads();
     bool preferencesCandidate = false;
     pid_t preferences = current_preferences_process(&preferencesCandidate);
     if (preferencesCandidate && preferences > 1 &&
@@ -3914,8 +4060,10 @@ static bool finish_sbinject_package_transaction(pid_t springBoardBefore,
     bool prepared =
         prepare_sbinject_redirect("package-transaction-posthook");
     log_message("sbinjectPackagePostHook command=%s before=%d "
-                "redirectPrepared=%s respring=deferred-to-sileo",
-                command, springBoardBefore, prepared ? "true" : "false");
+                "preparedTweaks=%lu redirectPrepared=%s "
+                "respring=deferred-to-sileo",
+                command, springBoardBefore, (unsigned long)preparedTweaks,
+                prepared ? "true" : "false");
     return prepared;
 }
 
@@ -3981,9 +4129,51 @@ static int32_t run_root_broker_command(
         : @[];
 
     if (aptCommand && aptDownloadMutation && !aptSimulation) {
+        NSString *cacheError = nil;
+        NSArray<NSString *> *preservedArchives =
+            sbinject_cached_apt_install_archives(arguments, &cacheError);
+        if (preservedArchives == nil) {
+            log_message("sileoRootBrokerAptCachePreserve=false command=%s "
+                        "error=%s",
+                        resolvedCommand,
+                        cacheError != nil
+                            ? [cacheError UTF8String] : "unknown");
+            return 73 << 8;
+        }
+        NSString *staging = nil;
+        if (preservedArchives.count != 0) {
+            char stagingTemplate[] =
+                "/var/jb/var/cache/sbinject-apt-preserve.XXXXXX";
+            char *stagingBytes = mkdtemp(stagingTemplate);
+            if (stagingBytes == NULL) {
+                return 73 << 8;
+            }
+            staging = [NSString stringWithUTF8String:stagingBytes];
+            if (!sbinject_move_apt_archives(
+                    preservedArchives, staging, false, &cacheError)) {
+                (void)rmdir([staging fileSystemRepresentation]);
+                log_message("sileoRootBrokerAptCachePreserve=false "
+                            "command=%s error=%s", resolvedCommand,
+                            [cacheError UTF8String]);
+                return 73 << 8;
+            }
+        }
         char *cleanArguments[] = {(char *)resolvedCommand, "clean", NULL};
         int cleanStatus = run_and_wait_bounded(
             resolvedCommand, cleanArguments, 30000);
+        bool restored = staging == nil || sbinject_move_apt_archives(
+            preservedArchives, staging, true, &cacheError);
+        if (restored && staging != nil) {
+            (void)rmdir([staging fileSystemRepresentation]);
+        }
+        log_message("sileoRootBrokerAptCachePreserve=%s command=%s "
+                    "archives=%lu error=%s",
+                    restored ? "true" : "false", resolvedCommand,
+                    (unsigned long)preservedArchives.count,
+                    cacheError != nil ? [cacheError UTF8String] : "none");
+        if (!restored) {
+            return 73 << 8;
+        }
         log_message("sileoRootBrokerAptCacheClean command=%s status=%d "
                     "transactionScoped=true",
                     resolvedCommand, cleanStatus);
@@ -4695,10 +4885,12 @@ static bool prepare_lsd_registration_hook(const char *reason) {
 static bool prepare_sbinject_redirect(const char *reason) {
     NSArray<NSDictionary *> *artifacts = @[
         @{@"path" : kElleKitInjectorExecutable, @"mode" : @0755},
+        @{@"path" : kCoreEntitlementsLdidExecutable, @"mode" : @0755},
         @{@"path" : kElleKitInjectorDylib, @"mode" : @0644},
         @{@"path" : kSBInjectJitterdExecutable, @"mode" : @0755},
         @{@"path" : kSBInjectGeneralHook, @"mode" : @0755},
         @{@"path" : kSBInjectLaunchdHook, @"mode" : @0755},
+        @{@"path" : kSBInjectShadowBootstrap, @"mode" : @0755},
         @{@"path" : kSpringBoardCandidateExecutable, @"mode" : @0755},
         @{@"path" : kSBInjectBundleHook, @"mode" : @0755},
         @{@"path" : kSBInjectJitterdPlist, @"mode" : @0644},
@@ -4865,6 +5057,7 @@ static bool activate_sbinject_preferences(void) {
         @{@"path" : kSBInjectGeneralHook, @"mode" : @0755},
         @{@"path" : kSBInjectPreferencesBridge, @"mode" : @0755},
         @{@"path" : kSBInjectLaunchdHook, @"mode" : @0755},
+        @{@"path" : kSBInjectShadowBootstrap, @"mode" : @0755},
         @{@"path" : kPreferencesCandidateExecutable, @"mode" : @0755},
         @{@"path" : kSBInjectPreferencesBundleHook, @"mode" : @0755},
     ];
@@ -5015,6 +5208,12 @@ static void trigger_amfid_service_async(void) {
 }
 
 static dispatch_source_t gAmfidJitMonitor;
+static dispatch_source_t gAmfidProcessMonitor;
+static dispatch_queue_t gAmfidMonitorQueue;
+static pid_t gAmfidAttachedPid;
+static pid_t gAmfidWatchedPid;
+static uint64_t gAmfidWatchGeneration;
+static unsigned int gAmfidRestartRetryCount;
 
 static bool inject_sbinject_amfid_hook(pid_t pid) {
     char observedPath[CODEX_PROC_PIDPATH_MAX] = {0};
@@ -5051,45 +5250,135 @@ static bool inject_sbinject_amfid_hook(pid_t pid) {
     return ready;
 }
 
+static void schedule_amfid_jit_check(uint64_t delay) {
+    if (gAmfidJitMonitor == NULL) return;
+    dispatch_source_set_timer(
+        gAmfidJitMonitor,
+        delay == 0 ? DISPATCH_TIME_NOW
+                   : dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay),
+        DISPATCH_TIME_FOREVER, 50 * NSEC_PER_MSEC);
+}
+
+static void schedule_amfid_restart_check(void) {
+    uint64_t delay = gAmfidRestartRetryCount < 20U
+        ? 100 * NSEC_PER_MSEC
+        : NSEC_PER_SEC;
+    if (gAmfidRestartRetryCount < 20U) ++gAmfidRestartRetryCount;
+    schedule_amfid_jit_check(delay);
+}
+
+static void stop_amfid_process_monitor(void) {
+    ++gAmfidWatchGeneration;
+    gAmfidWatchedPid = 0;
+    if (gAmfidProcessMonitor == NULL) return;
+    dispatch_source_cancel(gAmfidProcessMonitor);
+    gAmfidProcessMonitor = NULL;
+}
+
+static bool watch_amfid_process(pid_t pid) {
+    if (gAmfidProcessMonitor != NULL && gAmfidWatchedPid == pid) {
+        return true;
+    }
+    stop_amfid_process_monitor();
+    dispatch_source_t source = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_PROC, (uintptr_t)pid, DISPATCH_PROC_EXIT,
+        gAmfidMonitorQueue);
+    if (source == NULL) return false;
+    uint64_t generation = gAmfidWatchGeneration;
+    gAmfidWatchedPid = pid;
+    dispatch_source_set_registration_handler(source, ^{
+        if (gAmfidWatchGeneration != generation ||
+            gAmfidWatchedPid != pid) {
+            return;
+        }
+        bool candidate = false;
+        pid_t observed = current_amfid_process(&candidate);
+        if (observed == pid && !candidate) return;
+        gAmfidAttachedPid = 0;
+        stop_amfid_process_monitor();
+        gAmfidRestartRetryCount = 0;
+        schedule_amfid_restart_check();
+    });
+    dispatch_source_set_event_handler(source, ^{
+        if (gAmfidWatchGeneration != generation ||
+            gAmfidWatchedPid != pid) {
+            return;
+        }
+        gAmfidAttachedPid = 0;
+        stop_amfid_process_monitor();
+        gAmfidRestartRetryCount = 0;
+        schedule_amfid_restart_check();
+    });
+    gAmfidProcessMonitor = source;
+    dispatch_resume(source);
+    return true;
+}
+
 static void start_amfid_jit_monitor(void) {
     if (gAmfidJitMonitor != NULL) return;
-    dispatch_queue_t queue = dispatch_queue_create(
+    gAmfidMonitorQueue = dispatch_queue_create(
         "com.openai.codex.dopamine.amfid-jit-monitor",
         DISPATCH_QUEUE_SERIAL);
     dispatch_source_t timer = dispatch_source_create(
-        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gAmfidMonitorQueue);
     if (timer == NULL) return;
+    dispatch_source_set_timer(timer, DISPATCH_TIME_FOREVER,
+                              DISPATCH_TIME_FOREVER, 0);
+    gAmfidJitMonitor = timer;
     bool initialCandidate = false;
     pid_t initialPid = current_amfid_process(&initialCandidate);
-    __block pid_t attachedPid =
+    gAmfidAttachedPid =
         initialPid > 1 && !initialCandidate &&
                 sbinject_boot_fresh_marker(kSBInjectAmfidReadyMarker)
             ? initialPid
             : 0;
-    dispatch_source_set_timer(
-        timer, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC),
-        50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer, ^{
         if (!exact_empty_root_marker(kSBInjectAmfidEnableMarker)) {
-            attachedPid = 0;
+            gAmfidAttachedPid = 0;
+            stop_amfid_process_monitor();
+            gAmfidRestartRetryCount = 0;
+            schedule_amfid_jit_check(NSEC_PER_SEC);
             return;
         }
         bool candidate = false;
         pid_t observed = current_amfid_process(&candidate);
         if (observed <= 1 || candidate) {
-            if (observed != attachedPid) attachedPid = 0;
+            if (observed != gAmfidAttachedPid) {
+                gAmfidAttachedPid = 0;
+                stop_amfid_process_monitor();
+            }
+            schedule_amfid_restart_check();
             return;
         }
-        if (observed == attachedPid) return;
+        if (observed == gAmfidAttachedPid) {
+            if (!watch_amfid_process(observed)) {
+                schedule_amfid_jit_check(NSEC_PER_SEC);
+            } else {
+                gAmfidRestartRetryCount = 0;
+            }
+            return;
+        }
+        stop_amfid_process_monitor();
         bool injected = inject_sbinject_amfid_hook(observed);
         log_message("sbinjectAmfidJITMonitor pid=%d injected=%s",
                     observed, injected ? "true" : "false");
-        attachedPid = injected ? observed : 0;
+        gAmfidAttachedPid = injected ? observed : 0;
+        if (!injected || !watch_amfid_process(observed)) {
+            schedule_amfid_jit_check(NSEC_PER_SEC);
+        } else {
+            gAmfidRestartRetryCount = 0;
+        }
     });
-    gAmfidJitMonitor = timer;
+    if (gAmfidAttachedPid > 1) {
+        if (!watch_amfid_process(gAmfidAttachedPid)) {
+            schedule_amfid_jit_check(NSEC_PER_SEC);
+        }
+    } else {
+        schedule_amfid_jit_check(50 * NSEC_PER_MSEC);
+    }
     dispatch_resume(timer);
     log_message("sbinjectAmfidJITMonitor=ready initialPid=%d",
-                attachedPid);
+                gAmfidAttachedPid);
 }
 
 static bool activate_sbinject_amfid(void) {
@@ -5752,6 +6041,44 @@ static bool start_sileo_xpc_broker(NSString *registeredPath,
     return true;
 }
 
+static void close_sileo_file_broker_watcher(int *eventQueue,
+                                            int *directoryDescriptor) {
+    if (*eventQueue >= 0) close(*eventQueue);
+    if (*directoryDescriptor >= 0) close(*directoryDescriptor);
+    *eventQueue = -1;
+    *directoryDescriptor = -1;
+}
+
+static bool open_sileo_file_broker_watcher(NSString *directory,
+                                           int *eventQueue,
+                                           int *directoryDescriptor) {
+    *eventQueue = -1;
+    *directoryDescriptor = open([directory fileSystemRepresentation],
+                                O_EVTONLY | O_CLOEXEC);
+    if (*directoryDescriptor < 0) return false;
+    *eventQueue = kqueue();
+    if (*eventQueue < 0) {
+        int savedError = errno;
+        close_sileo_file_broker_watcher(eventQueue, directoryDescriptor);
+        errno = savedError;
+        return false;
+    }
+    (void)fcntl(*eventQueue, F_SETFD, FD_CLOEXEC);
+    struct kevent change;
+    EV_SET(&change, (uintptr_t)*directoryDescriptor, EVFILT_VNODE,
+           EV_ADD | EV_CLEAR,
+           NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_LINK | NOTE_RENAME |
+               NOTE_DELETE | NOTE_REVOKE,
+           0, NULL);
+    if (kevent(*eventQueue, &change, 1, NULL, 0, NULL) != 0) {
+        int savedError = errno;
+        close_sileo_file_broker_watcher(eventQueue, directoryDescriptor);
+        errno = savedError;
+        return false;
+    }
+    return true;
+}
+
 static void serve_sileo_file_broker(NSString *registeredPath,
                                     NSString *jailbreakRoot,
                                     NSString *dataContainer) {
@@ -5773,8 +6100,14 @@ static void serve_sileo_file_broker(NSString *registeredPath,
         "com.apple.sandbox.executable",
         "com.apple.app-sandbox.read-write",
     };
-    log_message("sileoFileBrokerServing=true directory=%s",
-                [directory UTF8String]);
+    int eventQueue = -1;
+    int directoryDescriptor = -1;
+    bool watcherReady = open_sileo_file_broker_watcher(
+        directory, &eventQueue, &directoryDescriptor);
+    bool watcherFailureLogged = !watcherReady;
+    log_message("sileoFileBrokerServing=true directory=%s watcher=%s error=%d",
+                [directory UTF8String], watcherReady ? "vnode" : "fallback",
+                watcherReady ? 0 : errno);
     for (;;) {
         @autoreleasepool {
             NSArray<NSString *> *entries = [[NSFileManager defaultManager]
@@ -5899,7 +6232,36 @@ static void serve_sileo_file_broker(NSString *registeredPath,
                             wrote ? "true" : "false");
             }
         }
-        usleep(10 * 1000);
+        if (eventQueue < 0) {
+            usleep(250 * 1000);
+            watcherReady = open_sileo_file_broker_watcher(
+                directory, &eventQueue, &directoryDescriptor);
+            if (watcherReady) {
+                if (watcherFailureLogged) {
+                    log_message("sileoFileBrokerWatcher=vnode restored=true");
+                }
+                watcherFailureLogged = false;
+            } else if (!watcherFailureLogged) {
+                log_message("sileoFileBrokerWatcher=fallback error=%d", errno);
+                watcherFailureLogged = true;
+            }
+            continue;
+        }
+
+        struct kevent event;
+        int eventCount;
+        do {
+            eventCount = kevent(eventQueue, NULL, 0, &event, 1, NULL);
+        } while (eventCount < 0 && errno == EINTR);
+        bool watcherEnded =
+            eventCount < 0 ||
+            (eventCount > 0 && (event.flags & EV_ERROR) != 0) ||
+            (eventCount > 0 &&
+             (event.fflags & (NOTE_RENAME | NOTE_DELETE | NOTE_REVOKE)) != 0);
+        if (watcherEnded) {
+            close_sileo_file_broker_watcher(&eventQueue,
+                                            &directoryDescriptor);
+        }
     }
 }
 
@@ -7268,7 +7630,7 @@ static bool install_sbinject_jitterd_job(NSString *sourceExecutable,
         NSFileOwnerAccountID : @0,
         NSFileGroupOwnerAccountID : @0,
     };
-    for (NSString *directory in @[@"/var/jb/var/log",
+    for (NSString *directory in @[@"/var/jb/var/log", @"/var/jb/var/run",
                                    @"/var/jb/var/lib/sbinject"]) {
         if (![[NSFileManager defaultManager]
                 createDirectoryAtPath:directory
@@ -7288,7 +7650,15 @@ static bool install_sbinject_jitterd_job(NSString *sourceExecutable,
 
     NSString *target =
         [@"system/" stringByAppendingString:kSBInjectJitterdLabel];
-    if (restartRequired) {
+    struct stat initialSocketStatus = {0};
+    bool initialSocketReady =
+        lstat([kSBInjectJitterdShadowSocket fileSystemRepresentation],
+              &initialSocketStatus) == 0 &&
+        S_ISSOCK(initialSocketStatus.st_mode) &&
+        initialSocketStatus.st_uid == 0 && initialSocketStatus.st_gid == 0 &&
+        (initialSocketStatus.st_mode & 07777) == 0600;
+    bool effectiveRestartRequired = restartRequired || !initialSocketReady;
+    if (effectiveRestartRequired) {
         char *bootoutArguments[] = {
             "/var/jb/usr/bin/launchctl", "bootout",
             (char *)[target fileSystemRepresentation], NULL};
@@ -7302,7 +7672,8 @@ static bool install_sbinject_jitterd_job(NSString *sourceExecutable,
     kern_return_t existing = bootstrap_look_up(
         bootstrap_port, CODEX_SBINJECT_JITTERD_SERVICE, &existingPort);
     bool alreadyReady = existing == KERN_SUCCESS &&
-                        MACH_PORT_VALID(existingPort) && !restartRequired;
+                        MACH_PORT_VALID(existingPort) && initialSocketReady &&
+                        !effectiveRestartRequired;
     if (MACH_PORT_VALID(existingPort)) {
         mach_port_deallocate(mach_task_self(), existingPort);
     }
@@ -7328,18 +7699,29 @@ static bool install_sbinject_jitterd_job(NSString *sourceExecutable,
         mach_port_t port = MACH_PORT_NULL;
         kern_return_t lookup = bootstrap_look_up(
             bootstrap_port, CODEX_SBINJECT_JITTERD_SERVICE, &port);
-        if (lookup == KERN_SUCCESS && MACH_PORT_VALID(port)) {
+        struct stat socketStatus = {0};
+        bool socketReady =
+            lstat([kSBInjectJitterdShadowSocket fileSystemRepresentation],
+                  &socketStatus) == 0 &&
+            S_ISSOCK(socketStatus.st_mode) && socketStatus.st_uid == 0 &&
+            socketStatus.st_gid == 0 &&
+            (socketStatus.st_mode & 07777) == 0600;
+        if (lookup == KERN_SUCCESS && MACH_PORT_VALID(port) && socketReady) {
             mach_port_deallocate(mach_task_self(), port);
             serviceReady = true;
             break;
+        }
+        if (MACH_PORT_VALID(port)) {
+            mach_port_deallocate(mach_task_self(), port);
         }
         usleep(10 * 1000);
     }
     log_message("sbinjectJitterdReady=%s restartRequired=%s",
                 serviceReady ? "true" : "false",
-                restartRequired ? "true" : "false");
+                effectiveRestartRequired ? "true" : "false");
     if (!serviceReady && errorText != NULL) {
-        *errorText = @"SBInject jitterd Mach service did not become ready";
+        *errorText = @"SBInject jitterd service and Shadow socket did not "
+                     "become ready";
     }
     return serviceReady;
 }
@@ -7614,6 +7996,10 @@ int main(int argc, char *argv[]) {
                 "com.openai.codex.dopamine.sbinject-boot-activation",
                 DISPATCH_QUEUE_SERIAL);
             dispatch_async(activationQueue, ^{
+                NSUInteger preparedTweaks =
+                    prepare_installed_tweak_payloads();
+                log_message("sbinjectStartupPreparedTweaks=%lu",
+                            (unsigned long)preparedTweaks);
                 bool sbinjectActive = activate_sbinject_springboard();
                 bool sbinjectPreferencesActive =
                     sbinjectActive && activate_sbinject_preferences();
@@ -7698,6 +8084,14 @@ int main(int argc, char *argv[]) {
         NSString *sourcePreferenceLoader =
             [payloadRoot stringByAppendingPathComponent:
                              @"preferenceloader.deb"];
+        NSString *sourceShadow =
+            [payloadRoot stringByAppendingPathComponent:@"shadow.deb"];
+        NSString *sourceLibSandy =
+            [payloadRoot stringByAppendingPathComponent:@"libsandy.deb"];
+        NSString *sourceHookKit =
+            [payloadRoot stringByAppendingPathComponent:@"hookkit.deb"];
+        NSString *sourceHookKitGum =
+            [payloadRoot stringByAppendingPathComponent:@"hookkit-gum.deb"];
         NSString *sourceOpenSSHClient =
             [payloadRoot stringByAppendingPathComponent:@"openssh-client.deb"];
         NSString *sourceOpenSSHServer =
@@ -7720,6 +8114,18 @@ int main(int argc, char *argv[]) {
         NSString *sourceTrustedElleKitRoot =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ellekit-root/var/jb"];
+        NSString *sourceTrustedShadowRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/shadow-root/var/jb"];
+        NSString *sourceTrustedLibSandyRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/libsandy-root/var/jb"];
+        NSString *sourceTrustedHookKitRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/hookkit-root/var/jb"];
+        NSString *sourceTrustedHookKitGumRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/hookkit-gum-root/var/jb"];
         NSString *sourceTrustedLdid =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ldid-root/var/jb/usr/bin/ldid"];
@@ -7765,6 +8171,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceElleKitCompatLoader =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-ellekit-loader"];
+        NSString *sourceCoreEntitlementsLdid =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/bin/codex-ldid-ce"];
         NSString *sourceExecWorker =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/bin/codex-exec-worker"];
@@ -7794,7 +8203,10 @@ int main(int argc, char *argv[]) {
                            @"usr/local/lib/sbinject/trollstore-settings-hook.dylib"];
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/lib/sbinject/launchdhook-v12.dylib"];
+                           @"usr/local/lib/sbinject/launchdhook-v41.dylib"];
+        NSString *sourceSBInjectShadowBootstrap =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/shadow-bootstrap.dylib"];
         NSString *sourceSBInjectLsdRegistrationHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/lsd-registration-hook.dylib"];
@@ -7841,6 +8253,11 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceElleKit] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourcePreferenceLoader] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceShadow] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceLibSandy] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceHookKit] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceHookKitGum] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceOpenSSHClient] ||
             ![[NSFileManager defaultManager]
@@ -7859,6 +8276,22 @@ int main(int argc, char *argv[]) {
                      isDirectory:&isDirectory] ||
             !isDirectory ||
             ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedShadowRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedLibSandyRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedHookKitRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedHookKitGumRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedLaunchctl] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedUiopen] ||
@@ -7872,6 +8305,8 @@ int main(int argc, char *argv[]) {
                 fileExistsAtPath:sourceTrustedLdidCrypto] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedLdidIOSEXEC] ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceCoreEntitlementsLdid] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceSBInjectAmfidHook] ||
             ![[NSFileManager defaultManager]
@@ -7955,6 +8390,9 @@ int main(int argc, char *argv[]) {
         if (lstat([sourceElleKitCompatLoader fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceCoreEntitlementsLdid fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceExecWorker fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
@@ -7978,6 +8416,9 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLaunchdHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSBInjectShadowBootstrap fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLsdRegistrationHook fileSystemRepresentation],
@@ -8310,6 +8751,76 @@ int main(int argc, char *argv[]) {
                         ? [rootlessUicacheBackup UTF8String]
                         : "not-needed");
 
+        NSArray<NSString *> *trustedPackageTools = @[
+            @"usr/bin/dpkg", @"usr/bin/dpkg-deb", @"usr/bin/dpkg-divert",
+            @"usr/bin/dpkg-maintscript-helper", @"usr/bin/dpkg-query",
+            @"usr/bin/dpkg-realpath", @"usr/bin/dpkg-split",
+            @"usr/bin/dpkg-statoverride", @"usr/bin/dpkg-trigger",
+            @"usr/bin/tar", @"usr/bin/update-alternatives", @"usr/bin/env",
+            @"usr/bin/bash", @"usr/bin/dash", @"usr/bin/zsh",
+            @"usr/bin/gpgv",
+            @"usr/bin/mkdir", @"usr/bin/mv", @"usr/bin/rm", @"usr/bin/ln",
+            @"usr/bin/apt", @"usr/bin/apt-cache", @"usr/bin/apt-cdrom",
+            @"usr/bin/apt-config", @"usr/bin/apt-get", @"usr/bin/apt-mark",
+            @"usr/libexec/apt/apt-helper",
+            @"usr/libexec/apt/methods/cdrom",
+            @"usr/libexec/apt/methods/copy",
+            @"usr/libexec/apt/methods/file",
+            @"usr/libexec/apt/methods/ftp",
+            @"usr/libexec/apt/methods/gpgv",
+            @"usr/libexec/apt/methods/http",
+            @"usr/libexec/apt/methods/mirror",
+            @"usr/libexec/apt/methods/rred",
+            @"usr/libexec/apt/methods/rsh",
+            @"usr/libexec/apt/methods/store",
+            @"usr/libexec/apt/solvers/dump",
+        ];
+        NSString *packageToolCacheDirectory = [destinationProcursus
+            stringByAppendingPathComponent:@".codex-cache"];
+        NSError *packageToolCacheError = nil;
+        if (![[NSFileManager defaultManager]
+                createDirectoryAtPath:packageToolCacheDirectory
+          withIntermediateDirectories:YES
+                           attributes:@{
+                               NSFilePosixPermissions : @0700,
+                               NSFileOwnerAccountID : @0,
+                               NSFileGroupOwnerAccountID : @0,
+                           }
+                                error:&packageToolCacheError]) {
+            return fail(
+                [NSString stringWithFormat:
+                              @"package-tool backup directory failed: %@",
+                              packageToolCacheError], nil);
+        }
+        for (NSString *tool in trustedPackageTools) {
+            NSString *source =
+                [sourceProcursus stringByAppendingPathComponent:tool];
+            NSString *installed =
+                [@"/var/jb" stringByAppendingPathComponent:tool];
+            BOOL matches = files_are_equal(source, installed);
+            log_message("rootlessPackageTool name=%s matches=%s",
+                        [tool UTF8String], matches ? "true" : "false");
+            if (!matches) {
+                NSString *backup = [packageToolCacheDirectory
+                    stringByAppendingPathComponent:
+                        [NSString stringWithFormat:@"%@-backup-%@",
+                                                   [tool lastPathComponent],
+                                                   [[NSUUID UUID] UUIDString]]];
+                NSString *replacementError = nil;
+                if (!replace_file_with_backup(source, installed, backup,
+                                              &replacementError)) {
+                    return fail(replacementError, nil);
+                }
+            }
+            if (!files_are_equal(source, installed)) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"rootless %@ refresh did not match the "
+                                   "Cryptex trust-cache input", tool], nil);
+            }
+        }
+        log_message("rootlessPackageToolsTrusted=true");
+
         setenv("PATH",
                "/var/jb/usr/bin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/sbin:"
                "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -8336,6 +8847,9 @@ int main(int argc, char *argv[]) {
                 @{@"name" : @"ellekit-compat-loader",
                   @"source" : sourceElleKitCompatLoader,
                   @"installed" : kElleKitInjectorExecutable},
+                @{@"name" : @"core-entitlements-ldid",
+                  @"source" : sourceCoreEntitlementsLdid,
+                  @"installed" : kCoreEntitlementsLdidExecutable},
                 @{@"name" : @"package-validator",
                   @"source" : sourceSBInjectPackageValidator,
                   @"installed" : kSBInjectPackageValidatorExecutable},
@@ -8354,6 +8868,9 @@ int main(int argc, char *argv[]) {
                 @{@"name" : @"launchd-hook",
                   @"source" : sourceSBInjectLaunchdHook,
                   @"installed" : kSBInjectLaunchdHook},
+                @{@"name" : @"shadow-bootstrap",
+                  @"source" : sourceSBInjectShadowBootstrap,
+                  @"installed" : kSBInjectShadowBootstrap},
                 @{@"name" : @"ellekit-injector",
                   @"source" : [sourceTrustedElleKitRoot
                       stringByAppendingPathComponent:
@@ -8456,6 +8973,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kRootBrokerExecutable},
                 @{@"source" : sourceElleKitCompatLoader,
                   @"installed" : kElleKitInjectorExecutable},
+                @{@"source" : sourceCoreEntitlementsLdid,
+                  @"installed" : kCoreEntitlementsLdidExecutable},
                 @{@"source" : sourceExecWorker,
                   @"installed" : kExecWorkerExecutable},
                 @{@"source" : sourceExecWorkerNoKeychain,
@@ -8506,6 +9025,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kSBInjectPreferencesBridge},
                 @{@"source" : sourceSBInjectLaunchdHook,
                   @"installed" : kSBInjectLaunchdHook},
+                @{@"source" : sourceSBInjectShadowBootstrap,
+                  @"installed" : kSBInjectShadowBootstrap},
                 @{@"source" : sourceSBInjectLsdRegistrationHook,
                   @"installed" : kSBInjectLsdRegistrationHook},
                 @{@"source" : sourceSBInjectJitterd,
@@ -8750,6 +9271,103 @@ int main(int argc, char *argv[]) {
                     "version=1.2 files=%lu dynamicTrustCache=false",
                     (unsigned long)trustedElleKitFiles.count);
 
+        // Keep an installed Shadow 4.0.1 runtime byte-identical to the valid
+        // arm64e signatures in this Cryptex trust cache. Do not add Shadow to
+        // a device that did not already request the package.
+        bool shadowRuntimeRequested =
+            dpkg_package_version_is_installed(@"me.jjolano.shadow", @"4.0.1");
+        if (shadowRuntimeRequested) {
+            char *shadowDpkgArguments[] = {
+                "/var/jb/usr/bin/dpkg", "--force-downgrade", "-i",
+                (char *)[sourceLibSandy fileSystemRepresentation],
+                (char *)[sourceHookKit fileSystemRepresentation],
+                (char *)[sourceHookKitGum fileSystemRepresentation],
+                (char *)[sourceShadow fileSystemRepresentation], NULL};
+            int shadowDpkgStatus = run_and_wait_bounded(
+                shadowDpkgArguments[0], shadowDpkgArguments, 90000);
+            log_message("shadowFixedDpkgExit=%d package=me.jjolano.shadow "
+                        "version=4.0.1", shadowDpkgStatus);
+            NSArray<NSDictionary *> *trustedShadowFiles = @[
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:@"usr/local/bin/shdw"],
+                   @"path" : @"usr/local/bin/shdw" },
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:
+                            @"usr/lib/ShadowCore.dylib"],
+                   @"path" : @"usr/lib/ShadowCore.dylib" },
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:@"usr/lib/s.dylib"],
+                   @"path" : @"usr/lib/s.dylib" },
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:
+                            @"Library/MobileSubstrate/DynamicLibraries/"
+                             "Shadow.dylib"],
+                   @"path" : @"Library/MobileSubstrate/DynamicLibraries/"
+                              "Shadow.dylib" },
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:
+                            @"Library/Frameworks/Shadow.framework/Shadow"],
+                   @"path" : @"Library/Frameworks/Shadow.framework/Shadow" },
+                @{ @"source" : [sourceTrustedShadowRoot
+                        stringByAppendingPathComponent:
+                            @"Library/PreferenceBundles/ShadowSettings.bundle/"
+                             "ShadowSettings"],
+                   @"path" : @"Library/PreferenceBundles/"
+                              "ShadowSettings.bundle/ShadowSettings" },
+                @{ @"source" : [sourceTrustedLibSandyRoot
+                        stringByAppendingPathComponent:
+                            @"usr/local/libexec/sandyd"],
+                   @"path" : @"usr/local/libexec/sandyd" },
+                @{ @"source" : [sourceTrustedLibSandyRoot
+                        stringByAppendingPathComponent:
+                            @"usr/lib/libsandy.dylib"],
+                   @"path" : @"usr/lib/libsandy.dylib" },
+                @{ @"source" : [sourceTrustedLibSandyRoot
+                        stringByAppendingPathComponent:
+                            @"Library/MobileSubstrate/DynamicLibraries/"
+                             "SandyProxy.dylib"],
+                   @"path" : @"Library/MobileSubstrate/DynamicLibraries/"
+                              "SandyProxy.dylib" },
+                @{ @"source" : [sourceTrustedHookKitRoot
+                        stringByAppendingPathComponent:
+                            @"Library/Frameworks/HookKit.framework/HookKit"],
+                   @"path" : @"Library/Frameworks/HookKit.framework/HookKit" },
+                @{ @"source" : [sourceTrustedHookKitGumRoot
+                        stringByAppendingPathComponent:@"usr/lib/HKGum.dylib"],
+                   @"path" : @"usr/lib/HKGum.dylib" },
+            ];
+            bool shadowPayloadExact = shadowDpkgStatus == 0 &&
+                dpkg_package_version_is_installed(
+                    @"com.opa334.libsandy", @"1.1.6-4") &&
+                dpkg_package_version_is_installed(
+                    @"me.jjolano.fmwk.hookkit", @"3.0.5-1") &&
+                dpkg_package_version_is_installed(
+                    @"me.jjolano.fmwk.hookkit.gum", @"3.0.5-1") &&
+                dpkg_package_version_is_installed(
+                    @"me.jjolano.shadow", @"4.0.1");
+            for (NSDictionary *entry in trustedShadowFiles) {
+                NSString *installedPath = [@"/var/jb"
+                    stringByAppendingPathComponent:entry[@"path"]];
+                shadowPayloadExact &=
+                    files_are_equal(entry[@"source"], installedPath) &&
+                    sbinject_managed_file(installedPath, 0755);
+            }
+            if (!shadowPayloadExact) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"fixed Shadow install exited %d or its "
+                                   "runtime did not match the trust cache",
+                                  shadowDpkgStatus],
+                    nil);
+            }
+            log_message("shadowFixedTrustReady=true "
+                        "package=me.jjolano.shadow version=4.0.1 files=%lu "
+                        "dynamicTrustCache=false",
+                        (unsigned long)trustedShadowFiles.count);
+        } else {
+            log_message("shadowFixedTrustReady=not-requested version=4.0.1");
+        }
+
         // TrollStore Lite's helper is JIT-loaded, but its nested ldid spawn is
         // a separate kernel admission. Install the pinned dependency and the
         // Cryptex-signed ldid build before accepting app-install requests.
@@ -8991,6 +9609,7 @@ int main(int argc, char *argv[]) {
         bool sbinjectAmfidCandidateUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
+        bool sbinjectShadowBootstrapUpdated = false;
         bool sbinjectLsdRegistrationHookUpdated = false;
         bool sbinjectTrollStoreRegistrationHookUpdated = false;
         bool sbinjectJitterdUpdated = false;
@@ -9001,6 +9620,11 @@ int main(int argc, char *argv[]) {
                 sourceElleKitCompatLoader, @"/var/jb/usr/libexec",
                 @"codex-ellekit-loader", 16 * 1024 * 1024, 0755,
                 "elleKitInjector", NULL,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceCoreEntitlementsLdid, @"/var/jb/usr/libexec",
+                @"codex-ldid-ce", 16 * 1024 * 1024, 0755,
+                "coreEntitlementsLdid", NULL,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceExecWorker, @"/var/jb/usr/libexec",
@@ -9058,8 +9682,14 @@ int main(int argc, char *argv[]) {
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectLaunchdHook, @"/var/jb/usr/lib/sbinject",
-                @"launchdhook-v12.dylib", 16 * 1024 * 1024, 0755,
+                @"launchdhook-v41.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
+                sourceSBInjectShadowBootstrap,
+                @"/var/jb/usr/lib/sbinject",
+                @"shadow-bootstrap.dylib", 4 * 1024 * 1024, 0755,
+                "sbinjectShadowBootstrap", &sbinjectShadowBootstrapUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectLsdRegistrationHook,
@@ -9118,6 +9748,7 @@ int main(int argc, char *argv[]) {
             sbinjectAmfidHookUpdated || sbinjectAmfidCandidateUpdated ||
             sbinjectPreferencesBridgeUpdated ||
             sbinjectLaunchdHookUpdated ||
+            sbinjectShadowBootstrapUpdated ||
             sbinjectLsdRegistrationHookUpdated ||
             sbinjectTrollStoreRegistrationHookUpdated ||
             sbinjectJitterdUpdated || sbinjectJitterdPlistUpdated ||
@@ -9487,9 +10118,12 @@ int main(int argc, char *argv[]) {
         manifest[@"SBInjectAmfidExecutable"] = kAmfidCandidateExecutable;
         manifest[@"SBInjectPreferencesBridge"] = kSBInjectPreferencesBridge;
         manifest[@"SBInjectLaunchdHook"] = kSBInjectLaunchdHook;
+        manifest[@"SBInjectShadowBootstrap"] = kSBInjectShadowBootstrap;
         manifest[@"SpringBoardTweakAdmission"] =
             @"sbinject-jit-pre-main-no-dynamic-trust-cache";
         manifest[@"RuntimeExecWorkerExecutable"] = kExecWorkerExecutable;
+        manifest[@"ShadowCoreEntitlementsSigner"] =
+            kCoreEntitlementsLdidExecutable;
         manifest[@"RuntimeExecWorkerNoKeychainExecutable"] =
             kExecWorkerNoKeychainExecutable;
         manifest[@"RuntimeExecWorkerNativeSDKExecutable"] =

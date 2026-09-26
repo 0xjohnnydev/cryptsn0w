@@ -15,6 +15,8 @@ OPENSSH_SFTP_SERVER_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless
 OPENSSH_SFTP_SERVER_SHA256=d31534b270710381ddf5763f38458498c6bfe7308cbe09d1c45a1109d40dfb19
 LDID_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/ldid/ldid_2.1.5-procursus7_iphoneos-arm64.deb
 LDID_SHA256=f0808557064279e2e4febe443ed1e4fed76de42abf3491a45caca14915fd0895
+LDID_SOURCE_URL=https://codeload.github.com/ProcursusTeam/ldid/tar.gz/af86971ae72ec3ed3d0a699107c4e882324c941b
+LDID_SOURCE_SHA256=26be4e97a9c0bf608e1b7b301bf1e51cdb77e6069bf20981f615923cc080b1b1
 LIBPLIST_URL=https://apt.procurs.us/pool/main/iphoneos-arm64-rootless/1900/libplist/libplist3_2.2.0+git20230130.4b50a5a_iphoneos-arm64.deb
 LIBPLIST_SHA256=87f3e16108cc943d1c22a77a7f6bbcdef1d2f48bab0a23f867833e09dbd7d3ea
 SILEO_SHA256=8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a
@@ -22,6 +24,13 @@ ELLEKIT_URL=https://ellekit.space/pool/ellekit_1.2_iphoneos-arm64.deb
 ELLEKIT_SHA256=e21dc91bdc1be193dc915daecfff45256239b4fe583a36861e662ab1f43906dc
 PREFERENCELOADER_URL=https://github.com/Yves000/preferenceloader/releases/download/2.3.3/preferenceloader_2.3.3_iphoneos-arm64.deb
 PREFERENCELOADER_SHA256=eaacb5204e13dee166cc44763566bbbd565fbf3cf1ecc25b1a2f432b6bee6f86
+LIBSANDY_URL=http://apt.thebigboss.org/repofiles/cydia/debs2.0-rootless/libsandy_1.1.6-4_iphoneos-arm64.deb
+LIBSANDY_SHA256=5af8fdadfdb24e90929dc20031bd8e5d96f8c4e8b9f074977d8d10180e7827d7
+HOOKKIT_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-rootless.deb
+HOOKKIT_SHA256=cab797601e64be87ba88f93fe536293af2d20750e8da84d32449df97824e435a
+HOOKKIT_GUM_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-rootless-gum.deb
+HOOKKIT_GUM_SHA256=619e245d1590609a9ad63cf2fde8b69b92c5d158e4ca2af09128b99569944738
+SHADOW_SHA256=a9d6ce36b0fe6d688ba764cf7abf7f47e9fc973a1663bd0daf2c8d3e2ed2a1c9
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
 IDENTIFIER=com.openai.codex.dopamine.bootstrap
@@ -45,9 +54,14 @@ OPENSSH_CLIENT_DEB="$CACHE_DIR/openssh-client_9.7p1-1_iphoneos-arm64.deb"
 OPENSSH_SERVER_DEB="$CACHE_DIR/openssh-server_9.7p1-1_iphoneos-arm64.deb"
 OPENSSH_SFTP_SERVER_DEB="$CACHE_DIR/openssh-sftp-server_9.7p1-1_iphoneos-arm64.deb"
 LDID_DEB="$CACHE_DIR/ldid_2.1.5-procursus7_iphoneos-arm64.deb"
+LDID_SOURCE_ARCHIVE="$CACHE_DIR/ldid-af86971.tar.gz"
 LIBPLIST_DEB="$CACHE_DIR/libplist3_2.2.0+git20230130.4b50a5a_iphoneos-arm64.deb"
 ELLEKIT_DEB="$CACHE_DIR/ellekit_1.2_iphoneos-arm64.deb"
 PREFERENCELOADER_DEB="$CACHE_DIR/preferenceloader_2.3.3_iphoneos-arm64.deb"
+LIBSANDY_DEB="$CACHE_DIR/libsandy_1.1.6-4_iphoneos-arm64.deb"
+HOOKKIT_DEB="$CACHE_DIR/hookkit_3.0.5-1_iphoneos-arm64.deb"
+HOOKKIT_GUM_DEB="$CACHE_DIR/hookkit-gum_3.0.5-1_iphoneos-arm64.deb"
+SHADOW_DEB="$CACHE_DIR/shadow_4.0.1_iphoneos-arm64.deb"
 SILEO_DEB="$REPO_DIR/Application/Dopamine/Resources/sileo.deb"
 DEFAULT_SOURCES="$SCRIPT_DIR/dopamine-default.sources"
 REPOSITORY_COMPAT_CONFIG="$SCRIPT_DIR/dopamine-repository-compat.conf"
@@ -74,6 +88,10 @@ EMBEDDED_ELLEKIT_KEY="$EMBEDDED_KEYRING_DIR/ellekit.gpg"
 EMBEDDED_BIGBOSS_KEY="$EMBEDDED_KEYRING_DIR/bigboss.gpg"
 EMBEDDED_ELLEKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ellekit.deb"
 EMBEDDED_PREFERENCELOADER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/preferenceloader.deb"
+EMBEDDED_SHADOW_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/shadow.deb"
+EMBEDDED_LIBSANDY_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/libsandy.deb"
+EMBEDDED_HOOKKIT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/hookkit.deb"
+EMBEDDED_HOOKKIT_GUM_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/hookkit-gum.deb"
 EMBEDDED_OPENSSH_CLIENT_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-client.deb"
 EMBEDDED_OPENSSH_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-server.deb"
 EMBEDDED_OPENSSH_SFTP_SERVER_DEB="$IMAGE_ROOT/usr/local/share/codex-bootstrap/openssh-sftp-server.deb"
@@ -83,12 +101,17 @@ EMBEDDED_HOST_SSH_AUTHORIZED_KEY="$IMAGE_ROOT/usr/local/share/codex-bootstrap/ho
 TRUSTED_ELLEKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ellekit-root"
 TRUSTED_LDID_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/ldid-root"
 TRUSTED_LIBPLIST_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/libplist-root"
+TRUSTED_SHADOW_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/shadow-root"
+TRUSTED_LIBSANDY_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/libsandy-root"
+TRUSTED_HOOKKIT_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/hookkit-root"
+TRUSTED_HOOKKIT_GUM_ROOT="$IMAGE_ROOT/usr/local/share/codex-bootstrap/trusted/hookkit-gum-root"
 SYSTEM_SILEO_APP="$IMAGE_ROOT/Applications/Sileo.app"
 SILEO_SYSTEM_ENTITLEMENTS="$WORK_DIR/sileo-system-entitlements.plist"
 SILEO_ASSET_INFO="$WORK_DIR/sileo-asset-info.json"
 SILEO_NORMALIZED_ICON="$WORK_DIR/AppIcon60x60@2x.png"
 TRUSTED_RUNTIME_CDHASHES="$WORK_DIR/trusted-runtime-cdhashes.txt"
 ELLEKIT_COMPAT_LOADER="$IMAGE_ROOT/usr/local/bin/codex-ellekit-loader"
+CORE_ENTITLEMENTS_LDID="$IMAGE_ROOT/usr/local/bin/codex-ldid-ce"
 EXEC_WORKER="$IMAGE_ROOT/usr/local/bin/codex-exec-worker"
 EXEC_WORKER_NO_KEYCHAIN="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-no-keychain"
 EXEC_WORKER_NATIVE_SDK="$IMAGE_ROOT/usr/local/bin/codex-exec-worker-native-sdk"
@@ -102,7 +125,8 @@ SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
 SBINJECT_AMFIHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/amfihook.dylib"
-SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v12.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v41.dylib"
+SBINJECT_SHADOW_BOOTSTRAP="$IMAGE_ROOT/usr/local/lib/sbinject/shadow-bootstrap.dylib"
 SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
 SBINJECT_TROLLSTORE_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trollstore-registration-hook.dylib"
 SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
@@ -141,13 +165,25 @@ PATCHED_OPAINJECT_DIR="$WORK_DIR/opainject-ios27"
 PATCHED_OPAINJECT_DYLD="$PATCHED_OPAINJECT_DIR/dyld.m"
 PATCHED_OPAINJECT_ROP="$PATCHED_OPAINJECT_DIR/rop_inject.m"
 PATCHED_OPAINJECT_THREAD_UTILS="$PATCHED_OPAINJECT_DIR/thread_utils.m"
+RING_EXCEPTION_SERVER_C="$WORK_DIR/ring-exc-server.c"
+RING_EXCEPTION_SERVER_H="$WORK_DIR/ring-exc-server.h"
+LDID_SOURCE_ROOT="$WORK_DIR/ldid-source"
+PATCHED_LDID_SOURCE="$WORK_DIR/ldid-core-entitlements.cpp"
 PACKAGE_ROOT="$WORK_DIR/sileo-package"
 REPACKED_SILEO="$WORK_DIR/sileo.launchable.deb"
 ELLEKIT_PACKAGE_ROOT="$WORK_DIR/ellekit-package"
+SHADOW_PACKAGE_ROOT="$WORK_DIR/shadow-package"
+LIBSANDY_PACKAGE_ROOT="$WORK_DIR/libsandy-package"
+HOOKKIT_PACKAGE_ROOT="$WORK_DIR/hookkit-package"
+HOOKKIT_GUM_PACKAGE_ROOT="$WORK_DIR/hookkit-gum-package"
 OPENSSH_PACKAGE_ROOT="$WORK_DIR/openssh-package"
 LDID_PACKAGE_ROOT="$WORK_DIR/ldid-package"
 LIBPLIST_PACKAGE_ROOT="$WORK_DIR/libplist-package"
 REPACKED_ELLEKIT="$WORK_DIR/ellekit.cryptex-signed.deb"
+REPACKED_SHADOW="$WORK_DIR/shadow.cryptex-signed.deb"
+REPACKED_LIBSANDY="$WORK_DIR/libsandy.cryptex-signed.deb"
+REPACKED_HOOKKIT="$WORK_DIR/hookkit.cryptex-signed.deb"
+REPACKED_HOOKKIT_GUM="$WORK_DIR/hookkit-gum.cryptex-signed.deb"
 REPACKED_LDID="$WORK_DIR/ldid.cryptex-signed.deb"
 REPACKED_LIBPLIST="$WORK_DIR/libplist.cryptex-signed.deb"
 UNSIGNED_OUT="$OUT_DIR/unsigned"
@@ -383,7 +419,9 @@ if [[ "$BUILD_STAGE" == ssh ]]; then
     exit 0
 fi
 
-for tool in awk codesign curl dpkg-deb gpg ldid lipo plutil python3 rg shasum sips stat tar xcrun zstd; do
+for tool in awk codesign curl dpkg-deb gpg install_name_tool ldid lipo \
+            otool pkg-config plutil python3 rg shasum sips stat tar xcrun \
+            zstd; do
     command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 [[ -x "$CRYPTEXCTL" ]] || die "missing SRD cryptexctl: $CRYPTEXCTL"
@@ -403,20 +441,32 @@ fetch_pinned "$OPENSSH_SERVER_URL" "$OPENSSH_SERVER_SHA256" \
 fetch_pinned "$OPENSSH_SFTP_SERVER_URL" "$OPENSSH_SFTP_SERVER_SHA256" \
     "$OPENSSH_SFTP_SERVER_DEB"
 fetch_pinned "$LDID_URL" "$LDID_SHA256" "$LDID_DEB"
+fetch_pinned "$LDID_SOURCE_URL" "$LDID_SOURCE_SHA256" \
+    "$LDID_SOURCE_ARCHIVE"
 fetch_pinned "$LIBPLIST_URL" "$LIBPLIST_SHA256" "$LIBPLIST_DEB"
 fetch_pinned "$ELLEKIT_URL" "$ELLEKIT_SHA256" "$ELLEKIT_DEB"
 fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
     "$PREFERENCELOADER_DEB"
+fetch_pinned "$LIBSANDY_URL" "$LIBSANDY_SHA256" "$LIBSANDY_DEB"
+fetch_pinned "$HOOKKIT_URL" "$HOOKKIT_SHA256" "$HOOKKIT_DEB"
+fetch_pinned "$HOOKKIT_GUM_URL" "$HOOKKIT_GUM_SHA256" "$HOOKKIT_GUM_DEB"
+[[ -f "$SHADOW_DEB" ]] || die "missing pinned Shadow 4.0.1 package"
+[[ "$(sha256_of "$SHADOW_DEB")" == "$SHADOW_SHA256" ]] || \
+    die "cached hash mismatch: ${SHADOW_DEB:t}"
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
 
 rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
+    "$SHADOW_PACKAGE_ROOT" "$LIBSANDY_PACKAGE_ROOT" \
+    "$HOOKKIT_PACKAGE_ROOT" "$HOOKKIT_GUM_PACKAGE_ROOT" \
     "$OPENSSH_PACKAGE_ROOT" "$LDID_PACKAGE_ROOT" \
-    "$LIBPLIST_PACKAGE_ROOT" \
+    "$LIBPLIST_PACKAGE_ROOT" "$LDID_SOURCE_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
-    "$REPACKED_ELLEKIT" "$REPACKED_LDID" "$REPACKED_LIBPLIST" \
+    "$REPACKED_ELLEKIT" "$REPACKED_SHADOW" "$REPACKED_LIBSANDY" \
+    "$REPACKED_HOOKKIT" "$REPACKED_HOOKKIT_GUM" \
+    "$REPACKED_LDID" "$REPACKED_LIBPLIST" \
     "$TRUSTED_RUNTIME_CDHASHES" \
     "$SILEO_SYSTEM_ENTITLEMENTS" "$SILEO_ASSET_INFO" \
     "$SILEO_NORMALIZED_ICON"
@@ -434,7 +484,12 @@ mkdir -p \
     "$TRUSTED_ELLEKIT_ROOT" \
     "$TRUSTED_LDID_ROOT" \
     "$TRUSTED_LIBPLIST_ROOT" \
+    "$TRUSTED_SHADOW_ROOT" \
+    "$TRUSTED_LIBSANDY_ROOT" \
+    "$TRUSTED_HOOKKIT_ROOT" \
+    "$TRUSTED_HOOKKIT_GUM_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
+    "$LDID_SOURCE_ROOT" \
     "$PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
 
@@ -508,6 +563,105 @@ for (( index = 1; index <= ${#ellekit_package_machos}; ++index )); do
         die "embedded ElleKit payload changed after repacking"
 done
 
+# Re-sign the exact Shadow runtime and its binary dependencies. The upstream
+# universal binaries contain an invalid arm64e signature, which iOS 27 rejects
+# during dlopen even when its CodeDirectory hash is in the Cryptex trust cache.
+# Install and trust the same repacked bytes so package ownership cannot diverge
+# from the broker's fixed-trust payload.
+[[ "$(dpkg-deb -f "$SHADOW_DEB" Package)" == me.jjolano.shadow && \
+   "$(dpkg-deb -f "$SHADOW_DEB" Version)" == 4.0.1 && \
+   "$(dpkg-deb -f "$SHADOW_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned Shadow package identity changed"
+[[ "$(dpkg-deb -f "$LIBSANDY_DEB" Package)" == com.opa334.libsandy && \
+   "$(dpkg-deb -f "$LIBSANDY_DEB" Version)" == 1.1.6-4 && \
+   "$(dpkg-deb -f "$LIBSANDY_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned libSandy package identity changed"
+[[ "$(dpkg-deb -f "$HOOKKIT_DEB" Package)" == me.jjolano.fmwk.hookkit && \
+   "$(dpkg-deb -f "$HOOKKIT_DEB" Version)" == 3.0.5-1 && \
+   "$(dpkg-deb -f "$HOOKKIT_DEB" Architecture)" == iphoneos-arm64 ]] || \
+    die "pinned HookKit package identity changed"
+[[ "$(dpkg-deb -f "$HOOKKIT_GUM_DEB" Package)" == \
+       me.jjolano.fmwk.hookkit.gum && \
+   "$(dpkg-deb -f "$HOOKKIT_GUM_DEB" Version)" == 3.0.5-1 && \
+   "$(dpkg-deb -f "$HOOKKIT_GUM_DEB" Architecture)" == \
+       iphoneos-arm64 ]] || die "pinned HookKit gum package identity changed"
+dpkg-deb -R "$SHADOW_DEB" "$SHADOW_PACKAGE_ROOT"
+dpkg-deb -R "$LIBSANDY_DEB" "$LIBSANDY_PACKAGE_ROOT"
+dpkg-deb -R "$HOOKKIT_DEB" "$HOOKKIT_PACKAGE_ROOT"
+dpkg-deb -R "$HOOKKIT_GUM_DEB" "$HOOKKIT_GUM_PACKAGE_ROOT"
+SHADOW_CORE="$SHADOW_PACKAGE_ROOT/var/jb/usr/lib/ShadowCore.dylib"
+SHADOW_PRIVATE_SANDY="$SHADOW_PACKAGE_ROOT/var/jb/usr/lib/s.dylib"
+cp "$LIBSANDY_PACKAGE_ROOT/var/jb/usr/lib/libsandy.dylib" \
+    "$SHADOW_PRIVATE_SANDY"
+install_name_tool -id @rpath/s.dylib "$SHADOW_PRIVATE_SANDY"
+install_name_tool -change @rpath/libsandy.dylib @loader_path/s.dylib \
+    "$SHADOW_CORE"
+python3 "$SCRIPT_DIR/patch_macho_return_zero.py" \
+    "$SHADOW_PRIVATE_SANDY" _libSandy_applyProfile
+otool -L "$SHADOW_CORE" | rg -q '@loader_path/s\.dylib' || \
+    die "ShadowCore did not select its private libSandy compatibility copy"
+otool -L "$SHADOW_PRIVATE_SANDY" | rg -q '@rpath/s\.dylib' || \
+    die "private Shadow libSandy has an unexpected install name"
+typeset -a shadow_package_machos
+while IFS= read -r -d '' candidate; do
+    if lipo -archs "$candidate" >/dev/null 2>&1; then
+        shadow_package_machos+=("$candidate")
+    fi
+done < <(find "$SHADOW_PACKAGE_ROOT" "$LIBSANDY_PACKAGE_ROOT" \
+    "$HOOKKIT_PACKAGE_ROOT" "$HOOKKIT_GUM_PACKAGE_ROOT" \
+    -type f -print0)
+(( ${#shadow_package_machos} >= 11 )) || \
+    die "pinned Shadow runtime has an incomplete Mach-O set"
+for candidate in "${shadow_package_machos[@]}"; do
+    codesign --force --sign - --timestamp=none --pagesize 4096 \
+        --generate-entitlement-der --preserve-metadata=entitlements \
+        "$candidate"
+    codesign --verify --strict --all-architectures "$candidate" || \
+        die "fixed Shadow runtime signature is invalid: ${candidate:t}"
+done
+dpkg-deb --root-owner-group -b "$SHADOW_PACKAGE_ROOT" \
+    "$REPACKED_SHADOW" >/dev/null
+dpkg-deb --root-owner-group -b "$LIBSANDY_PACKAGE_ROOT" \
+    "$REPACKED_LIBSANDY" >/dev/null
+dpkg-deb --root-owner-group -b "$HOOKKIT_PACKAGE_ROOT" \
+    "$REPACKED_HOOKKIT" >/dev/null
+dpkg-deb --root-owner-group -b "$HOOKKIT_GUM_PACKAGE_ROOT" \
+    "$REPACKED_HOOKKIT_GUM" >/dev/null
+cp "$REPACKED_SHADOW" "$EMBEDDED_SHADOW_DEB"
+cp "$REPACKED_LIBSANDY" "$EMBEDDED_LIBSANDY_DEB"
+cp "$REPACKED_HOOKKIT" "$EMBEDDED_HOOKKIT_DEB"
+cp "$REPACKED_HOOKKIT_GUM" "$EMBEDDED_HOOKKIT_GUM_DEB"
+chmod 0644 "$EMBEDDED_SHADOW_DEB" "$EMBEDDED_LIBSANDY_DEB" \
+    "$EMBEDDED_HOOKKIT_DEB" "$EMBEDDED_HOOKKIT_GUM_DEB"
+dpkg-deb -x "$REPACKED_SHADOW" "$TRUSTED_SHADOW_ROOT"
+dpkg-deb -x "$REPACKED_LIBSANDY" "$TRUSTED_LIBSANDY_ROOT"
+dpkg-deb -x "$REPACKED_HOOKKIT" "$TRUSTED_HOOKKIT_ROOT"
+dpkg-deb -x "$REPACKED_HOOKKIT_GUM" "$TRUSTED_HOOKKIT_GUM_ROOT"
+typeset -a trusted_shadow_machos
+while IFS= read -r -d '' candidate; do
+    if lipo -archs "$candidate" >/dev/null 2>&1; then
+        trusted_shadow_machos+=("$candidate")
+    fi
+done < <(find "$TRUSTED_SHADOW_ROOT" "$TRUSTED_LIBSANDY_ROOT" \
+    "$TRUSTED_HOOKKIT_ROOT" "$TRUSTED_HOOKKIT_GUM_ROOT" \
+    -type f -print0)
+(( ${#trusted_shadow_machos} >= 11 )) || \
+    die "pinned Shadow runtime has an incomplete Mach-O set"
+for package_candidate in "${shadow_package_machos[@]}"; do
+    package_relative=${package_candidate#*/var/jb/}
+    trusted_match=""
+    for candidate in "${trusted_shadow_machos[@]}"; do
+        if [[ "$candidate" == */var/jb/$package_relative ]]; then
+            trusted_match="$candidate"
+            break
+        fi
+    done
+    [[ -n "$trusted_match" && \
+       "$(sha256_of "$package_candidate")" == \
+       "$(sha256_of "$trusted_match")" ]] || \
+        die "embedded Shadow runtime changed after repacking: $package_relative"
+done
+
 # TrollStore Lite invokes ldid as a nested process while its own helper runs
 # through the JIT worker.  That nested exec is a separate kernel admission
 # decision, so pin and fixed-trust this one infrastructure executable.  Apps
@@ -557,9 +711,9 @@ TRUSTED_LDID="$TRUSTED_LDID_ROOT/var/jb/usr/bin/ldid"
     die "embedded ldid payload changed after repacking"
 
 # Build the supplied SBInject chain as thin arm64e artifacts.  The launchd
-# component contains only SpringBoard path redirection, jitterd accepts only a
-# self-request from the exact replacement path, and generalhook performs the
-# pre-main JIT/dyld-bypass/ElleKit handoff.
+# component redirects SpringBoard and Settings and passes ElleKit through
+# xpcproxy to App Store processes. Jitterd accepts only admitted requests, and
+# generalhook performs the pre-main JIT/dyld-bypass/ElleKit handoff.
 xcrun --sdk iphoneos clang \
     -arch arm64e \
     -miphoneos-version-min=17.0 \
@@ -569,10 +723,33 @@ xcrun --sdk iphoneos clang \
     -I "$SBINJECT_SOURCE_DIR" \
     "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -install_name /var/jb/usr/lib/sbinject/launchdhook-v12.dylib \
+    -lsandbox \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook-v41.dylib \
     -o "$SBINJECT_LAUNCHDHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LAUNCHDHOOK"
+
+typeset -a shadow_bootstrap_slices
+for architecture in arm64 arm64e; do
+    slice="$WORK_DIR/shadow-bootstrap.${architecture}.dylib"
+    xcrun --sdk iphoneos clang \
+        -arch "$architecture" \
+        -miphoneos-version-min=17.0 \
+        -isysroot "$SDKROOT" \
+        -dynamiclib -fblocks -fobjc-arc -x objective-c \
+        -Os -Wall -Wextra -Werror \
+        -I "$SBINJECT_SOURCE_DIR" \
+        "$SBINJECT_SOURCE_DIR/sbinject_shadow_bootstrap.c" \
+        -lsandbox \
+        -framework Foundation \
+        -install_name /var/jb/usr/lib/sbinject/shadow-bootstrap.dylib \
+        -o "$slice"
+    shadow_bootstrap_slices+=("$slice")
+done
+lipo -create "${shadow_bootstrap_slices[@]}" \
+    -output "$SBINJECT_SHADOW_BOOTSTRAP"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_SHADOW_BOOTSTRAP"
 
 xcrun --sdk iphoneos clang \
     -arch arm64e \
@@ -779,6 +956,47 @@ zstd -dc "$BOOTSTRAP_ARCHIVE" | \
 ditto --noqtn "$WORK_DIR/var/jb" \
     "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus"
 rm -rf "$WORK_DIR/var"
+
+# Procursus ldid 2.1.5 emits the older generic ASN.1 dictionary form for the
+# DER entitlement slot. iOS 27 requires CoreEntitlements' application-tagged
+# encoding. Build one fixed broker signer from the pinned upstream source and
+# use the platform serializer so enabled App Store executables keep valid DER.
+tar -xzf "$LDID_SOURCE_ARCHIVE" -C "$LDID_SOURCE_ROOT" \
+    --strip-components=1
+python3 "$SCRIPT_DIR/patch_ldid_core_entitlements.py" \
+    "$LDID_SOURCE_ROOT/ldid.cpp" "$PATCHED_LDID_SOURCE"
+LIBPLIST_INCLUDE=$(pkg-config --variable=includedir libplist-2.0)
+OPENSSL_INCLUDE=$(pkg-config --variable=includedir libcrypto)
+[[ -f "$LIBPLIST_INCLUDE/plist/plist.h" && \
+   -f "$OPENSSL_INCLUDE/openssl/opensslv.h" ]] || \
+    die "host ldid build headers are unavailable"
+xcrun --sdk iphoneos clang++ \
+    -arch arm64 \
+    -miphoneos-version-min=17.0 \
+    -isysroot "$SDKROOT" \
+    -std=c++11 -O2 \
+    '-DLDID_VERSION="2.1.5-procursus7-ce"' \
+    -I "$LDID_SOURCE_ROOT" \
+    -I "$LIBPLIST_INCLUDE" \
+    -I "$OPENSSL_INCLUDE" \
+    "$PATCHED_LDID_SOURCE" \
+    -L "$LIBPLIST_PACKAGE_ROOT/var/jb/usr/lib" \
+    -L "$IMAGE_ROOT/usr/local/share/codex-bootstrap/procursus/usr/lib" \
+    -lplist-2.0.3 -lcrypto.3 \
+    -framework CoreFoundation \
+    -lCoreEntitlements \
+    -Wl,-rpath,/var/jb/usr/lib \
+    -o "$CORE_ENTITLEMENTS_LDID"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    --identifier com.openai.codex.shadow-signer \
+    --entitlements "$ELLEKIT_COMPAT_ENTITLEMENTS" \
+    "$CORE_ENTITLEMENTS_LDID"
+codesign --verify --strict --all-architectures \
+    "$CORE_ENTITLEMENTS_LDID" || \
+    die "CoreEntitlements ldid signature is invalid"
+otool -L "$CORE_ENTITLEMENTS_LDID" | \
+    rg -q '^\s+/usr/lib/libCoreEntitlements\.dylib ' || \
+    die "CoreEntitlements ldid does not use the platform serializer"
 
 # The bootstrap archive and the standalone OpenSSH packages are released on
 # independent schedules.  Trust and compare the exact pinned package payload
@@ -1042,6 +1260,13 @@ python3 "$SCRIPT_DIR/patch_opainject_runtime.py" \
     "$OPAINJECT_DIR/rop_inject.m" \
     "$PATCHED_OPAINJECT_DIR"
 
+MACOS_SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+xcrun mig -arch arm64e -I"$MACOS_SDKROOT/usr/include" \
+    -server "$RING_EXCEPTION_SERVER_C" \
+    -sheader "$RING_EXCEPTION_SERVER_H" \
+    -user /dev/null -header /dev/null \
+    "$MACOS_SDKROOT/usr/include/mach/exc.defs"
+
 # ElleKit's legacy loader writes an anonymous launchd page and then requests
 # executable protection. iOS 27 enforces W^X on that transition. Build the
 # pinned Dopamine opainject ROP lane so launchd can call its existing dlopen
@@ -1055,10 +1280,12 @@ xcrun --sdk iphoneos clang \
     -fblocks \
     -include stdint.h \
     -I "$OPAINJECT_DIR" \
+    -I "$WORK_DIR" \
     -framework Foundation \
     -framework CoreFoundation \
     -lsandbox \
     "$SCRIPT_DIR/ellekit_compat_loader.m" \
+    "$RING_EXCEPTION_SERVER_C" \
     "$PATCHED_OPAINJECT_DYLD" \
     "$PATCHED_OPAINJECT_ROP" \
     "$PATCHED_OPAINJECT_THREAD_UTILS" \
@@ -1179,6 +1406,7 @@ codesign --verify --strict --all-architectures \
 typeset -a trusted_runtime_cdhashes
 for candidate in \
     "$ELLEKIT_COMPAT_LOADER" \
+    "$CORE_ENTITLEMENTS_LDID" \
     "$EXEC_WORKER" \
     "$EXEC_WORKER_NO_KEYCHAIN" \
     "$EXEC_WORKER_NATIVE_SDK" \
@@ -1192,6 +1420,7 @@ for candidate in \
     "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK" \
     "$SBINJECT_PREFERENCES_BRIDGE" \
     "$SBINJECT_LAUNCHDHOOK" \
+    "$SBINJECT_SHADOW_BOOTSTRAP" \
     "$SBINJECT_JITTERD" \
     "$SPRINGBOARD_CANDIDATE_GENERALHOOK" \
     "$SPRINGBOARD_CANDIDATE" \
@@ -1201,6 +1430,7 @@ for candidate in \
     "$AMFID_CANDIDATE" \
     "${prepared_sileo_machos[@]}" \
     "${trusted_ellekit_machos[@]}" \
+    "${trusted_shadow_machos[@]}" \
     "${trusted_ldid_machos[@]}" \
     "${trusted_openssh_machos[@]}"; do
     for architecture in $(lipo -archs "$candidate"); do
@@ -1325,6 +1555,26 @@ pathlib.Path(summary_path).write_text(
     json.dumps(summary, indent=2, sort_keys=True) + "\n"
 )
 PY
+
+if [[ -n "${CODEX_EXTRA_TRUST_CDHASHES:-}" ]]; then
+    typeset -a extra_trust_cdhash_arguments
+    for cdhash in ${(s:,:)CODEX_EXTRA_TRUST_CDHASHES}; do
+        print -r -- "$cdhash" | rg -q '^[0-9a-f]{40}$' || \
+            die "invalid extra trust-cache CDHash: $cdhash"
+        extra_trust_cdhash_arguments+=(--cdhash "$cdhash")
+    done
+    (( ${#extra_trust_cdhash_arguments} > 0 )) || \
+        die "extra trust-cache CDHash list is empty"
+    python3 "$SCRIPT_DIR/patch_cryptex_trust_cache.py" \
+        --bundle "$BUNDLE" \
+        --build-summary "$SUMMARY" \
+        "${extra_trust_cdhash_arguments[@]}"
+    "$CRYPTEXCTL" dump-trust-cache "$TRUSTCACHE" >"$TRUSTCACHE_DUMP"
+    for cdhash in ${(s:,:)CODEX_EXTRA_TRUST_CDHASHES}; do
+        rg -q "^${cdhash} " "$TRUSTCACHE_DUMP" || \
+            die "extra CDHash is absent from Cryptex trust cache: $cdhash"
+    done
+fi
 
 print -- "unsignedBundle=$BUNDLE"
 print -- "buildSummary=$SUMMARY"

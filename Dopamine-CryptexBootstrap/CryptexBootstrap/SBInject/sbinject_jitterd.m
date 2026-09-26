@@ -6,19 +6,27 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
+#include <mach-o/loader.h>
 #include <os/log.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define CODEX_PT_DETACH 11
 #define CODEX_PT_ATTACHEXC 14
 #define CODEX_PROC_PIDPATH_MAX 4096
 #define CODEX_CS_OPS_STATUS 0U
+#define CODEX_CS_VALID 0x00000001U
+#define CODEX_CS_KILLED 0x01000000U
 #define CODEX_CS_DEBUGGED 0x10000000U
 
 extern int ptrace(int request, pid_t pid, caddr_t address, int data);
@@ -48,6 +56,20 @@ static bool exact_root_process(pid_t pid, const char *expected_path) {
            realpath(expected_path, expected) != NULL &&
            strcmp(observed, expected) == 0 &&
            lstat(expected, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 0 && status.st_gid == 0 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static bool exact_root_launchd_process(pid_t pid) {
+    if (pid != 1) return false;
+    char path[CODEX_PROC_PIDPATH_MAX] = {0};
+    struct stat status = {0};
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0) return false;
+    const char *leaf = strrchr(path, '/');
+    leaf = leaf != NULL ? leaf + 1 : path;
+    return strcmp(leaf, "launchd") == 0 &&
+           lstat(path, &status) == 0 && S_ISREG(status.st_mode) &&
            !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
            status.st_uid == 0 && status.st_gid == 0 &&
            (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
@@ -161,6 +183,243 @@ static bool managed_app_launcher_process(pid_t pid) {
            secure_regular_file(marker, 64 * 1024, NULL);
 }
 
+static bool shadow_enabled_app_process(pid_t pid) {
+    char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
+        realpath(raw_path, observed) == NULL) {
+        return false;
+    }
+    static const char *const prefixes[] = {
+        "/private/var/containers/Bundle/Application/",
+        "/var/containers/Bundle/Application/",
+    };
+    bool app_store_path = false;
+    for (size_t index = 0;
+         index < sizeof(prefixes) / sizeof(prefixes[0]); ++index) {
+        size_t length = strlen(prefixes[index]);
+        if (strncmp(observed, prefixes[index], length) == 0) {
+            app_store_path = true;
+            break;
+        }
+    }
+    if (!app_store_path) return false;
+
+    char bundle_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(bundle_path, observed, sizeof(bundle_path)) >=
+        sizeof(bundle_path)) {
+        return false;
+    }
+    char *app_suffix = strstr(bundle_path, ".app/");
+    if (app_suffix == NULL) return false;
+    app_suffix[4] = '\0';
+
+    NSString *bundlePath = [NSString stringWithUTF8String:bundle_path];
+    NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
+    NSString *identifier = bundle.bundleIdentifier;
+    NSString *executablePath = bundle.executablePath;
+    if (identifier.length == 0 || executablePath.length == 0) return false;
+    char resolved_executable[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (realpath(executablePath.fileSystemRepresentation,
+                 resolved_executable) == NULL ||
+        strcmp(resolved_executable, observed) != 0) {
+        return false;
+    }
+
+    NSDictionary *preferences =
+        [NSDictionary dictionaryWithContentsOfFile:
+            @"/var/mobile/Library/Preferences/me.jjolano.shadow.plist"];
+    if (![preferences isKindOfClass:[NSDictionary class]]) return false;
+    NSDictionary *app = preferences[identifier];
+    if (![app isKindOfClass:[NSDictionary class]]) app = nil;
+    if ([app[@"App_Disabled"] boolValue]) return false;
+    if ([preferences[@"Global_Enabled"] boolValue] &&
+        ![preferences[@"SingleToggleMigrated"] boolValue]) {
+        return true;
+    }
+    return [app[@"App_Enabled"] boolValue];
+}
+
+static bool target_compatibility_app_process(pid_t pid) {
+    char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
+        realpath(raw_path, observed) == NULL) {
+        return false;
+    }
+    static const char *const prefixes[] = {
+        "/private/var/containers/Bundle/Application/",
+        "/var/containers/Bundle/Application/",
+    };
+    bool app_store_path = false;
+    for (size_t index = 0;
+         index < sizeof(prefixes) / sizeof(prefixes[0]); ++index) {
+        size_t length = strlen(prefixes[index]);
+        if (strncmp(observed, prefixes[index], length) == 0) {
+            app_store_path = true;
+            break;
+        }
+    }
+    if (!app_store_path) return false;
+
+    char bundle_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(bundle_path, observed, sizeof(bundle_path)) >=
+        sizeof(bundle_path)) {
+        return false;
+    }
+    char *app_suffix = strstr(bundle_path, ".app/");
+    if (app_suffix == NULL) return false;
+    app_suffix[4] = '\0';
+
+    NSString *bundlePath = [NSString stringWithUTF8String:bundle_path];
+    NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
+    NSString *identifier = bundle.bundleIdentifier;
+    NSString *executablePath = bundle.executablePath;
+    bool allowlisted =
+        [identifier isEqualToString:@"uk.co.bbc.news"] ||
+        [identifier isEqualToString:@"org.navyfederal.nfcuforiphone"];
+    if (!allowlisted || executablePath.length == 0) return false;
+    char resolved_executable[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (realpath(executablePath.fileSystemRepresentation,
+                 resolved_executable) == NULL ||
+        strcmp(resolved_executable, observed) != 0) {
+        return false;
+    }
+
+    NSString *containerPath = bundlePath.stringByDeletingLastPathComponent;
+    NSString *markerPath = [containerPath stringByAppendingPathComponent:
+        [NSString stringWithUTF8String:CODEX_SBINJECT_MANAGED_APP_MARKER]];
+    NSDictionary *marker =
+        [NSDictionary dictionaryWithContentsOfFile:markerPath];
+    if (![marker isKindOfClass:NSDictionary.class] ||
+        [marker[@"Version"] integerValue] != 5 ||
+        ![marker[@"Mode"] isEqualToString:@"TargetCompatibility"] ||
+        ![marker[@"BundleIdentifier"] isEqualToString:identifier]) {
+        return false;
+    }
+
+    NSString *bootstrapPath = [bundlePath stringByAppendingPathComponent:
+        [NSString stringWithUTF8String:
+            CODEX_SBINJECT_COMPATIBILITY_APP_BOOTSTRAP_NAME]];
+    return regular_files_equal(bootstrapPath.fileSystemRepresentation,
+                               CODEX_SBINJECT_SHADOW_BOOTSTRAP);
+}
+
+static bool macho_file_has_uuid(const char *path,
+                                const uint8_t expected[16]) {
+    struct stat status = {0};
+    if (path == NULL || lstat(path, &status) != 0 ||
+        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
+        status.st_nlink != 1 || status.st_uid != 33 || status.st_gid != 33 ||
+        status.st_size != 64328448 ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return false;
+    struct mach_header_64 header = {0};
+    bool valid = pread(descriptor, &header, sizeof(header), 0) ==
+                     (ssize_t)sizeof(header) &&
+                 header.magic == MH_MAGIC_64 &&
+                 header.filetype == MH_EXECUTE && header.ncmds > 0 &&
+                 header.ncmds <= 4096U && header.sizeofcmds > 0 &&
+                 header.sizeofcmds <= 4U * 1024U * 1024U;
+    uint8_t *commands = valid ? malloc(header.sizeofcmds) : NULL;
+    valid = valid && commands != NULL &&
+            pread(descriptor, commands, header.sizeofcmds,
+                  (off_t)sizeof(header)) == (ssize_t)header.sizeofcmds;
+    bool matched = false;
+    if (valid) {
+        size_t offset = 0;
+        for (uint32_t index = 0; index < header.ncmds; ++index) {
+            if (offset + sizeof(struct load_command) > header.sizeofcmds) break;
+            struct load_command *command =
+                (struct load_command *)(commands + offset);
+            if (command->cmdsize < sizeof(*command) ||
+                offset + command->cmdsize > header.sizeofcmds) {
+                break;
+            }
+            if (command->cmd == LC_UUID &&
+                command->cmdsize >= sizeof(struct uuid_command)) {
+                struct uuid_command *uuid = (struct uuid_command *)command;
+                matched = memcmp(uuid->uuid, expected, 16) == 0;
+                break;
+            }
+            offset += command->cmdsize;
+        }
+    }
+    free(commands);
+    close(descriptor);
+    return matched;
+}
+
+static bool target_memory_patch_app_process(pid_t pid) {
+    char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
+        realpath(raw_path, observed) == NULL) {
+        return false;
+    }
+    static const char *const prefixes[] = {
+        "/private/var/containers/Bundle/Application/",
+        "/var/containers/Bundle/Application/",
+    };
+    bool app_store_path = false;
+    for (size_t index = 0;
+         index < sizeof(prefixes) / sizeof(prefixes[0]); ++index) {
+        size_t length = strlen(prefixes[index]);
+        if (strncmp(observed, prefixes[index], length) == 0) {
+            app_store_path = true;
+            break;
+        }
+    }
+    if (!app_store_path) return false;
+
+    char bundle_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (strlcpy(bundle_path, observed, sizeof(bundle_path)) >=
+        sizeof(bundle_path)) {
+        return false;
+    }
+    char *app_suffix = strstr(bundle_path, ".app/");
+    if (app_suffix == NULL) return false;
+    app_suffix[4] = '\0';
+    NSBundle *bundle = [NSBundle bundleWithPath:
+        [NSString stringWithUTF8String:bundle_path]];
+    NSString *identifier = bundle.bundleIdentifier;
+    NSString *version = [bundle objectForInfoDictionaryKey:
+        @"CFBundleShortVersionString"];
+    NSString *build = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+    NSString *executablePath = bundle.executablePath;
+    if (![identifier isEqualToString:@"org.navyfederal.nfcuforiphone"] ||
+        ![version isEqualToString:@"2026.9.1"] ||
+        ![build isEqualToString:@"2258241"] ||
+        executablePath.length == 0) {
+        return false;
+    }
+    char resolved_executable[CODEX_PROC_PIDPATH_MAX] = {0};
+    if (realpath(executablePath.fileSystemRepresentation,
+                 resolved_executable) == NULL ||
+        strcmp(resolved_executable, observed) != 0) {
+        return false;
+    }
+    static const uint8_t expectedUUID[16] = {
+        0x22, 0xe7, 0x0c, 0x5a, 0x50, 0x71, 0x34, 0xf4,
+        0xb4, 0x68, 0xe8, 0x78, 0x74, 0xf6, 0x02, 0x31,
+    };
+    return macho_file_has_uuid(observed, expectedUUID);
+}
+
+static bool exact_process_path(pid_t pid, const char *expected_path) {
+    char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
+    char observed[CODEX_PROC_PIDPATH_MAX] = {0};
+    char expected[CODEX_PROC_PIDPATH_MAX] = {0};
+    return pid > 1 && expected_path != NULL &&
+           proc_pidpath(pid, raw_path, sizeof(raw_path)) > 0 &&
+           realpath(raw_path, observed) != NULL &&
+           realpath(expected_path, expected) != NULL &&
+           strcmp(observed, expected) == 0;
+}
+
 static bool safe_candidate(pid_t requested, audit_token_t token) {
     pid_t caller = (pid_t)token.val[5];
     uid_t effective_user = (uid_t)token.val[1];
@@ -168,7 +427,10 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
                         (effective_user == 0 || effective_user == 501);
     bool broker_amfid_request = effective_user == 0 &&
         exact_root_process(caller, CODEX_SBINJECT_ROOT_BROKER);
-    if (requested <= 1 || (!self_request && !broker_amfid_request)) {
+    bool broker_shadow_request = effective_user == 0 &&
+        exact_root_process(caller, CODEX_SBINJECT_ELLEKIT_LOADER);
+    if (requested <= 1 ||
+        (!self_request && !broker_amfid_request && !broker_shadow_request)) {
         return false;
     }
     char path[CODEX_PROC_PIDPATH_MAX] = {0};
@@ -176,6 +438,9 @@ static bool safe_candidate(pid_t requested, audit_token_t token) {
     if (proc_pidpath(requested, path, sizeof(path)) <= 0 ||
         realpath(path, observed) == NULL) {
         return false;
+    }
+    if (broker_shadow_request) {
+        return shadow_enabled_app_process(requested);
     }
     const char *const candidates[] = {
         CODEX_SBINJECT_SPRINGBOARD,
@@ -224,29 +489,96 @@ static bool publish_amfid_jit_ready(pid_t pid) {
     return ready;
 }
 
-static int mark_debugged(pid_t pid, bool publish_amfid_marker) {
+static void reap_exited_children(void) {
+    for (;;) {
+        int status = 0;
+        errno = 0;
+        pid_t pid = waitpid(-1, &status, WNOHANG);
+        if (pid > 0) {
+            os_log_with_type(service_log(), OS_LOG_TYPE_DEFAULT,
+                             "reaped attached target pid=%d status=0x%x",
+                             pid, status);
+            continue;
+        }
+        if (pid < 0 && errno == EINTR) continue;
+        return;
+    }
+}
+
+static int mark_debugged(pid_t pid, bool publish_amfid_marker,
+                         bool resume_target) {
     if (publish_amfid_marker) {
         (void)unlink(CODEX_SBINJECT_AMFID_JIT_READY_MARKER);
     }
+    // POSIX_SPAWN_START_SUSPENDED and SIGSTOP are both signal stops, and
+    // PT_ATTACHEXC can release them. A Mach task suspend count is independent
+    // of ptrace. Hold app targets with that count until detach has queued a
+    // fresh SIGSTOP for the loader handoff.
+    task_t held_task = MACH_PORT_NULL;
+    kern_return_t task_result = KERN_SUCCESS;
+    kern_return_t suspend_result = KERN_SUCCESS;
+    bool mach_held = false;
+    bool task_was_held = false;
+    kern_return_t task_resume_result = KERN_SUCCESS;
+    int hold_result = 0;
+    int hold_error = 0;
+    if (!resume_target) {
+        task_result = task_for_pid(mach_task_self(), pid, &held_task);
+        if (task_result != KERN_SUCCESS || !MACH_PORT_VALID(held_task)) {
+            return EPERM;
+        }
+        suspend_result = task_suspend(held_task);
+        if (suspend_result != KERN_SUCCESS) {
+            mach_port_deallocate(mach_task_self(), held_task);
+            return EPERM;
+        }
+        mach_held = true;
+        task_was_held = true;
+        errno = 0;
+        hold_result = kill(pid, SIGSTOP);
+        hold_error = hold_result == 0 ? 0 : errno;
+        if (hold_result != 0) {
+            (void)task_resume(held_task);
+            mach_port_deallocate(mach_task_self(), held_task);
+            return hold_error != 0 ? hold_error : ESRCH;
+        }
+    }
     errno = 0;
     if (ptrace(CODEX_PT_ATTACHEXC, pid, NULL, 0) != 0) {
-        return errno != 0 ? errno : EPERM;
+        int attach_error = errno != 0 ? errno : EPERM;
+        if (mach_held) {
+            (void)task_resume(held_task);
+            mach_port_deallocate(mach_task_self(), held_task);
+        }
+        return attach_error;
     }
+    if (!resume_target) {
+        (void)kill(pid, SIGSTOP);
+    }
+    // App targets arrive with POSIX_SPAWN_START_SUSPENDED. PT_ATTACHEXC marks
+    // that existing task debugged, but it does not create a second waitpid
+    // stop event. Poll the code-signing state directly, then detach. The
+    // SIGCHLD source below still reaps a target if the attach changes its
+    // eventual parent relationship.
+    int stop_status = 0;
     uint32_t flags = 0;
     bool debugged = false;
-    for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
-        if (csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
-            (flags & CODEX_CS_DEBUGGED) != 0) {
-            debugged = true;
-            break;
+    if (!mach_held) {
+        for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
+            if (csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+                (flags & CODEX_CS_DEBUGGED) != 0) {
+                debugged = true;
+                break;
+            }
+            usleep(10U * 1000U);
         }
-        usleep(10U * 1000U);
     }
     int detach_result = -1;
     int detach_error = 0;
+    int detach_signal = resume_target ? 0 : SIGSTOP;
     for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
         errno = 0;
-        detach_result = ptrace(CODEX_PT_DETACH, pid, NULL, 0);
+        detach_result = ptrace(CODEX_PT_DETACH, pid, NULL, detach_signal);
         detach_error = detach_result == 0 ? 0 : errno;
         if (detach_result == 0 ||
             (detach_error != EBUSY && detach_error != EINTR)) {
@@ -259,24 +591,266 @@ static int mark_debugged(pid_t pid, bool publish_amfid_marker) {
         debugged = csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
                    (flags & CODEX_CS_DEBUGGED) != 0;
     }
+    if (mach_held) {
+        task_resume_result = task_resume(held_task);
+        mach_held = false;
+        mach_port_deallocate(mach_task_self(), held_task);
+        held_task = MACH_PORT_NULL;
+    }
+    if (!debugged && detach_result == 0 &&
+        task_resume_result == KERN_SUCCESS) {
+        flags = 0;
+        for (unsigned int attempt = 0; attempt < 500U; ++attempt) {
+            if (csops(pid, CODEX_CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+                (flags & CODEX_CS_DEBUGGED) != 0) {
+                debugged = true;
+                break;
+            }
+            usleep(10U * 1000U);
+        }
+    }
     bool marker_ready = !publish_amfid_marker ||
                         (debugged && detach_result == 0 &&
                          publish_amfid_jit_ready(pid));
-    (void)kill(pid, SIGCONT);
+    int resume_result = 0;
+    int resume_error = 0;
+    if (resume_target) {
+        errno = 0;
+        resume_result = kill(pid, SIGCONT);
+        resume_error = resume_result == 0 ? 0 : errno;
+    }
     os_log_with_type(service_log(),
-                     debugged && detach_result == 0
+                     debugged && detach_result == 0 && resume_result == 0
                          ? OS_LOG_TYPE_DEFAULT
                          : OS_LOG_TYPE_ERROR,
-                     "JIT state pid=%d flags=0x%08x debugged=%{public}s "
-                     "detach=%d detachError=%d marker=%{public}s",
-                     pid, flags, debugged ? "true" : "false",
-                     detach_result, detach_error,
-                     marker_ready ? "true" : "false");
+                     "JIT state pid=%d stopStatus=0x%x flags=0x%08x "
+                     "task=%d suspend=%d held=%{public}s hold=%d "
+                     "holdError=%d taskResume=%d "
+                     "debugged=%{public}s "
+                     "detach=%d detachError=%d detachSignal=%d "
+                     "marker=%{public}s "
+                     "resume=%{public}s resumeResult=%d resumeError=%d",
+                     pid, stop_status, flags, task_result, suspend_result,
+                     task_was_held ? "true" : "false", hold_result,
+                     hold_error,
+                     task_resume_result,
+                     debugged ? "true" : "false",
+                     detach_result, detach_error, detach_signal,
+                     marker_ready ? "true" : "false",
+                     resume_target ? "true" : "false", resume_result,
+                     resume_error);
     if (detach_result != 0) {
         return detach_error != 0 ? detach_error : EPERM;
     }
+    if (task_resume_result != KERN_SUCCESS) return EIO;
     if (!marker_ready) return EIO;
+    if (resume_result != 0) {
+        return resume_error != 0 ? resume_error : EIO;
+    }
     return debugged ? 0 : ETIMEDOUT;
+}
+
+static int admit_trusted_shadow_task(pid_t pid) {
+    task_t task = MACH_PORT_NULL;
+    kern_return_t task_result = task_for_pid(mach_task_self(), pid, &task);
+    if (task_result != KERN_SUCCESS || !MACH_PORT_VALID(task)) {
+        return EPERM;
+    }
+
+    task_basic_info_data_t information = {0};
+    mach_msg_type_number_t count = TASK_BASIC_INFO_COUNT;
+    kern_return_t info_result = task_info(
+        task, TASK_BASIC_INFO, (task_info_t)&information, &count);
+    mach_port_deallocate(mach_task_self(), task);
+
+    uint32_t flags = 0;
+    int status_result = csops(pid, CODEX_CS_OPS_STATUS, &flags,
+                              sizeof(flags));
+    bool admitted = info_result == KERN_SUCCESS && status_result == 0 &&
+                    (flags & CODEX_CS_VALID) != 0 &&
+                    (flags & CODEX_CS_KILLED) == 0;
+    os_log_with_type(service_log(),
+                     admitted ? OS_LOG_TYPE_DEFAULT : OS_LOG_TYPE_ERROR,
+                     "Shadow task admission pid=%d task=%d info=%d "
+                     "flags=0x%08x admitted=%{public}s",
+                     pid, task_result, info_result, flags,
+                     admitted ? "true" : "false");
+    return admitted ? 0 : EACCES;
+}
+
+static int socket_read_exact(int descriptor, void *buffer, size_t size) {
+    uint8_t *cursor = buffer;
+    size_t total = 0;
+    while (total < size) {
+        ssize_t amount = recv(descriptor, cursor + total, size - total, 0);
+        if (amount > 0) {
+            total += (size_t)amount;
+            continue;
+        }
+        if (amount < 0 && errno == EINTR) continue;
+        return amount == 0 ? EPIPE : (errno != 0 ? errno : EIO);
+    }
+    return 0;
+}
+
+static int socket_write_exact(int descriptor, const void *buffer,
+                              size_t size) {
+    const uint8_t *cursor = buffer;
+    size_t total = 0;
+    while (total < size) {
+        ssize_t amount = send(descriptor, cursor + total, size - total, 0);
+        if (amount > 0) {
+            total += (size_t)amount;
+            continue;
+        }
+        if (amount < 0 && errno == EINTR) continue;
+        return amount == 0 ? EPIPE : (errno != 0 ? errno : EIO);
+    }
+    return 0;
+}
+
+static void receive_shadow_socket_request(int descriptor) {
+    struct timeval timeout = {.tv_sec = 6, .tv_usec = 0};
+    int no_sigpipe = 1;
+    (void)setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                     sizeof(timeout));
+    (void)setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+                     sizeof(timeout));
+    (void)setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe,
+                     sizeof(no_sigpipe));
+
+    uid_t peer_uid = (uid_t)-1;
+    gid_t peer_gid = (gid_t)-1;
+    pid_t peer_pid = -1;
+    socklen_t peer_pid_size = sizeof(peer_pid);
+    int result = getpeereid(descriptor, &peer_uid, &peer_gid) == 0 &&
+                         getsockopt(descriptor, SOL_LOCAL, LOCAL_PEERPID,
+                                    &peer_pid, &peer_pid_size) == 0 &&
+                         peer_pid_size == sizeof(peer_pid)
+                     ? 0
+                     : (errno != 0 ? errno : EPERM);
+
+    struct codex_sbinject_shadow_request request = {0};
+    if (result == 0) {
+        result = socket_read_exact(descriptor, &request, sizeof(request));
+    }
+    pid_t requested = request.pid;
+    bool admitted = result == 0 &&
+                    request.magic == CODEX_SBINJECT_SHADOW_SOCKET_MAGIC &&
+                    request.version == CODEX_SBINJECT_SHADOW_SOCKET_VERSION &&
+                    request.reserved == 0 && requested > 1 &&
+                    peer_uid == 0 &&
+                    (exact_root_process(peer_pid,
+                                        CODEX_SBINJECT_ELLEKIT_LOADER) ||
+                     exact_root_launchd_process(peer_pid)) &&
+                    (shadow_enabled_app_process(requested) ||
+                     target_compatibility_app_process(requested) ||
+                     target_memory_patch_app_process(requested));
+    if (result == 0) {
+        result = admitted ? admit_trusted_shadow_task(requested) : EPERM;
+    }
+
+    uint32_t flags = 0;
+    if (requested > 1) {
+        (void)csops(requested, CODEX_CS_OPS_STATUS, &flags, sizeof(flags));
+    }
+    struct codex_sbinject_shadow_response response = {
+        .magic = CODEX_SBINJECT_SHADOW_SOCKET_MAGIC,
+        .version = CODEX_SBINJECT_SHADOW_SOCKET_VERSION,
+        .result = result,
+        .flags = flags,
+    };
+    int write_result = socket_write_exact(descriptor, &response,
+                                          sizeof(response));
+    fprintf(stderr,
+            "shadow socket peer=%d uid=%u gid=%u target=%d admitted=%s "
+            "result=%d flags=0x%08x write=%d\n",
+            peer_pid, peer_uid, peer_gid, requested,
+            admitted ? "true" : "false", result, flags, write_result);
+    fflush(stderr);
+}
+
+static int create_shadow_socket(void) {
+    struct stat existing = {0};
+    if (lstat(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET, &existing) == 0) {
+        if (!S_ISSOCK(existing.st_mode) || existing.st_uid != 0 ||
+            existing.st_gid != 0 ||
+            (existing.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+            return -1;
+        }
+        int probe = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (probe < 0) return -1;
+        struct sockaddr_un address = {0};
+        address.sun_len = sizeof(address);
+        address.sun_family = AF_UNIX;
+        (void)snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+                       CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+        int connected = connect(probe, (struct sockaddr *)&address,
+                                sizeof(address));
+        int connect_error = connected == 0 ? 0 : errno;
+        close(probe);
+        if (connected == 0) {
+            errno = EADDRINUSE;
+            return -1;
+        }
+        if (connect_error != ECONNREFUSED && connect_error != ENOENT) {
+            errno = connect_error;
+            return -1;
+        }
+        if (unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET) != 0) return -1;
+    } else if (errno != ENOENT) {
+        return -1;
+    }
+
+    int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (descriptor < 0) return -1;
+    struct sockaddr_un address = {0};
+    address.sun_len = sizeof(address);
+    address.sun_family = AF_UNIX;
+    int length = snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+                          CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+    bool valid_path = length > 0 && (size_t)length < sizeof(address.sun_path);
+    bool ready = valid_path &&
+                 bind(descriptor, (struct sockaddr *)&address,
+                      sizeof(address)) == 0 &&
+                 chown(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET, 0, 0) == 0 &&
+                 chmod(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET, 0600) == 0 &&
+                 listen(descriptor, 16) == 0;
+    if (!ready) {
+        int saved_error = errno != 0 ? errno : EIO;
+        close(descriptor);
+        (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+        errno = saved_error;
+        return -1;
+    }
+    int flags = fcntl(descriptor, F_GETFL, 0);
+    int descriptor_flags = fcntl(descriptor, F_GETFD, 0);
+    if (flags < 0 || descriptor_flags < 0 ||
+        fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(descriptor, F_SETFD, descriptor_flags | FD_CLOEXEC) != 0) {
+        int saved_error = errno != 0 ? errno : EIO;
+        close(descriptor);
+        (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+        errno = saved_error;
+        return -1;
+    }
+    return descriptor;
+}
+
+static void accept_shadow_socket_requests(int listener) {
+    for (;;) {
+        int descriptor = accept(listener, NULL, NULL);
+        if (descriptor >= 0) {
+            receive_shadow_socket_request(descriptor);
+            close(descriptor);
+            continue;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+        os_log_with_type(service_log(), OS_LOG_TYPE_ERROR,
+                         "shadow socket accept failed: %d", errno);
+        return;
+    }
 }
 
 static void receive_message(mach_port_t port) {
@@ -293,12 +867,28 @@ static void receive_message(mach_port_t port) {
             xpc_dictionary_get_audit_token(message, &token);
             int64_t identifier = xpc_dictionary_get_int64(message, "id");
             int64_t raw_pid = xpc_dictionary_get_int64(message, "pid");
-            if (identifier == CODEX_SBINJECT_JIT_MESSAGE_ID && raw_pid > 1 &&
-                raw_pid <= INT_MAX) {
+            bool standard_request =
+                identifier == CODEX_SBINJECT_JIT_MESSAGE_ID;
+            bool deferred_shadow_request =
+                identifier == CODEX_SBINJECT_JIT_DEFER_RESUME_MESSAGE_ID;
+            if ((standard_request || deferred_shadow_request) &&
+                raw_pid > 1 && raw_pid <= INT_MAX) {
                 requested = (pid_t)raw_pid;
-                bool broker_request = requested != (pid_t)token.val[5];
-                result = safe_candidate(requested, token)
-                             ? mark_debugged(requested, broker_request)
+                bool publish_amfid_marker =
+                    requested != (pid_t)token.val[5] &&
+                    exact_process_path(requested, CODEX_SBINJECT_AMFID);
+                bool deferred_admitted = deferred_shadow_request &&
+                    (uid_t)token.val[1] == 0 &&
+                    exact_root_process((pid_t)token.val[5],
+                                       CODEX_SBINJECT_ELLEKIT_LOADER) &&
+                    shadow_enabled_app_process(requested);
+                bool admitted = deferred_shadow_request
+                                    ? deferred_admitted
+                                    : safe_candidate(requested, token);
+                result = admitted
+                             ? mark_debugged(requested,
+                                            publish_amfid_marker,
+                                            !deferred_shadow_request)
                              : EPERM;
             }
         }
@@ -324,19 +914,61 @@ int main(void) {
                              "bootstrap_check_in failed: %d", result);
             return 1;
         }
+        int shadow_socket = create_shadow_socket();
+        if (shadow_socket < 0) {
+            os_log_with_type(service_log(), OS_LOG_TYPE_FAULT,
+                             "shadow socket setup failed: %d", errno);
+            return 1;
+        }
         dispatch_source_t source = dispatch_source_create(
             DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)port, 0,
             dispatch_get_main_queue());
         if (source == NULL) {
+            close(shadow_socket);
+            (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+            return 1;
+        }
+        dispatch_queue_t shadow_queue = dispatch_queue_create(
+            "com.openai.codex.sbinject.jitterd.shadow", DISPATCH_QUEUE_SERIAL);
+        if (shadow_queue == NULL) {
+            close(shadow_socket);
+            (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+            return 1;
+        }
+        dispatch_source_t shadow_source = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_READ, (uintptr_t)shadow_socket, 0,
+            shadow_queue);
+        if (shadow_source == NULL) {
+            close(shadow_socket);
+            (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
+            return 1;
+        }
+        dispatch_source_t child_source = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_SIGNAL, SIGCHLD, 0,
+            dispatch_get_main_queue());
+        if (child_source == NULL) {
+            close(shadow_socket);
+            (void)unlink(CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
             return 1;
         }
         dispatch_source_set_event_handler(source, ^{
             receive_message((mach_port_t)dispatch_source_get_handle(source));
         });
+        dispatch_source_set_event_handler(shadow_source, ^{
+            accept_shadow_socket_requests((int)dispatch_source_get_handle(
+                shadow_source));
+        });
+        dispatch_source_set_event_handler(child_source, ^{
+            reap_exited_children();
+        });
         dispatch_resume(source);
+        dispatch_resume(shadow_source);
+        dispatch_resume(child_source);
+        reap_exited_children();
         os_log_with_type(service_log(), OS_LOG_TYPE_DEFAULT,
-                         "jitterd ready service=%{public}s",
-                         CODEX_SBINJECT_JITTERD_SERVICE);
+                         "jitterd ready service=%{public}s socket=%{public}s",
+                         CODEX_SBINJECT_JITTERD_SERVICE,
+                         CODEX_SBINJECT_JITTERD_SHADOW_SOCKET);
         dispatch_main();
     }
 }
