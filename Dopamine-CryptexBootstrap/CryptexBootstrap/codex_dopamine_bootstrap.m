@@ -8400,6 +8400,8 @@ int main(int argc, char *argv[]) {
             [payloadRoot stringByAppendingPathComponent:@"hookkit.deb"];
         NSString *sourceHookKitGum =
             [payloadRoot stringByAppendingPathComponent:@"hookkit-gum.deb"];
+        NSString *sourceAltList =
+            [payloadRoot stringByAppendingPathComponent:@"altlist.deb"];
         NSString *sourceOpenSSHClient =
             [payloadRoot stringByAppendingPathComponent:@"openssh-client.deb"];
         NSString *sourceOpenSSHServer =
@@ -8434,6 +8436,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceTrustedHookKitGumRoot =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/hookkit-gum-root/var/jb"];
+        NSString *sourceTrustedAltListRoot =
+            [payloadRoot stringByAppendingPathComponent:
+                             @"trusted/altlist-root/var/jb"];
         NSString *sourceTrustedLdid =
             [payloadRoot stringByAppendingPathComponent:
                              @"trusted/ldid-root/var/jb/usr/bin/ldid"];
@@ -8566,6 +8571,7 @@ int main(int argc, char *argv[]) {
             ![[NSFileManager defaultManager] fileExistsAtPath:sourceHookKit] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceHookKitGum] ||
+            ![[NSFileManager defaultManager] fileExistsAtPath:sourceAltList] ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceOpenSSHClient] ||
             ![[NSFileManager defaultManager]
@@ -8597,6 +8603,10 @@ int main(int argc, char *argv[]) {
             !isDirectory ||
             ![[NSFileManager defaultManager]
                 fileExistsAtPath:sourceTrustedHookKitGumRoot
+                     isDirectory:&isDirectory] ||
+            !isDirectory ||
+            ![[NSFileManager defaultManager]
+                fileExistsAtPath:sourceTrustedAltListRoot
                      isDirectory:&isDirectory] ||
             !isDirectory ||
             ![[NSFileManager defaultManager]
@@ -9640,6 +9650,7 @@ int main(int argc, char *argv[]) {
                 (char *)[sourceLibSandy fileSystemRepresentation],
                 (char *)[sourceHookKit fileSystemRepresentation],
                 (char *)[sourceHookKitGum fileSystemRepresentation],
+                (char *)[sourceAltList fileSystemRepresentation],
                 (char *)[sourceShadow fileSystemRepresentation], NULL};
             int shadowDpkgStatus = run_and_wait_bounded(
                 shadowDpkgArguments[0], shadowDpkgArguments, 90000);
@@ -9693,6 +9704,10 @@ int main(int argc, char *argv[]) {
                 @{ @"source" : [sourceTrustedHookKitGumRoot
                         stringByAppendingPathComponent:@"usr/lib/HKGum.dylib"],
                    @"path" : @"usr/lib/HKGum.dylib" },
+                @{ @"source" : [sourceTrustedAltListRoot
+                        stringByAppendingPathComponent:
+                            @"Library/Frameworks/AltList.framework/AltList"],
+                   @"path" : @"Library/Frameworks/AltList.framework/AltList" },
             ];
             bool shadowPayloadExact = shadowDpkgStatus == 0 &&
                 dpkg_package_version_is_installed(
@@ -9701,6 +9716,8 @@ int main(int argc, char *argv[]) {
                     @"me.jjolano.fmwk.hookkit", @"3.0.5-1") &&
                 dpkg_package_version_is_installed(
                     @"me.jjolano.fmwk.hookkit.gum", @"3.0.5-1") &&
+                dpkg_package_version_is_installed(
+                    @"com.opa334.altlist", @"1.0.11") &&
                 dpkg_package_version_is_installed(
                     @"me.jjolano.shadow", @"4.0.1");
             for (NSDictionary *entry in trustedShadowFiles) {
