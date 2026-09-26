@@ -298,32 +298,46 @@ static int consume_process_bound_extensions(os_log_t log) {
         return -1;
     }
     char request[4096];
+    char pendingRequest[4096];
     char response[4096];
     pid_t pid = getpid();
     int requestLength = snprintf(
         request, sizeof(request),
         "%s/Library/CodexBootstrap/broker-request-%d", home, pid);
+    int pendingRequestLength = snprintf(
+        pendingRequest, sizeof(pendingRequest),
+        "%s/Library/CodexBootstrap/.broker-request-%d.tmp", home, pid);
     int responseLength = snprintf(
         response, sizeof(response),
         "%s/Library/CodexBootstrap/broker-response-%d", home, pid);
     if (requestLength < 0 || (size_t)requestLength >= sizeof(request) ||
+        pendingRequestLength < 0 ||
+        (size_t)pendingRequestLength >= sizeof(pendingRequest) ||
         responseLength < 0 || (size_t)responseLength >= sizeof(response)) {
         os_log_error(log, "sandbox broker path is too long");
         return -1;
     }
     (void)unlink(request);
+    (void)unlink(pendingRequest);
     (void)unlink(response);
-    int requestFile = open(request,
+    int requestFile = open(pendingRequest,
                            O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC |
                                O_NOFOLLOW,
                            0600);
-    if (requestFile < 0 || dprintf(requestFile, "%d\n", pid) < 0 ||
-        close(requestFile) != 0) {
-        os_log_error(log, "sandbox broker request failed: %{public}s",
-                     strerror(errno));
-        if (requestFile >= 0) {
-            close(requestFile);
+    int requestError = requestFile < 0 ? errno : 0;
+    if (requestFile >= 0) {
+        if (dprintf(requestFile, "%d\n", pid) < 0) requestError = errno;
+        if (close(requestFile) != 0 && requestError == 0) {
+            requestError = errno;
         }
+    }
+    if (requestError == 0 && rename(pendingRequest, request) != 0) {
+        requestError = errno;
+    }
+    if (requestError != 0) {
+        os_log_error(log, "sandbox broker request failed: %{public}s",
+                     strerror(requestError));
+        (void)unlink(pendingRequest);
         (void)unlink(request);
         return -1;
     }

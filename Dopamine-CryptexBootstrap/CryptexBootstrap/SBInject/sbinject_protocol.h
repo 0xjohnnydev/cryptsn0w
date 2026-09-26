@@ -9,7 +9,26 @@
     "com.openai.codex.sbinject.jitterd"
 #define CODEX_SBINJECT_JITTERD_SERVICE \
     "com.openai.codex.sbinject.jitterd.systemwide"
+#define CODEX_SBINJECT_JITTERD_SHADOW_SOCKET \
+    "/var/jb/var/run/sbinject-jitterd-shadow.sock"
 #define CODEX_SBINJECT_JIT_MESSAGE_ID 67
+#define CODEX_SBINJECT_JIT_DEFER_RESUME_MESSAGE_ID 68
+#define CODEX_SBINJECT_SHADOW_SOCKET_MAGIC 0x53424a54U
+#define CODEX_SBINJECT_SHADOW_SOCKET_VERSION 1U
+
+struct codex_sbinject_shadow_request {
+    uint32_t magic;
+    uint32_t version;
+    int32_t pid;
+    uint32_t reserved;
+};
+
+struct codex_sbinject_shadow_response {
+    uint32_t magic;
+    uint32_t version;
+    int32_t result;
+    uint32_t flags;
+};
 
 #define CODEX_SBINJECT_STOCK_SPRINGBOARD \
     "/System/Library/CoreServices/SpringBoard.app/SpringBoard"
@@ -24,6 +43,12 @@
 #define CODEX_SBINJECT_AMFID "/var/jb/usr/libexec/sbinject/notamfid"
 #define CODEX_SBINJECT_ROOT_BROKER \
     "/var/jb/usr/libexec/codex-sileo-root-broker"
+#define CODEX_SBINJECT_ELLEKIT_LOADER \
+    "/var/jb/usr/libexec/codex-ellekit-loader"
+#define CODEX_SBINJECT_SHADOW_SIGNER \
+    "/var/jb/usr/libexec/codex-ldid-ce"
+#define CODEX_SBINJECT_SHADOW_ORIGINAL_ROOT \
+    "/var/jb/var/lib/sbinject/shadow-originals"
 #define CODEX_SBINJECT_APP_LAUNCHER \
     "/var/jb/usr/libexec/codex-exec-worker"
 #define CODEX_SBINJECT_APP_LAUNCHER_NO_KEYCHAIN \
@@ -56,11 +81,23 @@
 #define CODEX_SBINJECT_PREFERENCES_HOOK \
     "/var/jb/Applications/Preferences.app/g"
 #define CODEX_SBINJECT_LAUNCHDHOOK \
-    "/var/jb/usr/lib/sbinject/launchdhook-v12.dylib"
-#define CODEX_SBINJECT_PREVIOUS_LAUNCHDHOOK \
-    "/var/jb/usr/lib/sbinject/launchdhook-v11.dylib"
+    "/var/jb/usr/lib/sbinject/launchdhook-v41.dylib"
+#define CODEX_SBINJECT_LAUNCHDHOOK_PREFIX \
+    "/var/jb/usr/lib/sbinject/launchdhook-v"
+#define CODEX_SBINJECT_LAUNCHDHOOK_GENERATION 41U
 #define CODEX_SBINJECT_ELLEKIT \
     "/var/jb/usr/lib/ellekit/libinjector.dylib"
+#define CODEX_SBINJECT_ELLEKIT_PSPAWN \
+    "/var/jb/usr/lib/ellekit/pspawn.dylib"
+#define CODEX_SBINJECT_SHADOW \
+    "/var/jb/usr/lib/TweakInject/Shadow.dylib"
+#define CODEX_SBINJECT_SHADOW_CORE "/var/jb/usr/lib/ShadowCore.dylib"
+#define CODEX_SBINJECT_SHADOW_BOOTSTRAP \
+    "/var/jb/usr/lib/sbinject/shadow-bootstrap.dylib"
+#define CODEX_SBINJECT_SHADOW_APP_BOOTSTRAP_NAME \
+    "_SBInjectShadowBootstrap.dylib"
+#define CODEX_SBINJECT_COMPATIBILITY_APP_BOOTSTRAP_NAME \
+    "_AppCompatibility.dylib"
 #define CODEX_SBINJECT_PREFERENCELOADER \
     "/var/jb/Library/MobileSubstrate/DynamicLibraries/PreferenceLoader.dylib"
 #define CODEX_SBINJECT_PREFERENCELOADER_LEGACY \

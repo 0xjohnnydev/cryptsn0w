@@ -349,23 +349,24 @@ static CFPropertyListRef copy_property_list(const char *path,
 }
 
 static bool managed_app_option_enabled(const char *runtime_path,
-                                       CFStringRef option) {
-    if (runtime_path == NULL || option == NULL) return true;
+                                       CFStringRef option,
+                                       bool default_value) {
+    if (runtime_path == NULL || option == NULL) return default_value;
     char bundle[PATH_MAX] = {0};
     if (strlcpy(bundle, runtime_path, sizeof(bundle)) >= sizeof(bundle)) {
-        return true;
+        return default_value;
     }
     char *separator = strrchr(bundle, '/');
-    if (separator == NULL || separator == bundle) return true;
+    if (separator == NULL || separator == bundle) return default_value;
     *separator = '\0';
     char info_path[PATH_MAX] = {0};
     if (snprintf(info_path, sizeof(info_path), "%s/Info.plist", bundle) <= 0) {
-        return true;
+        return default_value;
     }
     CFPropertyListRef info = copy_property_list(info_path, 4 * 1024 * 1024);
     CFPropertyListRef settings = copy_property_list(
         CODEX_SBINJECT_MANAGED_APP_SETTINGS, 1024 * 1024);
-    bool enabled = true;
+    bool enabled = default_value;
     if (info != NULL && settings != NULL &&
         CFGetTypeID(info) == CFDictionaryGetTypeID() &&
         CFGetTypeID(settings) == CFDictionaryGetTypeID()) {
@@ -494,10 +495,13 @@ static void app_launcher_log(const char *format, ...) {
     close(descriptor);
 }
 
+static bool gExceptionPortBoundaryHooked;
+
 static kern_return_t managed_task_set_exception_ports(
     task_t task, exception_mask_t exception_mask, mach_port_t new_port,
     exception_behavior_t behavior, thread_state_flavor_t new_flavor) {
     if (task != mach_task_self()) {
+        if (gExceptionPortBoundaryHooked) return KERN_FAILURE;
         return task_set_exception_ports(task, exception_mask, new_port,
                                         behavior, new_flavor);
     }
@@ -515,6 +519,7 @@ static kern_return_t managed_task_swap_exception_ports(
     exception_behavior_array_t old_behaviors,
     exception_flavor_array_t old_flavors) {
     if (task != mach_task_self()) {
+        if (gExceptionPortBoundaryHooked) return KERN_FAILURE;
         return task_swap_exception_ports(
             task, exception_mask, new_port, behavior, new_flavor, masks,
             masks_count, old_handlers, old_behaviors, old_flavors);
@@ -1346,6 +1351,28 @@ static bool hook_arm64_function(void *source, void *target,
     return true;
 }
 
+static bool install_exception_port_boundary_hooks(void) {
+    kern_return_t setWrite = KERN_FAILURE;
+    kern_return_t setExecute = KERN_FAILURE;
+    kern_return_t swapWrite = KERN_FAILURE;
+    kern_return_t swapExecute = KERN_FAILURE;
+    gExceptionPortBoundaryHooked = true;
+    bool setHooked = hook_arm64_function(
+        (void *)(uintptr_t)task_set_exception_ports,
+        (void *)(uintptr_t)managed_task_set_exception_ports,
+        &setWrite, &setExecute);
+    bool swapHooked = hook_arm64_function(
+        (void *)(uintptr_t)task_swap_exception_ports,
+        (void *)(uintptr_t)managed_task_swap_exception_ports,
+        &swapWrite, &swapExecute);
+    app_launcher_log(
+        "pid=%d stage=exception-ports-boundary set=%d setWrite=%d "
+        "setExecute=%d swap=%d swapWrite=%d swapExecute=%d",
+        getpid(), setHooked, setWrite, setExecute, swapHooked, swapWrite,
+        swapExecute);
+    return setHooked && swapHooked;
+}
+
 static uint8_t *find_dyld_pattern(const struct mach_header_64 *header,
                                   const uint8_t *pattern,
                                   size_t patternSize) {
@@ -1537,7 +1564,10 @@ static int run_managed_app_payload(const char *runtime_path, int argc,
     bool blockExceptionPorts = false;
     if (__builtin_available(iOS 27.0, *)) {
         blockExceptionPorts = managed_app_option_enabled(
-            runtime_path, CFSTR("BlockExceptionPorts"));
+            runtime_path, CFSTR("BlockExceptionPorts"), true);
+    }
+    if (blockExceptionPorts && !install_exception_port_boundary_hooks()) {
+        return 109;
     }
     dlerror();
     int dlopenFlags = RTLD_GLOBAL | RTLD_FIRST |
@@ -1551,22 +1581,18 @@ static int run_managed_app_payload(const char *runtime_path, int argc,
         return 106;
     }
     const struct mach_header_64 *header = find_loaded_header(runtime_path);
-    if (blockExceptionPorts) {
-        litehook_rebind_result_t set = litehook_rebind_symbol(
-            header, (void *)(uintptr_t)task_set_exception_ports,
-            (void *)(uintptr_t)managed_task_set_exception_ports);
-        litehook_rebind_result_t swap = litehook_rebind_symbol(
-            header, (void *)(uintptr_t)task_swap_exception_ports,
-            (void *)(uintptr_t)managed_task_swap_exception_ports);
-        app_launcher_log(
-            "pid=%d stage=exception-ports-hook setMatches=%zu setWrites=%zu "
-            "swapMatches=%zu swapWrites=%zu setError=%d swapError=%d path=%s",
-            getpid(), set.matches, set.writes, swap.matches, swap.writes,
-            set.first_error, swap.first_error, runtime_path);
-        if ((set.matches != 0 && set.writes == 0) ||
-            (swap.matches != 0 && swap.writes == 0)) {
-            return 109;
-        }
+    bool tweakInjection = managed_app_option_enabled(
+        runtime_path, CFSTR("TweakInjection"), false);
+    if (tweakInjection) {
+        dlerror();
+        void *injector = dlopen(
+            CODEX_SBINJECT_ELLEKIT, RTLD_NOW | RTLD_LOCAL);
+        const char *injectorError = injector == NULL ? dlerror() : NULL;
+        app_launcher_log("pid=%d stage=tweak-injection ready=%d path=%s "
+                         "error=%s", getpid(), injector != NULL,
+                         runtime_path,
+                         injectorError != NULL ? injectorError : "none");
+        if (injector == NULL) return 110;
     }
     if (trollstore_ui_payload(runtime_path)) {
         dlerror();

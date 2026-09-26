@@ -598,7 +598,7 @@ bool codexValidateInjectionPrimitives(task_t task,
 	printf("[sandboxFixup] consume class=%s path=%s flags=0x%x "
 	       "mach=%d handle=%lld\n",
 	       extensionClass, path, flags, kr, (long long)consumeResult);
-	return kr == KERN_SUCCESS && consumeResult > 0;
+	return kr == KERN_SUCCESS && consumeResult >= 0;
 }
 
 bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
@@ -610,7 +610,18 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
 	bool executableNeeded = sandbox_check(
 		pid, "file-map-executable", SANDBOX_FILTER_PATH |
 		SANDBOX_CHECK_NO_REPORT, dylibPath);
-	bool jailbreakPath = strncmp(dylibPath, "/var/jb/", 8) == 0;
+	char jailbreakRoot[PATH_MAX] = { 0 };
+	bool jailbreakRootReady = realpath("/var/jb", jailbreakRoot) != NULL;
+	size_t jailbreakRootLength = jailbreakRootReady
+		? strlen(jailbreakRoot) : 0;
+	bool logicalJailbreakPath =
+		strcmp(dylibPath, "/var/jb") == 0 ||
+		strncmp(dylibPath, "/var/jb/", 8) == 0;
+	bool resolvedJailbreakPath = jailbreakRootReady &&
+		strncmp(dylibPath, jailbreakRoot, jailbreakRootLength) == 0 &&
+		(dylibPath[jailbreakRootLength] == '\0' ||
+		 dylibPath[jailbreakRootLength] == '/');
+	bool jailbreakPath = logicalJailbreakPath || resolvedJailbreakPath;
 	if (!readNeeded && !executableNeeded && !jailbreakPath) {
 		printf("[sandboxFixup] extensions not needed, skipping...\n");
 		return true;
@@ -641,10 +652,25 @@ bool sandboxFixup(task_t task, thread_act_t pthread, pid_t pid,
 		// process-local recursive view of the managed jailbreak root instead.
 		success &= consumeSandboxExtensionForPath(
 			task, pthread, consumeAddress, APP_SANDBOX_READ, "/var/jb",
-			SANDBOX_EXTENSION_PREFIXMATCH);
+			0);
 		success &= consumeSandboxExtensionForPath(
 			task, pthread, consumeAddress, "com.apple.sandbox.executable",
-			"/var/jb", SANDBOX_EXTENSION_PREFIXMATCH);
+			"/var/jb", 0);
+		if (jailbreakRootReady && strcmp(jailbreakRoot, "/var/jb") != 0) {
+			success &= consumeSandboxExtensionForPath(
+				task, pthread, consumeAddress, APP_SANDBOX_READ,
+				jailbreakRoot, 0);
+			success &= consumeSandboxExtensionForPath(
+				task, pthread, consumeAddress,
+				"com.apple.sandbox.executable", jailbreakRoot,
+				0);
+		}
+		// Shadow's iOS 27 broker supplies this exact preference grant. Its
+		// private libSandy compatibility copy does not contact sandyd because
+		// bootstrap_look_up traps when it is first called from an injected app.
+		success &= consumeSandboxExtensionForPath(
+			task, pthread, consumeAddress, APP_SANDBOX_READ,
+			"/var/mobile/Library/Preferences/me.jjolano.shadow.plist", 0);
 	}
 	return success;
 }
