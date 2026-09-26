@@ -30,6 +30,7 @@ HOOKKIT_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-
 HOOKKIT_SHA256=cab797601e64be87ba88f93fe536293af2d20750e8da84d32449df97824e435a
 HOOKKIT_GUM_URL=https://github.com/jjolano/HookKit/releases/download/v3.0.5/hookkit-rootless-gum.deb
 HOOKKIT_GUM_SHA256=619e245d1590609a9ad63cf2fde8b69b92c5d158e4ca2af09128b99569944738
+SHADOW_URL=https://raw.githubusercontent.com/0xjohnnydev/beta/1d3cda4bb1ac40c09251c198ce3bf5f34832c6d8/debs/me.jjolano.shadow_4.0.1_iphoneos-arm64.deb
 SHADOW_SHA256=a9d6ce36b0fe6d688ba764cf7abf7f47e9fc973a1663bd0daf2c8d3e2ed2a1c9
 ELLEKIT_KEY_FINGERPRINT=71C9AF96CD2F3A8A837EFFBB015D4A9B1D4A2370
 BIGBOSS_KEY_FINGERPRINT=A9C96A37115894A23B894107694D17D38764B4F4
@@ -450,9 +451,7 @@ fetch_pinned "$PREFERENCELOADER_URL" "$PREFERENCELOADER_SHA256" \
 fetch_pinned "$LIBSANDY_URL" "$LIBSANDY_SHA256" "$LIBSANDY_DEB"
 fetch_pinned "$HOOKKIT_URL" "$HOOKKIT_SHA256" "$HOOKKIT_DEB"
 fetch_pinned "$HOOKKIT_GUM_URL" "$HOOKKIT_GUM_SHA256" "$HOOKKIT_GUM_DEB"
-[[ -f "$SHADOW_DEB" ]] || die "missing pinned Shadow 4.0.1 package"
-[[ "$(sha256_of "$SHADOW_DEB")" == "$SHADOW_SHA256" ]] || \
-    die "cached hash mismatch: ${SHADOW_DEB:t}"
+fetch_pinned "$SHADOW_URL" "$SHADOW_SHA256" "$SHADOW_DEB"
 [[ "$(sha256_of "$SILEO_DEB")" == "$SILEO_SHA256" ]] || \
     die "opa334 Sileo package hash mismatch"
 zstd -t "$BOOTSTRAP_ARCHIVE" >/dev/null
