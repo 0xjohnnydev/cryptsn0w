@@ -42,6 +42,11 @@ typedef void (*WindowHiddenImplementation)(UIWindow *, SEL, BOOL);
 typedef void (*WindowVisibleImplementation)(UIWindow *, SEL);
 typedef CGFloat (*RowHeightImplementation)(id, SEL, UITableView *, NSIndexPath *);
 typedef void (*CellLayoutImplementation)(UITableViewCell *, SEL);
+typedef id (*ObjectGetterImplementation)(id, SEL);
+typedef void (*ApplicationShortcutActivationImplementation)(
+    id, SEL, id, id, id);
+typedef char ***(*ArgumentsStorageImplementation)(void);
+typedef void (*SetProgramNameImplementation)(const char *);
 
 static WindowHiddenImplementation OriginalWindowSetHidden;
 static WindowVisibleImplementation OriginalWindowMakeKeyAndVisible;
@@ -49,6 +54,10 @@ static NSMutableDictionary<NSString *, NSValue *> *HeightImplementations;
 static NSMutableDictionary<NSString *, NSValue *> *LayoutImplementations;
 static NSHashTable<UIWindow *> *OrphanWindows;
 static char SubtitleLabelKey;
+static ObjectGetterImplementation OriginalApplicationShortcutItems;
+static ApplicationShortcutActivationImplementation
+    OriginalApplicationShortcutActivation;
+static char *ManagedArgumentZero;
 
 #define CODEX_MAX_PATH_MAPPINGS 32U
 
@@ -234,6 +243,40 @@ static const char *CommandLeaf(const char *path) {
     if (path == NULL || path[0] == '\0') return NULL;
     const char *separator = strrchr(path, '/');
     return separator != NULL ? separator + 1 : path;
+}
+
+static void RepairManagedProcessIdentity(void) {
+    ArgumentsStorageImplementation argumentsStorage =
+        (ArgumentsStorageImplementation)dlsym(RTLD_DEFAULT, "_NSGetArgv");
+    char ***storage = argumentsStorage != NULL ? argumentsStorage() : NULL;
+    if (storage == NULL || *storage == NULL || (*storage)[0] == NULL) return;
+
+    NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
+    const char *currentLeaf = CommandLeaf((*storage)[0]);
+    const char *canonicalPath = NULL;
+    if ([identifier isEqualToString:@"com.apple.springboard"] &&
+        currentLeaf != NULL && strcmp(currentLeaf, "notSpringBoard") == 0) {
+        canonicalPath =
+            "/System/Library/CoreServices/SpringBoard.app/SpringBoard";
+    } else if ([identifier isEqualToString:@"com.apple.Preferences"] &&
+               currentLeaf != NULL &&
+               strcmp(currentLeaf, "notPreferences") == 0) {
+        canonicalPath = "/Applications/Preferences.app/Preferences";
+    }
+    if (canonicalPath == NULL) return;
+
+    ManagedArgumentZero = strdup(canonicalPath);
+    if (ManagedArgumentZero == NULL) return;
+    (*storage)[0] = ManagedArgumentZero;
+
+    SetProgramNameImplementation setProgramName =
+        (SetProgramNameImplementation)dlsym(RTLD_DEFAULT, "setprogname");
+    if (setProgramName != NULL) {
+        setProgramName(CommandLeaf(canonicalPath));
+    }
+    os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                     "restored managed process identity name=%{public}s",
+                     CommandLeaf(canonicalPath));
 }
 
 static BOOL ArgumentsRequestRespring(const char *path,
@@ -1104,6 +1147,81 @@ static Method DirectInstanceMethod(Class cls, SEL selector) {
     return result;
 }
 
+static id CompatApplicationShortcutItems(id iconView, SEL selector) {
+    id items = OriginalApplicationShortcutItems != NULL
+        ? OriginalApplicationShortcutItems(iconView, selector) : nil;
+    if (items != nil) return items;
+    SEL fetchedSelector = sel_registerName("fetchedApplicationShortcutItems");
+    if ([iconView respondsToSelector:fetchedSelector]) {
+        items = ((id (*)(id, SEL))objc_msgSend)(iconView, fetchedSelector);
+    }
+    return items != nil ? items : @[];
+}
+
+static void CompatActivateApplicationShortcut(id providerClass, SEL selector,
+                                               id shortcut,
+                                               id bundleIdentifier,
+                                               id iconView) {
+    Class legacyClass = objc_getClass("SBIconView");
+    if (legacyClass != Nil && [legacyClass respondsToSelector:selector]) {
+        ((ApplicationShortcutActivationImplementation)objc_msgSend)(
+            legacyClass, selector, shortcut, bundleIdentifier, iconView);
+        return;
+    }
+    if (OriginalApplicationShortcutActivation != NULL) {
+        OriginalApplicationShortcutActivation(
+            providerClass, selector, shortcut, bundleIdentifier, iconView);
+    }
+}
+
+static void InstallSpringBoardShortcutHooks(void) {
+    if (![NSBundle.mainBundle.bundleIdentifier
+            isEqualToString:@"com.apple.springboard"]) {
+        return;
+    }
+
+    Class iconViewClass = objc_getClass("SBIconView");
+    if (iconViewClass == Nil) return;
+    SEL itemsSelector = sel_registerName("applicationShortcutItems");
+    if (OriginalApplicationShortcutItems == NULL) {
+        Method itemsMethod = DirectInstanceMethod(iconViewClass,
+                                                  itemsSelector);
+        if (itemsMethod != NULL) {
+            OriginalApplicationShortcutItems = (ObjectGetterImplementation)
+                method_setImplementation(
+                    itemsMethod, (IMP)CompatApplicationShortcutItems);
+            os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                             "installed application shortcut item bridge");
+        }
+    }
+
+    if (OriginalApplicationShortcutActivation != NULL) return;
+    Class providerClass = objc_getClass(
+        "SBHIconViewApplicationShortcutsContextMenuProvider");
+    if (providerClass == Nil) return;
+    SEL activationSelector = sel_registerName(
+        "activateShortcut:withBundleIdentifier:forIconView:");
+    Class providerMetaClass = object_getClass(providerClass);
+    Method providerMethod = DirectInstanceMethod(providerMetaClass,
+                                                 activationSelector);
+    if (providerMethod == NULL) return;
+
+    Class iconViewMetaClass = object_getClass(iconViewClass);
+    Method legacyMethod = class_getInstanceMethod(iconViewMetaClass,
+                                                  activationSelector);
+    if (legacyMethod == NULL &&
+        !class_addMethod(iconViewMetaClass, activationSelector,
+                         method_getImplementation(providerMethod),
+                         method_getTypeEncoding(providerMethod))) {
+        return;
+    }
+    OriginalApplicationShortcutActivation =
+        (ApplicationShortcutActivationImplementation)method_setImplementation(
+            providerMethod, (IMP)CompatActivateApplicationShortcut);
+    os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                     "installed application shortcut action bridge");
+}
+
 static IMP OriginalImplementation(NSDictionary<NSString *, NSValue *> *table,
                                   Class cls) {
     @synchronized (table) {
@@ -1274,6 +1392,7 @@ bool codex_legacy_tweak_compat_apply(void) {
         return false;
     }
     ApplyConfiguredAliases();
+    InstallSpringBoardShortcutHooks();
     if (NSThread.isMainThread) {
         InstallPreferenceHooks();
         RepairOrphanWindows();
@@ -1292,12 +1411,14 @@ static void InitializeLegacyTweakCompatibility(void) {
         access(CODEX_LEGACY_COMPAT_DISABLE_MARKER, F_OK) == 0) {
         return;
     }
+    RepairManagedProcessIdentity();
     HeightImplementations = [NSMutableDictionary dictionary];
     LayoutImplementations = [NSMutableDictionary dictionary];
     OrphanWindows = [NSHashTable weakObjectsHashTable];
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
     ApplyConfiguredAliases();
+    InstallSpringBoardShortcutHooks();
     InstallPathHooks();
     [NSNotificationCenter.defaultCenter
         addObserverForName:NSBundleDidLoadNotification
@@ -1305,6 +1426,7 @@ static void InitializeLegacyTweakCompatibility(void) {
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(__unused NSNotification *notification) {
         ApplyConfiguredAliases();
+        InstallSpringBoardShortcutHooks();
         InstallPreferenceHooks();
     }];
     [NSNotificationCenter.defaultCenter

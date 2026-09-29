@@ -1125,6 +1125,35 @@ static bool fixed_springboard_candidate_path(const char *path) {
             strcmp(path, resolved) == 0);
 }
 
+static bool path_has_directory_prefix(const char *path,
+                                      const char *directory) {
+    size_t length = strlen(directory);
+    return length > 0 && strncmp(path, directory, length) == 0 &&
+           path[length] == '/';
+}
+
+static bool fixed_rootless_target_path(const char *path) {
+    char root[PATH_MAX] = {0};
+    if (realpath("/var/jb", root) == NULL ||
+        !path_has_directory_prefix(path, root)) {
+        return false;
+    }
+
+    const char *relative = path + strlen(root) + 1;
+    if (path_has_prefix(relative, "Applications/") ||
+        path_has_prefix(relative,
+                        "System/Library/CoreServices/SpringBoard.app/")) {
+        return true;
+    }
+
+    static const char *const backupPrefix =
+        ".codex-cache/SpringBoard.app.before-sbinject-";
+    if (!path_has_prefix(relative, backupPrefix)) return false;
+    const char *separator = strchr(relative + strlen(backupPrefix), '/');
+    return separator != NULL &&
+           strcmp(separator, "/notSpringBoard") == 0;
+}
+
 static bool copy_bsd_info(pid_t pid, struct codex_proc_bsdinfo *information) {
     memset(information, 0, sizeof(*information));
     int amount = proc_pidinfo(pid, CODEX_PROC_PIDTBSDINFO, 0, information,
@@ -1141,6 +1170,7 @@ static bool supported_target_path(const char *path) {
            strcmp(path, "/usr/libexec/lsd") == 0 ||
            strcmp(path, kStockAmfid) == 0 ||
            fixed_springboard_candidate_path(path) ||
+           fixed_rootless_target_path(path) ||
            path_has_prefix(path,
                            "/private/var/containers/Bundle/Application/") ||
            path_has_prefix(path, "/var/containers/Bundle/Application/") ||
@@ -2208,9 +2238,11 @@ int main(int argc, char *argv[]) {
                                                           targetPath);
         if (!targetAdmitted) {
             fprintf(stderr,
-                    "compat-loader: pid=%d is not an admitted %s target\n",
+                    "compat-loader: pid=%d is not an admitted %s target "
+                    "path=%s\n",
                     targetPid,
-                    injectLaunchdHook ? "launchd" : "app");
+                    injectLaunchdHook ? "launchd" : "app",
+                    targetPath[0] != '\0' ? targetPath : "unavailable");
             if (injectAndResumePid) {
                 (void)kill(targetPid, SIGCONT);
             }

@@ -80,11 +80,14 @@ library, or dylib, is code that several processes can load. The launch path
 loads this library before ElleKit in SpringBoard, Settings, and managed apps
 that enable tweak injection. On iOS 27 it attaches old overlay windows to the
 active window scene. In Settings it also restores supported legacy row heights
-and subtitle text for third-party PreferenceLoader bundles. It retries missing
-legacy tweak paths under `/var/jb`. It also retries old tool launches from the
-rootless tool directories. An exact Settings respring request uses the fixed
-root broker operation. The library does not give a tweak general root broker
-access.
+and subtitle text for third-party PreferenceLoader bundles. In SpringBoard it
+connects old application shortcut item and action hooks to the iOS 27
+context-menu provider. It retries missing legacy tweak paths under `/var/jb`.
+It restores the standard process names for the managed SpringBoard and
+Settings copies before ElleKit loads tweaks. It also retries old tool launches
+from the rootless tool directories. An exact Settings respring request uses the
+fixed root broker operation. The library does not give a tweak general root
+broker access.
 
 The package preparation step also repairs an old absolute dylib dependency
 when the old file is absent and its `/var/jb` file exists. A dylib dependency

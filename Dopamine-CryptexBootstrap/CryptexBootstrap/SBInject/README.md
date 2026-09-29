@@ -23,8 +23,13 @@ fixed library provides common iOS 27 repairs for old tweak windows and old
 PreferenceLoader cells. It retries missing legacy file, preference, framework,
 and tool paths under `/var/jb`. It sends only an exact Settings respring request
 to the fixed root broker operation. It does not provide a general root command
-interface. It also exports four small functions for exact class, method, and
-path mappings. Their declarations are in
+interface. In SpringBoard, it also keeps the old application shortcut item and
+action contracts connected to the iOS 27 context-menu provider. This lets
+older icon-menu hooks receive the current item list and action calls. The
+library also gives the managed SpringBoard and Settings copies their standard
+process names before ElleKit loads tweaks. A tweak that selects its hooks from
+the process name then selects the correct hooks. It also exports four small
+functions for exact class, method, and path mappings. Their declarations are in
 `sbinject_legacy_tweak_compat.h`. The optional mapping file is
 `/var/jb/etc/sbinject/legacy-tweak-compat.plist`. It must be a regular,
 root-owned file. It must not be writable by a group or other users. Its maximum
