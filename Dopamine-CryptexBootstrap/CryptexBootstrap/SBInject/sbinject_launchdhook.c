@@ -39,8 +39,6 @@ static int (*original_posix_spawnp)(pid_t *, const char *,
 static pthread_mutex_t g_redirect_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_window_started;
 static unsigned int g_window_launches;
-static uint64_t g_preferences_window_started;
-static unsigned int g_preferences_window_launches;
 
 static void hook_log(const char *format, ...) {
     int descriptor = open(CODEX_SBINJECT_LOG,
@@ -156,34 +154,26 @@ static bool publish_ready_marker(void) {
     return ready;
 }
 
-static bool reserve_redirect_attempt(bool preferences) {
+static bool reserve_springboard_redirect_attempt(void) {
     struct timespec now = {0};
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         return false;
     }
     pthread_mutex_lock(&g_redirect_lock);
     uint64_t seconds = (uint64_t)now.tv_sec;
-    uint64_t *window_started = preferences ? &g_preferences_window_started
-                                           : &g_window_started;
-    unsigned int *window_launches =
-        preferences ? &g_preferences_window_launches : &g_window_launches;
-    if (*window_started == 0 || seconds < *window_started ||
-        seconds - *window_started > 60U) {
-        *window_started = seconds;
-        *window_launches = 0;
+    if (g_window_started == 0 || seconds < g_window_started ||
+        seconds - g_window_started > 60U) {
+        g_window_started = seconds;
+        g_window_launches = 0;
     }
-    bool allowed = *window_launches < 3U;
+    bool allowed = g_window_launches < 3U;
     if (allowed) {
-        ++*window_launches;
+        ++g_window_launches;
     }
     pthread_mutex_unlock(&g_redirect_lock);
     if (!allowed) {
-        const char *reason = preferences
-            ? "three Preferences launches in sixty seconds"
-            : "three SpringBoard launches in sixty seconds";
-        if (preferences) {
-            disable_redirect(true, reason);
-        } else if (enter_tweak_safe_mode(reason)) {
+        const char *reason = "three SpringBoard launches in sixty seconds";
+        if (enter_tweak_safe_mode(reason)) {
             reset_springboard_redirect_window(seconds);
             allowed = true;
         } else {
@@ -217,14 +207,13 @@ static const char *redirect_candidate(const char *path,
         marker_is_enabled(CODEX_SBINJECT_ENABLE_MARKER) &&
         safe_root_file(CODEX_SBINJECT_SPRINGBOARD, true) &&
         safe_root_file(CODEX_SBINJECT_BUNDLE_HOOK, true) &&
-        (safe_mode || reserve_redirect_attempt(false))) {
+        (safe_mode || reserve_springboard_redirect_attempt())) {
         return CODEX_SBINJECT_SPRINGBOARD;
     }
     if (strcmp(path, CODEX_SBINJECT_STOCK_PREFERENCES) == 0 &&
         marker_is_enabled(CODEX_SBINJECT_PREFERENCES_ENABLE_MARKER) &&
         safe_root_file(CODEX_SBINJECT_PREFERENCES, true) &&
-        safe_root_file(CODEX_SBINJECT_PREFERENCES_HOOK, true) &&
-        reserve_redirect_attempt(true)) {
+        safe_root_file(CODEX_SBINJECT_PREFERENCES_HOOK, true)) {
         if (preferences_out != NULL) {
             *preferences_out = true;
         }

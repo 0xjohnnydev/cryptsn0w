@@ -201,7 +201,7 @@ static NSString *const kSBInjectPreferencesBridge =
 static NSString *const kSBInjectLegacyTweakCompat =
     @"/var/jb/usr/lib/sbinject/legacy-tweak-compat.dylib";
 static NSString *const kSBInjectLaunchdHook =
-    @"/var/jb/usr/lib/sbinject/launchdhook-v41.dylib";
+    @"/var/jb/usr/lib/sbinject/launchdhook-v42.dylib";
 static NSString *const kSBInjectShadowBootstrap =
     @"/var/jb/usr/lib/sbinject/shadow-bootstrap.dylib";
 static NSString *const kSBInjectLsdRegistrationHook =
@@ -8814,7 +8814,7 @@ int main(int argc, char *argv[]) {
                            @"usr/local/lib/sbinject/trollstore-settings-hook.dylib"];
         NSString *sourceSBInjectLaunchdHook =
             [mountRoot stringByAppendingPathComponent:
-                           @"usr/local/lib/sbinject/launchdhook-v41.dylib"];
+                           @"usr/local/lib/sbinject/launchdhook-v42.dylib"];
         NSString *sourceSBInjectShadowBootstrap =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/shadow-bootstrap.dylib"];
@@ -10369,7 +10369,7 @@ int main(int argc, char *argv[]) {
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
                 sourceSBInjectLaunchdHook, @"/var/jb/usr/lib/sbinject",
-                @"launchdhook-v41.dylib", 16 * 1024 * 1024, 0755,
+                @"launchdhook-v42.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(

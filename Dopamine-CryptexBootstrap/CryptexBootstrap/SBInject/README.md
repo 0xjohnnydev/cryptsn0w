@@ -64,9 +64,10 @@ iOS. If a file needs a library from an old absolute path, and the matching
 changed file again. It never follows the scan outside `/var/jb`.
 
 The launchd hook is inert unless the root-owned
-`/var/jb/var/lib/sbinject/enabled` marker exists.  Three replacement launches
-inside sixty seconds remove that marker and return launchd to the stock
-SpringBoard path.  A failed redirected spawn also falls back immediately.
+`/var/jb/var/lib/sbinject/enabled` marker exists. Three SpringBoard replacement
+launches inside sixty seconds enter tweak safe mode. Settings has no launch
+count limit because a user or a test can close and open it many times without
+a crash. A failed redirected spawn still falls back immediately.
 
 The dyld bypass locates its two syscall stubs uniquely in the live dyld image
 using the supplied SBInject signature scan. It has no model-specific offset or

@@ -81,10 +81,10 @@ struct codex_sbinject_shadow_response {
 #define CODEX_SBINJECT_PREFERENCES_HOOK \
     "/var/jb/Applications/Preferences.app/g"
 #define CODEX_SBINJECT_LAUNCHDHOOK \
-    "/var/jb/usr/lib/sbinject/launchdhook-v41.dylib"
+    "/var/jb/usr/lib/sbinject/launchdhook-v42.dylib"
 #define CODEX_SBINJECT_LAUNCHDHOOK_PREFIX \
     "/var/jb/usr/lib/sbinject/launchdhook-v"
-#define CODEX_SBINJECT_LAUNCHDHOOK_GENERATION 41U
+#define CODEX_SBINJECT_LAUNCHDHOOK_GENERATION 42U
 #define CODEX_SBINJECT_ELLEKIT \
     "/var/jb/usr/lib/ellekit/libinjector.dylib"
 #define CODEX_SBINJECT_ELLEKIT_PSPAWN \

@@ -132,7 +132,7 @@ SBINJECT_PACKAGE_VALIDATOR="$IMAGE_ROOT/usr/local/bin/sbinject-package-validator
 SBINJECT_SOURCE_DIR="$SCRIPT_DIR/SBInject"
 SBINJECT_GENERALHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/generalhook.dylib"
 SBINJECT_AMFIHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/amfihook.dylib"
-SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v41.dylib"
+SBINJECT_LAUNCHDHOOK="$IMAGE_ROOT/usr/local/lib/sbinject/launchdhook-v42.dylib"
 SBINJECT_SHADOW_BOOTSTRAP="$IMAGE_ROOT/usr/local/lib/sbinject/shadow-bootstrap.dylib"
 SBINJECT_LSD_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/lsd-registration-hook.dylib"
 SBINJECT_TROLLSTORE_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trollstore-registration-hook.dylib"
@@ -704,7 +704,7 @@ xcrun --sdk iphoneos clang \
     "$SBINJECT_SOURCE_DIR/sbinject_launchdhook.c" \
     "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
     -lsandbox \
-    -install_name /var/jb/usr/lib/sbinject/launchdhook-v41.dylib \
+    -install_name /var/jb/usr/lib/sbinject/launchdhook-v42.dylib \
     -o "$SBINJECT_LAUNCHDHOOK"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_LAUNCHDHOOK"

@@ -41,7 +41,7 @@ static const char *const kDefaultDylib =
 static const char *const kShadowCore =
     "/var/jb/usr/lib/ShadowCore.dylib";
 static const char *const kSBInjectLaunchdHook =
-    "/var/jb/usr/lib/sbinject/launchdhook-v41.dylib";
+    "/var/jb/usr/lib/sbinject/launchdhook-v42.dylib";
 static const char *const kSBInjectLsdRegistrationHook =
     "/var/jb/usr/lib/sbinject/lsd-registration-hook.dylib";
 static const char *const kSBInjectAmfidHook =
