@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <spawn.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -60,6 +61,12 @@ static ApplicationShortcutActivationImplementation
     OriginalApplicationShortcutActivation;
 static ResolveInstanceMethodImplementation OriginalResolveInstanceMethod;
 static char *ManagedArgumentZero;
+
+static id CompatFlashlightButton(id view, SEL selector);
+static id CompatCameraButton(id view, SEL selector);
+static void InstallSpringBoardQuickActionsHooks(void);
+
+static _Atomic bool QuickActionsInstallScheduled;
 
 #define CODEX_MAX_PATH_MAPPINGS 32U
 
@@ -1141,6 +1148,11 @@ static id CompatRootFolderController(id iconController,
     return nil;
 }
 
+static id CompatVirtualIconApplication(__unused id icon,
+                                       __unused SEL selector) {
+    return nil;
+}
+
 static void InstallSpringBoardFolderHooks(void) {
     if (![NSBundle.mainBundle.bundleIdentifier
             isEqualToString:@"com.apple.springboard"]) {
@@ -1156,6 +1168,16 @@ static void InstallSpringBoardFolderHooks(void) {
                         (IMP)CompatRootFolderController, "@16@0:8")) {
         os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                          "installed root folder controller bridge");
+    }
+
+    Class iconClass = objc_getClass("SBIcon");
+    SEL applicationSelector = sel_registerName("application");
+    if (iconClass != Nil &&
+        class_getInstanceMethod(iconClass, applicationSelector) == NULL &&
+        class_addMethod(iconClass, applicationSelector,
+                        (IMP)CompatVirtualIconApplication, "@16@0:8")) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "installed base icon application bridge");
     }
 }
 
@@ -1207,6 +1229,22 @@ static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
             class_addMethod(cls, missingSelector, implementation, types)) {
             os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                              "installed legacy database initializer bridge");
+            return YES;
+        }
+    }
+    if (className != NULL && methodName != NULL &&
+        strcmp(className, "CSQuickActionsView") == 0) {
+        IMP implementation = NULL;
+        if (strcmp(methodName, "flashlightButton") == 0) {
+            implementation = (IMP)CompatFlashlightButton;
+        } else if (strcmp(methodName, "cameraButton") == 0) {
+            implementation = (IMP)CompatCameraButton;
+        }
+        if (implementation != NULL &&
+            class_addMethod(cls, missingSelector, implementation,
+                            "@16@0:8")) {
+            os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                             "resolved legacy lock screen button getter");
             return YES;
         }
     }
@@ -1328,6 +1366,64 @@ static void InstallSpringBoardShortcutHooks(void) {
             providerMethod, (IMP)CompatActivateApplicationShortcut);
     os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                      "installed application shortcut action bridge");
+}
+
+static id CompatQuickActionsButton(id view, BOOL trailing) {
+    SEL buttonsSelector = sel_registerName("buttons");
+    if (![view respondsToSelector:buttonsSelector]) return nil;
+    id buttons = ((id (*)(id, SEL))objc_msgSend)(view, buttonsSelector);
+    SEL buttonSelector = trailing ? @selector(lastObject) :
+                                    @selector(firstObject);
+    if (![buttons respondsToSelector:buttonSelector]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(buttons, buttonSelector);
+}
+
+static id CompatFlashlightButton(id view, __unused SEL selector) {
+    return CompatQuickActionsButton(view, NO);
+}
+
+static id CompatCameraButton(id view, __unused SEL selector) {
+    return CompatQuickActionsButton(view, YES);
+}
+
+static void InstallSpringBoardQuickActionsHooks(void) {
+    if (![NSBundle.mainBundle.bundleIdentifier
+            isEqualToString:@"com.apple.springboard"]) {
+        return;
+    }
+    Class viewClass = objc_getClass("CSQuickActionsView");
+    if (viewClass == Nil) return;
+
+    SEL flashlightSelector = sel_registerName("flashlightButton");
+    SEL cameraSelector = sel_registerName("cameraButton");
+    BOOL installed = NO;
+    if (class_getInstanceMethod(viewClass, flashlightSelector) == NULL) {
+        installed |= class_addMethod(viewClass, flashlightSelector,
+                                     (IMP)CompatFlashlightButton,
+                                     "@16@0:8");
+    }
+    if (class_getInstanceMethod(viewClass, cameraSelector) == NULL) {
+        installed |= class_addMethod(viewClass, cameraSelector,
+                                     (IMP)CompatCameraButton,
+                                     "@16@0:8");
+    }
+    if (installed) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "installed lock screen quick action bridge");
+    }
+}
+
+static void ScheduleSpringBoardQuickActionsHooks(void) {
+    if (atomic_exchange(&QuickActionsInstallScheduled, true)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        atomic_store(&QuickActionsInstallScheduled, false);
+        InstallSpringBoardQuickActionsHooks();
+    });
+}
+
+static void CompatObjectiveCImageDidLoad(
+    __unused const struct mach_header *header) {
+    ScheduleSpringBoardQuickActionsHooks();
 }
 
 static IMP OriginalImplementation(NSDictionary<NSString *, NSValue *> *table,
@@ -1503,6 +1599,7 @@ bool codex_legacy_tweak_compat_apply(void) {
     InstallLegacyDatabaseResolver();
     InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
+    InstallSpringBoardQuickActionsHooks();
     if (NSThread.isMainThread) {
         InstallPreferenceHooks();
         RepairOrphanWindows();
@@ -1531,6 +1628,8 @@ static void InitializeLegacyTweakCompatibility(void) {
     InstallLegacyDatabaseResolver();
     InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
+    InstallSpringBoardQuickActionsHooks();
+    objc_addLoadImageFunc(CompatObjectiveCImageDidLoad);
     InstallPathHooks();
     [NSNotificationCenter.defaultCenter
         addObserverForName:NSBundleDidLoadNotification
@@ -1540,6 +1639,7 @@ static void InitializeLegacyTweakCompatibility(void) {
         ApplyConfiguredAliases();
         InstallSpringBoardFolderHooks();
         InstallSpringBoardShortcutHooks();
+        InstallSpringBoardQuickActionsHooks();
         InstallPreferenceHooks();
     }];
     [NSNotificationCenter.defaultCenter
@@ -1551,6 +1651,7 @@ static void InitializeLegacyTweakCompatibility(void) {
     }];
     dispatch_async(dispatch_get_main_queue(), ^{
         InstallSpringBoardFolderHooks();
+        InstallSpringBoardQuickActionsHooks();
         InstallPreferenceHooks();
         RepairOrphanWindows();
     });

@@ -83,11 +83,18 @@ active window scene. In Settings it also restores supported legacy row heights
 and subtitle text for third-party PreferenceLoader bundles. In SpringBoard it
 connects old application shortcut item and action hooks to the iOS 27
 context-menu provider. It retries missing legacy tweak paths under `/var/jb`.
+It gives old virtual icons a safe application result. It also maps the old
+lock-screen flashlight and camera button getters to the current quick-action
+button list.
 It restores the standard process names for the managed SpringBoard and
 Settings copies before ElleKit loads tweaks. It also retries old tool launches
 from the rootless tool directories. An exact Settings respring request uses the
 fixed root broker operation. The library does not give a tweak general root
 broker access.
+
+For other App Store apps, the compatibility launch path requires both an
+enabled Shadow policy and a secure marker from the trusted app launcher. An app
+cannot opt into this privileged path by itself.
 
 The package preparation step also repairs an old absolute dylib dependency
 when the old file is absent and its `/var/jb` file exists. A dylib dependency

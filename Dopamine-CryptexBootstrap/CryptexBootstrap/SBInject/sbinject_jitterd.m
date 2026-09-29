@@ -183,6 +183,22 @@ static bool managed_app_launcher_process(pid_t pid) {
            secure_regular_file(marker, 64 * 1024, NULL);
 }
 
+static bool shadow_policy_enabled(NSString *identifier) {
+    if (identifier.length == 0) return false;
+    NSDictionary *preferences =
+        [NSDictionary dictionaryWithContentsOfFile:
+            @"/var/mobile/Library/Preferences/me.jjolano.shadow.plist"];
+    if (![preferences isKindOfClass:[NSDictionary class]]) return false;
+    NSDictionary *app = preferences[identifier];
+    if (![app isKindOfClass:[NSDictionary class]]) app = nil;
+    if ([app[@"App_Disabled"] boolValue]) return false;
+    if ([preferences[@"Global_Enabled"] boolValue] &&
+        ![preferences[@"SingleToggleMigrated"] boolValue]) {
+        return true;
+    }
+    return [app[@"App_Enabled"] boolValue];
+}
+
 static bool shadow_enabled_app_process(pid_t pid) {
     char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
     char observed[CODEX_PROC_PIDPATH_MAX] = {0};
@@ -226,18 +242,7 @@ static bool shadow_enabled_app_process(pid_t pid) {
         return false;
     }
 
-    NSDictionary *preferences =
-        [NSDictionary dictionaryWithContentsOfFile:
-            @"/var/mobile/Library/Preferences/me.jjolano.shadow.plist"];
-    if (![preferences isKindOfClass:[NSDictionary class]]) return false;
-    NSDictionary *app = preferences[identifier];
-    if (![app isKindOfClass:[NSDictionary class]]) app = nil;
-    if ([app[@"App_Disabled"] boolValue]) return false;
-    if ([preferences[@"Global_Enabled"] boolValue] &&
-        ![preferences[@"SingleToggleMigrated"] boolValue]) {
-        return true;
-    }
-    return [app[@"App_Enabled"] boolValue];
+    return shadow_policy_enabled(identifier);
 }
 
 static bool target_compatibility_app_process(pid_t pid) {
@@ -275,10 +280,14 @@ static bool target_compatibility_app_process(pid_t pid) {
     NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
     NSString *identifier = bundle.bundleIdentifier;
     NSString *executablePath = bundle.executablePath;
-    bool allowlisted =
+    bool fixedCompatibilityTarget =
         [identifier isEqualToString:@"uk.co.bbc.news"] ||
         [identifier isEqualToString:@"org.navyfederal.nfcuforiphone"];
-    if (!allowlisted || executablePath.length == 0) return false;
+    if (identifier.length == 0 || executablePath.length == 0 ||
+        (!fixedCompatibilityTarget &&
+         !shadow_policy_enabled(identifier))) {
+        return false;
+    }
     char resolved_executable[CODEX_PROC_PIDPATH_MAX] = {0};
     if (realpath(executablePath.fileSystemRepresentation,
                  resolved_executable) == NULL ||
@@ -289,6 +298,10 @@ static bool target_compatibility_app_process(pid_t pid) {
     NSString *containerPath = bundlePath.stringByDeletingLastPathComponent;
     NSString *markerPath = [containerPath stringByAppendingPathComponent:
         [NSString stringWithUTF8String:CODEX_SBINJECT_MANAGED_APP_MARKER]];
+    if (!secure_regular_file(markerPath.fileSystemRepresentation,
+                             64 * 1024, NULL)) {
+        return false;
+    }
     NSDictionary *marker =
         [NSDictionary dictionaryWithContentsOfFile:markerPath];
     if (![marker isKindOfClass:NSDictionary.class] ||

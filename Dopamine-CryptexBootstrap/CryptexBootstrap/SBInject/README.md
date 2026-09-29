@@ -29,6 +29,9 @@ older icon-menu hooks receive the current item list and action calls. The
 library also gives the managed SpringBoard and Settings copies their standard
 process names before ElleKit loads tweaks. A tweak that selects its hooks from
 the process name then selects the correct hooks. It translates the removed
+virtual icon application getter to a safe empty result. It maps the old
+lock-screen flashlight and camera button getters to the current quick-action
+button list. It translates the removed
 Shortcuts database initializer to the iOS 27 file-backed initializer while it
 keeps the same database URL. This lets older tweak panels read the current
 Shortcuts database without a per-tweak patch. It also exports four small
@@ -64,6 +67,10 @@ must end under `/var/jb`. The default path repair first uses an existing Apple
 path. It does not redirect Apple system preference files. It does not translate
 changed data types or changed behavior. A load failure does not stop ElleKit or
 the target process.
+
+For a normal App Store app, the broker enables the compatibility launch path
+only when Shadow enables that bundle identifier and the trusted launcher has
+created its root-owned marker. The app cannot create a valid marker by itself.
 
 After a package transaction, the bootstrap scans installed tweak, framework,
 and preference bundle Mach-O files. Mach-O is the executable file format on
