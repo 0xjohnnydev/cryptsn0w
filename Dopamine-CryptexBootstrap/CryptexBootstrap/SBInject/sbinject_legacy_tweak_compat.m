@@ -249,6 +249,11 @@ static BOOL IsPreferencesProcess(void) {
         isEqualToString:@"com.apple.Preferences"];
 }
 
+static BOOL IsSpringBoardProcess(void) {
+    return [NSBundle.mainBundle.bundleIdentifier
+        isEqualToString:@"com.apple.springboard"];
+}
+
 static const char *CommandLeaf(const char *path) {
     if (path == NULL || path[0] == '\0') return NULL;
     const char *separator = strrchr(path, '/');
@@ -422,7 +427,7 @@ static int CompatPosixSpawn(pid_t *restrict pid, const char *restrict path,
     int result = posix_spawn(pid, path, actions, attributes, arguments,
                              environment);
     if (result == 0 || !RetryPathFailure(result)) return result;
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     if (!ExistingTranslatedExecutable(path, translated, sizeof(translated))) {
         return result;
     }
@@ -444,7 +449,7 @@ static int CompatPosixSpawnp(pid_t *restrict pid, const char *restrict path,
     int result = posix_spawnp(pid, path, actions, attributes, arguments,
                               environment);
     if (result == 0 || !RetryPathFailure(result)) return result;
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool available = ExistingTranslatedExecutable(
         path, translated, sizeof(translated));
     if (!available) {
@@ -660,7 +665,7 @@ static void ApplyConfiguredAliases(void) {
 }
 
 static int CompatAccess(const char *path, int mode) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -669,10 +674,8 @@ static int CompatAccess(const char *path, int mode) {
         if (result == 0) return result;
     }
     int result = access(path, mode);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return access(translated, mode);
@@ -680,7 +683,7 @@ static int CompatAccess(const char *path, int mode) {
 
 static int CompatFAccessAt(int descriptor, const char *path, int mode,
                            int flags) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -689,10 +692,8 @@ static int CompatFAccessAt(int descriptor, const char *path, int mode,
         if (result == 0) return result;
     }
     int result = faccessat(descriptor, path, mode, flags);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return faccessat(descriptor, translated, mode, flags);
@@ -702,7 +703,7 @@ typedef int (*StatPathImplementation)(const char *, struct stat *);
 
 static int CompatStatPath(StatPathImplementation implementation,
                           const char *path, struct stat *status) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -711,10 +712,8 @@ static int CompatStatPath(StatPathImplementation implementation,
         if (result == 0) return result;
     }
     int result = implementation(path, status);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return implementation(translated, status);
@@ -736,26 +735,20 @@ static int CompatOpen(const char *path, int flags, ...) {
         mode = (mode_t)va_arg(arguments, int);
         va_end(arguments);
     }
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
-#define CODEX_CALL_OPEN(candidate) \
-    (((flags & O_CREAT) != 0) ? open((candidate), flags, mode) \
-                              : open((candidate), flags))
     if (available && preferred) {
-        int result = CODEX_CALL_OPEN(translated);
+        int result = open(translated, flags, mode);
         if (result >= 0) return result;
     }
-    int result = CODEX_CALL_OPEN(path);
-    int originalError = errno;
+    int result = open(path, flags, mode);
     if (result >= 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
-    return CODEX_CALL_OPEN(translated);
-#undef CODEX_CALL_OPEN
+    return open(translated, flags, mode);
 }
 
 static int CompatOpenAt(int descriptor, const char *path, int flags, ...) {
@@ -766,31 +759,24 @@ static int CompatOpenAt(int descriptor, const char *path, int flags, ...) {
         mode = (mode_t)va_arg(arguments, int);
         va_end(arguments);
     }
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
-#define CODEX_CALL_OPENAT(candidate) \
-    (((flags & O_CREAT) != 0) \
-         ? openat(descriptor, (candidate), flags, mode) \
-         : openat(descriptor, (candidate), flags))
     if (available && preferred) {
-        int result = CODEX_CALL_OPENAT(translated);
+        int result = openat(descriptor, translated, flags, mode);
         if (result >= 0) return result;
     }
-    int result = CODEX_CALL_OPENAT(path);
-    int originalError = errno;
+    int result = openat(descriptor, path, flags, mode);
     if (result >= 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
-    return CODEX_CALL_OPENAT(translated);
-#undef CODEX_CALL_OPENAT
+    return openat(descriptor, translated, flags, mode);
 }
 
 static FILE *CompatFopen(const char *path, const char *mode) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -799,17 +785,15 @@ static FILE *CompatFopen(const char *path, const char *mode) {
         if (result != NULL) return result;
     }
     FILE *result = fopen(path, mode);
-    int originalError = errno;
     if (result != NULL || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return fopen(translated, mode);
 }
 
 static DIR *CompatOpendir(const char *path) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -818,17 +802,15 @@ static DIR *CompatOpendir(const char *path) {
         if (result != NULL) return result;
     }
     DIR *result = opendir(path);
-    int originalError = errno;
     if (result != NULL || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return opendir(translated);
 }
 
 static ssize_t CompatReadlink(const char *path, char *buffer, size_t size) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -837,17 +819,15 @@ static ssize_t CompatReadlink(const char *path, char *buffer, size_t size) {
         if (result >= 0) return result;
     }
     ssize_t result = readlink(path, buffer, size);
-    int originalError = errno;
     if (result >= 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return readlink(translated, buffer, size);
 }
 
 static char *CompatRealpath(const char *path, char *resolved) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -856,10 +836,8 @@ static char *CompatRealpath(const char *path, char *resolved) {
         if (result != NULL) return result;
     }
     char *result = realpath(path, resolved);
-    int originalError = errno;
     if (result != NULL || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return realpath(translated, resolved);
@@ -869,7 +847,7 @@ typedef int (*SinglePathOperation)(const char *);
 
 static int CompatSinglePathOperation(SinglePathOperation operation,
                                      const char *path) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -878,10 +856,8 @@ static int CompatSinglePathOperation(SinglePathOperation operation,
         if (result == 0) return result;
     }
     int result = operation(path);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return operation(translated);
@@ -896,7 +872,7 @@ static int CompatRemove(const char *path) {
 }
 
 static int CompatMkdir(const char *path, mode_t mode) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -905,17 +881,15 @@ static int CompatMkdir(const char *path, mode_t mode) {
         if (result == 0) return result;
     }
     int result = mkdir(path, mode);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return mkdir(translated, mode);
 }
 
 static int CompatChmod(const char *path, mode_t mode) {
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -924,10 +898,8 @@ static int CompatChmod(const char *path, mode_t mode) {
         if (result == 0) return result;
     }
     int result = chmod(path, mode);
-    int originalError = errno;
     if (result == 0 || !available || preferred ||
-        !RetryPathFailure(originalError)) {
-        errno = originalError;
+        !RetryPathFailure(errno)) {
         return result;
     }
     return chmod(translated, mode);
@@ -938,8 +910,8 @@ typedef int (*TwoPathOperation)(const char *, const char *);
 static int CompatTwoPathOperation(TwoPathOperation operation,
                                   const char *source,
                                   const char *destination) {
-    char translatedSource[PATH_MAX] = {0};
-    char translatedDestination[PATH_MAX] = {0};
+    char translatedSource[PATH_MAX];
+    char translatedDestination[PATH_MAX];
     bool sourcePreferred = false;
     bool destinationPreferred = false;
     bool sourceAvailable = TranslateLegacyPath(
@@ -956,10 +928,8 @@ static int CompatTwoPathOperation(TwoPathOperation operation,
         if (result == 0) return result;
     }
     int result = operation(source, destination);
-    int originalError = errno;
     if (result == 0 || (!sourceAvailable && !destinationAvailable) ||
-        preferred || !RetryPathFailure(originalError)) {
-        errno = originalError;
+        preferred || !RetryPathFailure(errno)) {
         return result;
     }
     return operation(mappedSource, mappedDestination);
@@ -979,7 +949,7 @@ static int CompatSymlink(const char *source, const char *destination) {
 
 static void *CompatDlopen(const char *path, int mode) {
     if (path == NULL) return dlopen(path, mode);
-    char translated[PATH_MAX] = {0};
+    char translated[PATH_MAX];
     bool preferred = false;
     bool available = TranslateLegacyPath(path, translated,
                                          sizeof(translated), &preferred);
@@ -1155,17 +1125,12 @@ static id CompatVirtualIconApplication(__unused id icon,
 }
 
 static void InstallSpringBoardFolderHooks(void) {
-    if (![NSBundle.mainBundle.bundleIdentifier
-            isEqualToString:@"com.apple.springboard"]) {
-        return;
-    }
+    if (!IsSpringBoardProcess()) return;
     Class iconControllerClass = objc_getClass("SBIconController");
     SEL legacySelector = sel_registerName("_rootFolderController");
-    if (iconControllerClass == Nil ||
-        class_getInstanceMethod(iconControllerClass, legacySelector) != NULL) {
-        return;
-    }
-    if (class_addMethod(iconControllerClass, legacySelector,
+    if (iconControllerClass != Nil &&
+        class_getInstanceMethod(iconControllerClass, legacySelector) == NULL &&
+        class_addMethod(iconControllerClass, legacySelector,
                         (IMP)CompatRootFolderController, "@16@0:8")) {
         os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                          "installed root folder controller bridge");
@@ -1206,16 +1171,15 @@ static id CompatDatabaseInitializerWithoutLock(
 }
 
 static float CompatCurrentVolume(id viewController,
-                                 __unused SEL selector) {
+                                __unused SEL selector) {
     SEL currentValueSelector = sel_registerName("currentValue");
     if (![viewController respondsToSelector:currentValueSelector]) return 0.0f;
     return ((float (*)(id, SEL))objc_msgSend)(viewController,
-                                              currentValueSelector);
+                                            currentValueSelector);
 }
 
 static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
                                         SEL missingSelector) {
-    static const char databaseClassName[] = "WFDatabase";
     static const char initializerWithLock[] =
         "initWithStoreDescription:runMigrationsIfNecessary:"
         "useLockFile:error:";
@@ -1223,10 +1187,10 @@ static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
         "initWithStoreDescription:runMigrationsIfNecessary:error:";
     const char *className = class_getName(cls);
     const char *methodName = sel_getName(missingSelector);
+    IMP implementation = NULL;
+    const char *types = NULL;
     if (className != NULL && methodName != NULL &&
-        strcmp(className, databaseClassName) == 0) {
-        IMP implementation = NULL;
-        const char *types = NULL;
+        strcmp(className, "WFDatabase") == 0) {
         if (strcmp(methodName, initializerWithLock) == 0) {
             implementation = (IMP)CompatDatabaseInitializer;
             types = "@40@0:8@16B24B28^@32";
@@ -1234,43 +1198,32 @@ static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
             implementation = (IMP)CompatDatabaseInitializerWithoutLock;
             types = "@40@0:8@16B24^@32";
         }
-        if (implementation != NULL &&
-            class_addMethod(cls, missingSelector, implementation, types)) {
-            os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
-                             "installed legacy database initializer bridge");
-            return YES;
-        }
-    }
-    if (className != NULL && methodName != NULL &&
+    } else if (className != NULL && methodName != NULL &&
         strcmp(className, "SBElasticVolumeViewController") == 0 &&
-        strcmp(methodName, "currentVolume") == 0 &&
-        class_addMethod(cls, missingSelector, (IMP)CompatCurrentVolume,
-                        "f16@0:8")) {
-        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
-                         "resolved legacy volume getter");
-        return YES;
-    }
-    if (className != NULL && methodName != NULL &&
+        strcmp(methodName, "currentVolume") == 0) {
+        implementation = (IMP)CompatCurrentVolume;
+        types = "f16@0:8";
+    } else if (className != NULL && methodName != NULL &&
         strcmp(className, "CSQuickActionsView") == 0) {
-        IMP implementation = NULL;
         if (strcmp(methodName, "flashlightButton") == 0) {
             implementation = (IMP)CompatFlashlightButton;
         } else if (strcmp(methodName, "cameraButton") == 0) {
             implementation = (IMP)CompatCameraButton;
         }
-        if (implementation != NULL &&
-            class_addMethod(cls, missingSelector, implementation,
-                            "@16@0:8")) {
-            os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
-                             "resolved legacy lock screen button getter");
-            return YES;
-        }
+        types = "@16@0:8";
+    }
+    if (implementation != NULL &&
+        class_addMethod(cls, missingSelector, implementation, types)) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "resolved legacy method -[%{public}s %{public}s]",
+                         className, methodName);
+        return YES;
     }
     return OriginalResolveInstanceMethod != NULL
         ? OriginalResolveInstanceMethod(cls, selector, missingSelector) : NO;
 }
 
-static void InstallLegacyDatabaseResolver(void) {
+static void InstallLegacyMethodResolver(void) {
     if (OriginalResolveInstanceMethod != NULL) return;
     Method resolver = class_getClassMethod(
         NSObject.class, @selector(resolveInstanceMethod:));
@@ -1339,10 +1292,7 @@ static void CompatActivateApplicationShortcut(id providerClass, SEL selector,
 }
 
 static void InstallSpringBoardShortcutHooks(void) {
-    if (![NSBundle.mainBundle.bundleIdentifier
-            isEqualToString:@"com.apple.springboard"]) {
-        return;
-    }
+    if (!IsSpringBoardProcess()) return;
 
     Class iconViewClass = objc_getClass("SBIconView");
     if (iconViewClass == Nil) return;
@@ -1405,10 +1355,7 @@ static id CompatCameraButton(id view, __unused SEL selector) {
 }
 
 static void InstallSpringBoardQuickActionsHooks(void) {
-    if (![NSBundle.mainBundle.bundleIdentifier
-            isEqualToString:@"com.apple.springboard"]) {
-        return;
-    }
+    if (!IsSpringBoardProcess()) return;
     Class viewClass = objc_getClass("CSQuickActionsView");
     if (viewClass == Nil) return;
 
@@ -1557,23 +1504,16 @@ static BOOL InstallMethodHook(Class cls, SEL selector, IMP replacement,
         if (inherited == NULL) return NO;
         IMP original = method_getImplementation(inherited);
         if (original == replacement) return NO;
-        const char *types = method_getTypeEncoding(inherited);
-        Method direct = DirectInstanceMethod(cls, selector);
-        if (direct != NULL) {
-            original = method_setImplementation(direct, replacement);
-        } else if (!class_addMethod(cls, selector, replacement, types)) {
-            return NO;
-        }
+        IMP replaced = class_replaceMethod(cls, selector, replacement,
+                                            method_getTypeEncoding(inherited));
+        if (replaced != NULL) original = replaced;
         table[key] = [NSValue valueWithPointer:original];
         return YES;
     }
 }
 
 static void InstallPreferenceHooks(void) {
-    if (![NSBundle.mainBundle.bundleIdentifier
-            isEqualToString:@"com.apple.Preferences"]) {
-        return;
-    }
+    if (!IsPreferencesProcess()) return;
     Class listController = objc_getClass("PSListController");
     Class tableCell = objc_getClass("PSTableCell");
     if (listController == Nil || tableCell == Nil) return;
@@ -1614,7 +1554,7 @@ bool codex_legacy_tweak_compat_apply(void) {
         return false;
     }
     ApplyConfiguredAliases();
-    InstallLegacyDatabaseResolver();
+    InstallLegacyMethodResolver();
     InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
     InstallSpringBoardQuickActionsHooks();
@@ -1643,11 +1583,13 @@ static void InitializeLegacyTweakCompatibility(void) {
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
     ApplyConfiguredAliases();
-    InstallLegacyDatabaseResolver();
+    InstallLegacyMethodResolver();
     InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
     InstallSpringBoardQuickActionsHooks();
-    objc_addLoadImageFunc(CompatObjectiveCImageDidLoad);
+    if (IsSpringBoardProcess()) {
+        objc_addLoadImageFunc(CompatObjectiveCImageDidLoad);
+    }
     InstallPathHooks();
     [NSNotificationCenter.defaultCenter
         addObserverForName:NSBundleDidLoadNotification
