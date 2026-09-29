@@ -20,8 +20,11 @@ preference bundle controller. It is inert when the iOS 27 model class is absent.
 
 Before ElleKit loads, the same lane loads `legacy-tweak-compat.dylib`. This
 fixed library provides common iOS 27 repairs for old tweak windows and old
-PreferenceLoader cells. It also exports three small functions for exact class
-and method mappings. Their declarations are in
+PreferenceLoader cells. It retries missing legacy file, preference, framework,
+and tool paths under `/var/jb`. It sends only an exact Settings respring request
+to the fixed root broker operation. It does not provide a general root command
+interface. It also exports four small functions for exact class, method, and
+path mappings. Their declarations are in
 `sbinject_legacy_tweak_compat.h`. The optional mapping file is
 `/var/jb/etc/sbinject/legacy-tweak-compat.plist`. It must be a regular,
 root-owned file. It must not be writable by a group or other users. Its maximum
@@ -31,6 +34,10 @@ size is 64 KiB. This is the supported format:
 {
     ClassAliases = {
         LegacyClassName = CurrentClassName;
+    };
+    PathPrefixes = {
+        "/usr/local/share/LegacyTweak/" =
+            "/var/jb/usr/share/LegacyTweak/";
     };
     SelectorAliases = (
         {
@@ -43,9 +50,18 @@ size is 64 KiB. This is the supported format:
 }
 ```
 
-The library applies only exact mappings with matching argument counts. It does
-not translate changed data types or changed behavior. A load failure does not
-stop ElleKit or the target process.
+The library applies only exact class and method mappings with matching argument
+counts. A configured path must start in a supported legacy tweak directory and
+must end under `/var/jb`. The default path repair first uses an existing Apple
+path. It does not redirect Apple system preference files. It does not translate
+changed data types or changed behavior. A load failure does not stop ElleKit or
+the target process.
+
+After a package transaction, the bootstrap scans installed tweak, framework,
+and preference bundle Mach-O files. Mach-O is the executable file format on
+iOS. If a file needs a library from an old absolute path, and the matching
+`/var/jb` library exists, the bootstrap updates that dependency and signs the
+changed file again. It never follows the scan outside `/var/jb`.
 
 The launchd hook is inert unless the root-owned
 `/var/jb/var/lib/sbinject/enabled` marker exists.  Three replacement launches

@@ -4,24 +4,15 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <os/log.h>
-#include <ctype.h>
-#include <errno.h>
 #include <fcntl.h>
-#include <mach-o/dyld.h>
-#include <pthread.h>
-#include <spawn.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
-#include <xpc/xpc.h>
 
 #import "PLHeap.h"
 #import "PLSwiftMeta.h"
-#include "litehook_rebind.h"
-#include "../sileo_root_broker_protocol.h"
 
 extern int32_t PL27DiscoverMetadata(const void *object,
                                     const void **output,
@@ -65,229 +56,6 @@ static const void *kPL27PaneSpecifiersKey = &kPL27PaneSpecifiersKey;
 static const void *kPL27PaneMarkerKey = &kPL27PaneMarkerKey;
 static PL27SwiftRetainFn gSwiftRetain;
 static PL27SwiftReleaseFn gSwiftRelease;
-
-#define PL27_FAKE_RESPRING_PID_FIRST ((pid_t)0x3e000000)
-#define PL27_COMPLETED_RESPRING_COUNT 32U
-
-static pthread_mutex_t gRespringJobLock = PTHREAD_MUTEX_INITIALIZER;
-static pid_t gCompletedRespringJobs[PL27_COMPLETED_RESPRING_COUNT];
-static size_t gNextCompletedRespringJob;
-static uint32_t gNextRespringJobIdentifier;
-typedef int (*PL27SystemFn)(const char *command);
-static PL27SystemFn gOriginalSystem;
-
-static const char *respring_command_leaf(const char *path) {
-    if (path == NULL || path[0] == '\0') return NULL;
-    const char *separator = strrchr(path, '/');
-    return separator != NULL ? separator + 1 : path;
-}
-
-static BOOL arguments_request_respring(const char *path,
-                                       char *const arguments[]) {
-    const char *leaf = respring_command_leaf(path);
-    if (leaf == NULL && arguments != NULL) {
-        leaf = respring_command_leaf(arguments[0]);
-    }
-    if (leaf == NULL) return NO;
-    if (strcmp(leaf, "sbreload") == 0) return YES;
-    if (strcmp(leaf, "killall") != 0 || arguments == NULL) return NO;
-
-    BOOL sawSpringBoard = NO;
-    size_t index = 1;
-    for (; index < 16U && arguments[index] != NULL; ++index) {
-        const char *argument = arguments[index];
-        if (argument[0] == '-' && argument[1] != '\0') continue;
-        const char *target = respring_command_leaf(argument);
-        BOOL springBoard = target != NULL &&
-            (strcmp(target, "SpringBoard") == 0 ||
-             strcmp(target, "notSpringBoard") == 0);
-        if (!springBoard || sawSpringBoard) return NO;
-        sawSpringBoard = YES;
-    }
-    return index < 16U && sawSpringBoard;
-}
-
-static BOOL request_preferences_respring(void) {
-    typedef xpc_connection_t (*PL27CreateMachServiceFn)(
-        const char *, dispatch_queue_t, uint64_t);
-    PL27CreateMachServiceFn createMachService =
-        (PL27CreateMachServiceFn)dlsym(
-            RTLD_DEFAULT, "xpc_connection_create_mach_service");
-    xpc_connection_t connection = createMachService != NULL
-        ? createMachService(CODEX_ROOT_BROKER_MACH_SERVICE, NULL, 0) : NULL;
-    if (connection == NULL) {
-        bridge_log(@"respring broker connection unavailable");
-        errno = ECONNREFUSED;
-        return NO;
-    }
-    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
-        (void)event;
-    });
-    xpc_connection_resume(connection);
-    xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
-    xpc_dictionary_set_string(
-        message, CODEX_ROOT_BROKER_OPERATION_KEY,
-        CODEX_ROOT_BROKER_PREFERENCES_RESPRING_OPERATION);
-    xpc_object_t reply =
-        xpc_connection_send_message_with_reply_sync(connection, message);
-    BOOL accepted = reply != NULL &&
-        xpc_get_type(reply) == XPC_TYPE_DICTIONARY &&
-        xpc_dictionary_get_bool(reply, "accepted") &&
-        xpc_dictionary_get_bool(reply, "valid") &&
-        xpc_dictionary_get_bool(reply, "allowed") &&
-        xpc_dictionary_get_int64(reply, "status") == 0;
-    if (reply != NULL && xpc_get_type(reply) == XPC_TYPE_ERROR) {
-        const char *description =
-            xpc_dictionary_get_string(reply, XPC_ERROR_KEY_DESCRIPTION);
-        bridge_log(@"respring broker transport error: %s",
-                   description != NULL ? description : "unknown");
-    } else if (!accepted) {
-        bridge_log(@"respring broker rejected Settings request");
-    }
-#if !OS_OBJECT_USE_OBJC
-    if (reply != NULL) xpc_release(reply);
-    xpc_release(message);
-    xpc_connection_cancel(connection);
-    xpc_release(connection);
-#else
-    xpc_connection_cancel(connection);
-#endif
-    if (!accepted) errno = EPERM;
-    return accepted;
-}
-
-static pid_t remember_completed_respring(void) {
-    pthread_mutex_lock(&gRespringJobLock);
-    pid_t result = PL27_FAKE_RESPRING_PID_FIRST +
-        (pid_t)(gNextRespringJobIdentifier++ & 0x00ffffffU);
-    gCompletedRespringJobs[gNextCompletedRespringJob] = result;
-    gNextCompletedRespringJob =
-        (gNextCompletedRespringJob + 1U) % PL27_COMPLETED_RESPRING_COUNT;
-    pthread_mutex_unlock(&gRespringJobLock);
-    return result;
-}
-
-static int bridge_posix_spawn(pid_t *restrict pid,
-                              const char *restrict path,
-                              const posix_spawn_file_actions_t *actions,
-                              const posix_spawnattr_t *restrict attributes,
-                              char *const arguments[restrict],
-                              char *const environment[restrict]) {
-    (void)actions;
-    (void)attributes;
-    (void)environment;
-    if (!arguments_request_respring(path, arguments)) {
-        return posix_spawn(pid, path, actions, attributes, arguments,
-                           environment);
-    }
-    if (pid == NULL) return EINVAL;
-    bridge_log(@"routing preference-pane respring command=%s",
-               path != NULL ? path : "none");
-    if (!request_preferences_respring()) return errno != 0 ? errno : EPERM;
-    *pid = remember_completed_respring();
-    return 0;
-}
-
-static int bridge_posix_spawnp(pid_t *restrict pid,
-                               const char *restrict path,
-                               const posix_spawn_file_actions_t *actions,
-                               const posix_spawnattr_t *restrict attributes,
-                               char *const arguments[restrict],
-                               char *const environment[restrict]) {
-    if (!arguments_request_respring(path, arguments)) {
-        return posix_spawnp(pid, path, actions, attributes, arguments,
-                            environment);
-    }
-    return bridge_posix_spawn(pid, path, actions, attributes, arguments,
-                              environment);
-}
-
-static pid_t bridge_waitpid(pid_t pid, int *status, int options) {
-    if ((options & ~WNOHANG) != 0) return waitpid(pid, status, options);
-    pthread_mutex_lock(&gRespringJobLock);
-    size_t match = PL27_COMPLETED_RESPRING_COUNT;
-    for (size_t index = 0; index < PL27_COMPLETED_RESPRING_COUNT; ++index) {
-        if (gCompletedRespringJobs[index] != 0 &&
-            (pid == -1 || gCompletedRespringJobs[index] == pid)) {
-            match = index;
-            break;
-        }
-    }
-    if (match == PL27_COMPLETED_RESPRING_COUNT) {
-        pthread_mutex_unlock(&gRespringJobLock);
-        return waitpid(pid, status, options);
-    }
-    pid_t completed = gCompletedRespringJobs[match];
-    gCompletedRespringJobs[match] = 0;
-    pthread_mutex_unlock(&gRespringJobLock);
-    if (status != NULL) *status = 0;
-    return completed;
-}
-
-static BOOL shell_command_requests_respring(const char *command) {
-    if (command == NULL) return NO;
-    size_t length = strnlen(command, 512U);
-    if (length == 0 || length == 512U) return NO;
-    char copy[512];
-    memcpy(copy, command, length + 1U);
-    char *arguments[16] = {0};
-    size_t count = 0;
-    char *cursor = copy;
-    while (*cursor != '\0' && count + 1U < 16U) {
-        while (isspace((unsigned char)*cursor)) ++cursor;
-        if (*cursor == '\0') break;
-        arguments[count++] = cursor;
-        while (*cursor != '\0' && !isspace((unsigned char)*cursor)) {
-            if (strchr(";&|<>`$\\\"'", *cursor) != NULL) return NO;
-            ++cursor;
-        }
-        if (*cursor != '\0') *cursor++ = '\0';
-    }
-    return count != 0 && arguments_request_respring(arguments[0], arguments);
-}
-
-static int bridge_system(const char *command) {
-    if (!shell_command_requests_respring(command)) {
-        if (gOriginalSystem == NULL) {
-            errno = ENOSYS;
-            return -1;
-        }
-        return gOriginalSystem(command);
-    }
-    bridge_log(@"routing preference-pane shell respring");
-    if (!request_preferences_respring()) return -1;
-    return 0;
-}
-
-static BOOL preference_code_image(const char *path) {
-    BOOL rootless = path != NULL &&
-        (strncmp(path, "/var/jb/", strlen("/var/jb/")) == 0 ||
-         strstr(path, "/procursus/") != NULL);
-    return rootless &&
-        (strstr(path, "/Library/PreferenceBundles/") != NULL ||
-         strstr(path, "/Library/Frameworks/") != NULL);
-}
-
-static void rebind_preference_process_functions(
-    const struct mach_header *header, intptr_t slide) {
-    (void)slide;
-    Dl_info image = {0};
-    if (header == NULL || dladdr(header, &image) == 0 ||
-        !preference_code_image(image.dli_fname)) return;
-    const struct mach_header_64 *header64 =
-        (const struct mach_header_64 *)header;
-    (void)litehook_rebind_symbol(header64, (void *)(uintptr_t)posix_spawn,
-                                 (void *)(uintptr_t)bridge_posix_spawn);
-    (void)litehook_rebind_symbol(header64, (void *)(uintptr_t)posix_spawnp,
-                                 (void *)(uintptr_t)bridge_posix_spawnp);
-    (void)litehook_rebind_symbol(header64, (void *)(uintptr_t)waitpid,
-                                 (void *)(uintptr_t)bridge_waitpid);
-    if (gOriginalSystem != NULL) {
-        (void)litehook_rebind_symbol(
-            header64, (void *)(uintptr_t)gOriginalSystem,
-            (void *)(uintptr_t)bridge_system);
-    }
-}
 
 static BOOL swift_memory_functions_ready(void) {
     static dispatch_once_t once;
@@ -1015,8 +783,6 @@ __attribute__((constructor)) static void initialize_bridge(void) {
     if (objc_getClass("_TtC11SettingsApp24SettingsSidebarListState") == Nil) {
         return;
     }
-    gOriginalSystem = (PL27SystemFn)dlsym(RTLD_DEFAULT, "system");
-    _dyld_register_func_for_add_image(rebind_preference_process_functions);
     install_navigation_hooks();
     CFRunLoopObserverRef observer = CFRunLoopObserverCreate(
         kCFAllocatorDefault,

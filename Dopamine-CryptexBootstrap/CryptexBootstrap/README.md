@@ -80,10 +80,22 @@ library, or dylib, is code that several processes can load. The launch path
 loads this library before ElleKit in SpringBoard, Settings, and managed apps
 that enable tweak injection. On iOS 27 it attaches old overlay windows to the
 active window scene. In Settings it also restores supported legacy row heights
-and subtitle text for third-party PreferenceLoader bundles. One root-owned
-property list can add exact class and method name mappings without a new tweak
-patch. The library ignores unsafe mapping files and does not guess mappings.
-Create `/var/mobile/.sbinject-legacy-compat-disabled` to disable the library.
+and subtitle text for third-party PreferenceLoader bundles. It retries missing
+legacy tweak paths under `/var/jb`. It also retries old tool launches from the
+rootless tool directories. An exact Settings respring request uses the fixed
+root broker operation. The library does not give a tweak general root broker
+access.
+
+The package preparation step also repairs an old absolute dylib dependency
+when the old file is absent and its `/var/jb` file exists. A dylib dependency
+is the path to another library that code needs before it can start. The repair
+stays inside installed tweak, framework, and preference bundle directories.
+
+One root-owned property list can add exact class, method, and path mappings
+without a new tweak patch. The library ignores unsafe mapping files and does
+not guess class or method mappings. It does not redirect an existing Apple
+file or an Apple system preference file. Create
+`/var/mobile/.sbinject-legacy-compat-disabled` to disable the library.
 
 Safe mode does not rename or disable installed tweaks. Crash attribution strips
 PAC bits and identifies a loaded tweak when a matching image is available.

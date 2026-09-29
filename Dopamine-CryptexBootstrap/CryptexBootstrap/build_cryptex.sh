@@ -740,7 +740,9 @@ for architecture in arm64 arm64e; do
         -isysroot "$SDKROOT" \
         -dynamiclib -fblocks -fobjc-arc \
         -Os -Wall -Wextra -Werror \
+        -I "$SBINJECT_SOURCE_DIR" \
         "$SBINJECT_SOURCE_DIR/sbinject_legacy_tweak_compat.m" \
+        "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
         -framework Foundation \
         -framework CoreGraphics \
         -framework UIKit \
@@ -836,15 +838,6 @@ xcrun --sdk iphoneos clang \
     -I "$PREFERENCES_BRIDGE_SUPPORT_DIR" \
     -c "$SBINJECT_SOURCE_DIR/sbinject_preferences_bridge.m" \
     -o "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/bridge.o"
-xcrun --sdk iphoneos clang \
-    -arch arm64e \
-    -miphoneos-version-min=17.0 \
-    -isysroot "$SDKROOT" \
-    -fobjc-arc -fblocks \
-    -Wall -Wextra -Werror \
-    -I "$SBINJECT_SOURCE_DIR" \
-    -c "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
-    -o "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/litehook_rebind.o"
 for source in PLHeap PLSwiftMeta; do
     xcrun --sdk iphoneos clang \
         -arch arm64e \
@@ -865,7 +858,6 @@ xcrun --sdk iphoneos swiftc \
     "$SBINJECT_SOURCE_DIR/sbinject_preferences_bridge.swift" \
     "$PREFERENCES_BRIDGE_SUPPORT_DIR/PLSwiftString.swift" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/bridge.o" \
-    "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/litehook_rebind.o" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/PLHeap.o" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/PLSwiftMeta.o" \
     -Xlinker -framework -Xlinker UIKit \

@@ -20,6 +20,7 @@
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2903,33 +2904,323 @@ static bool relative_path_is_springboard_tweak(NSString *relativePath) {
                caseInsensitiveCompare:@"dylib"] == NSOrderedSame;
 }
 
+typedef struct codex_macho_slice {
+    size_t offset;
+    size_t size;
+} codex_macho_slice_t;
+
+static uint32_t swapped_u32(uint32_t value, bool swap) {
+    return swap ? __builtin_bswap32(value) : value;
+}
+
+static uint64_t swapped_u64(uint64_t value, bool swap) {
+    return swap ? __builtin_bswap64(value) : value;
+}
+
+static bool collect_macho_slices(NSData *data, codex_macho_slice_t slices[64],
+                                 size_t *sliceCount) {
+    if (data.length < sizeof(uint32_t) || slices == NULL ||
+        sliceCount == NULL) {
+        return false;
+    }
+    const uint8_t *bytes = data.bytes;
+    uint32_t magic = 0;
+    memcpy(&magic, bytes, sizeof(magic));
+    if (magic == MH_MAGIC_64) {
+        slices[0] = (codex_macho_slice_t){.offset = 0, .size = data.length};
+        *sliceCount = 1;
+        return true;
+    }
+    bool is64 = magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64;
+    bool is32 = magic == FAT_MAGIC || magic == FAT_CIGAM;
+    if (!is32 && !is64) return false;
+    bool swap = magic == FAT_CIGAM || magic == FAT_CIGAM_64;
+    if (data.length < sizeof(struct fat_header)) return false;
+    struct fat_header header = {0};
+    memcpy(&header, bytes, sizeof(header));
+    uint32_t count = swapped_u32(header.nfat_arch, swap);
+    if (count == 0 || count > 64) return false;
+    size_t cursor = sizeof(header);
+    size_t entrySize = is64 ? sizeof(struct fat_arch_64)
+                            : sizeof(struct fat_arch);
+    if (entrySize > data.length || count > (data.length - cursor) / entrySize) {
+        return false;
+    }
+    for (uint32_t index = 0; index < count; ++index) {
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        if (is64) {
+            struct fat_arch_64 entry = {0};
+            memcpy(&entry, bytes + cursor, sizeof(entry));
+            offset = swapped_u64(entry.offset, swap);
+            size = swapped_u64(entry.size, swap);
+        } else {
+            struct fat_arch entry = {0};
+            memcpy(&entry, bytes + cursor, sizeof(entry));
+            offset = swapped_u32(entry.offset, swap);
+            size = swapped_u32(entry.size, swap);
+        }
+        if (offset > data.length || size > data.length - offset ||
+            size < sizeof(struct mach_header_64)) {
+            return false;
+        }
+        slices[index] = (codex_macho_slice_t){
+            .offset = (size_t)offset,
+            .size = (size_t)size,
+        };
+        cursor += entrySize;
+    }
+    *sliceCount = count;
+    return true;
+}
+
+static bool is_legacy_dependency_path(const char *path) {
+    if (path == NULL || path[0] != '/' || strstr(path, "/../") != NULL ||
+        strstr(path, "/./") != NULL ||
+        strncmp(path, "/var/jb/", strlen("/var/jb/")) == 0 ||
+        strncmp(path, "/System/", strlen("/System/")) == 0) {
+        return false;
+    }
+    static const char *const prefixes[] = {
+        "/Library/", "/usr/local/", "/usr/lib/", "/usr/libexec/",
+        "/usr/bin/", "/usr/sbin/", "/usr/share/", "/bin/", "/sbin/",
+        "/etc/", "/opt/", "/Applications/", "/var/lib/", "/var/log/",
+        "/var/cache/",
+    };
+    for (size_t index = 0;
+         index < sizeof(prefixes) / sizeof(prefixes[0]); ++index) {
+        if (strncmp(path, prefixes[index], strlen(prefixes[index])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool translated_dependency_path(const char *path,
+                                       char output[PATH_MAX]) {
+    if (!is_legacy_dependency_path(path) || access(path, R_OK) == 0) {
+        return false;
+    }
+    int length = snprintf(output, PATH_MAX, "/var/jb%s", path);
+    return length > 0 && length < PATH_MAX && access(output, R_OK) == 0;
+}
+
+static bool is_dylib_load_command(uint32_t command) {
+    return command == LC_LOAD_DYLIB || command == LC_LOAD_WEAK_DYLIB ||
+           command == LC_REEXPORT_DYLIB || command == LC_LAZY_LOAD_DYLIB ||
+           command == LC_LOAD_UPWARD_DYLIB;
+}
+
+// Return 1 when a slice changed, 0 when it needed no change, and -1 when its
+// load-command layout was invalid or did not have enough fixed header space.
+static int rewrite_legacy_dependencies_in_slice(
+    NSMutableData *data, codex_macho_slice_t slice) {
+    if (slice.offset > data.length ||
+        slice.size > data.length - slice.offset ||
+        slice.size < sizeof(struct mach_header_64)) {
+        return -1;
+    }
+    uint8_t *bytes = data.mutableBytes;
+    struct mach_header_64 header = {0};
+    memcpy(&header, bytes + slice.offset, sizeof(header));
+    if (header.magic != MH_MAGIC_64 || header.ncmds == 0 ||
+        header.ncmds > 4096) {
+        return -1;
+    }
+    size_t commandsStart = slice.offset + sizeof(header);
+    if (header.sizeofcmds > slice.size - sizeof(header)) return -1;
+    size_t commandsEnd = commandsStart + header.sizeofcmds;
+    size_t sliceEnd = slice.offset + slice.size;
+    size_t firstFileData = sliceEnd;
+    size_t cursor = commandsStart;
+    for (uint32_t index = 0; index < header.ncmds; ++index) {
+        if (cursor > commandsEnd || commandsEnd - cursor <
+                                      sizeof(struct load_command)) {
+            return -1;
+        }
+        struct load_command command = {0};
+        memcpy(&command, bytes + cursor, sizeof(command));
+        if (command.cmdsize < sizeof(command) ||
+            command.cmdsize > commandsEnd - cursor) {
+            return -1;
+        }
+        if (command.cmd == LC_SEGMENT_64) {
+            if (command.cmdsize < sizeof(struct segment_command_64)) {
+                return -1;
+            }
+            struct segment_command_64 segment = {0};
+            memcpy(&segment, bytes + cursor, sizeof(segment));
+            if (segment.fileoff > 0 && segment.filesize > 0 &&
+                segment.fileoff < firstFileData - slice.offset) {
+                firstFileData = slice.offset + (size_t)segment.fileoff;
+            }
+            size_t sectionBytes =
+                (size_t)segment.nsects * sizeof(struct section_64);
+            if (sectionBytes > command.cmdsize - sizeof(segment)) return -1;
+            size_t sectionCursor = cursor + sizeof(segment);
+            for (uint32_t sectionIndex = 0;
+                 sectionIndex < segment.nsects; ++sectionIndex) {
+                struct section_64 section = {0};
+                memcpy(&section, bytes + sectionCursor, sizeof(section));
+                if (section.offset > 0 &&
+                    section.offset < firstFileData - slice.offset) {
+                    firstFileData = slice.offset + section.offset;
+                }
+                sectionCursor += sizeof(section);
+            }
+        }
+        cursor += command.cmdsize;
+    }
+    if (cursor != commandsEnd || firstFileData < commandsEnd) return -1;
+
+    NSMutableData *commands = [NSMutableData data];
+    cursor = commandsStart;
+    bool changed = false;
+    for (uint32_t index = 0; index < header.ncmds; ++index) {
+        struct load_command command = {0};
+        memcpy(&command, bytes + cursor, sizeof(command));
+        if (!is_dylib_load_command(command.cmd)) {
+            [commands appendBytes:bytes + cursor length:command.cmdsize];
+            cursor += command.cmdsize;
+            continue;
+        }
+        if (command.cmdsize < sizeof(struct dylib_command)) return -1;
+        struct dylib_command dylib = {0};
+        memcpy(&dylib, bytes + cursor, sizeof(dylib));
+        uint32_t nameOffset = dylib.dylib.name.offset;
+        if (nameOffset < sizeof(dylib) || nameOffset >= command.cmdsize) {
+            return -1;
+        }
+        const char *name = (const char *)(bytes + cursor + nameOffset);
+        size_t capacity = command.cmdsize - nameOffset;
+        size_t nameLength = strnlen(name, capacity);
+        if (nameLength >= capacity) return -1;
+        char replacement[PATH_MAX] = {0};
+        if (!translated_dependency_path(name, replacement)) {
+            [commands appendBytes:bytes + cursor length:command.cmdsize];
+            cursor += command.cmdsize;
+            continue;
+        }
+        size_t replacementLength = strlen(replacement) + 1U;
+        size_t commandSize =
+            (sizeof(dylib) + replacementLength + 7U) & ~(size_t)7U;
+        if (commandSize > UINT32_MAX) return -1;
+        dylib.cmdsize = (uint32_t)commandSize;
+        dylib.dylib.name.offset = sizeof(dylib);
+        NSMutableData *rewritten = [NSMutableData dataWithLength:commandSize];
+        memcpy(rewritten.mutableBytes, &dylib, sizeof(dylib));
+        memcpy((uint8_t *)rewritten.mutableBytes + sizeof(dylib), replacement,
+               replacementLength);
+        [commands appendData:rewritten];
+        cursor += command.cmdsize;
+        changed = true;
+    }
+    if (!changed) return 0;
+    if (commands.length > firstFileData - commandsStart ||
+        commands.length > UINT32_MAX) {
+        return -1;
+    }
+    size_t clearLength = MAX((size_t)header.sizeofcmds, commands.length);
+    memset(bytes + commandsStart, 0, clearLength);
+    memcpy(bytes + commandsStart, commands.bytes, commands.length);
+    header.sizeofcmds = (uint32_t)commands.length;
+    memcpy(bytes + slice.offset, &header, sizeof(header));
+    return 1;
+}
+
+static int rewrite_installed_legacy_dependencies(NSString *path) {
+    struct stat status = {0};
+    if (lstat(path.fileSystemRepresentation, &status) != 0 ||
+        !S_ISREG(status.st_mode) || status.st_size <= 0 ||
+        status.st_size > 256 * 1024 * 1024) {
+        return -1;
+    }
+    NSError *readError = nil;
+    NSMutableData *data = [NSMutableData dataWithContentsOfFile:path
+                                                        options:0
+                                                          error:&readError];
+    if (data == nil || readError != nil) return -1;
+    codex_macho_slice_t slices[64] = {0};
+    size_t sliceCount = 0;
+    if (!collect_macho_slices(data, slices, &sliceCount)) return -1;
+    bool changed = false;
+    for (size_t index = 0; index < sliceCount; ++index) {
+        int result = rewrite_legacy_dependencies_in_slice(data, slices[index]);
+        if (result < 0) return -1;
+        changed |= result > 0;
+    }
+    if (!changed) return 0;
+    char temporary[PATH_MAX] = {0};
+    int temporaryLength = snprintf(
+        temporary, sizeof(temporary), "%s.codex-compat.XXXXXX",
+        path.fileSystemRepresentation);
+    if (temporaryLength <= 0 ||
+        (size_t)temporaryLength >= sizeof(temporary)) {
+        return -1;
+    }
+    int descriptor = mkstemp(temporary);
+    if (descriptor < 0) return -1;
+    bool prepared = write_all(descriptor, data.bytes, data.length) &&
+        fsync(descriptor) == 0 &&
+        fchown(descriptor, status.st_uid, status.st_gid) == 0 &&
+        fchmod(descriptor, (status.st_mode & 07777) | 0111) == 0;
+    int closeResult = close(descriptor);
+    if (!prepared || closeResult != 0) {
+        unlink(temporary);
+        return -1;
+    }
+    char *signArguments[] = {
+        "/var/jb/usr/bin/ldid", "-S", "-Cadhoc", temporary, NULL,
+    };
+    int signStatus = run_and_wait_bounded(
+        signArguments[0], signArguments, 30000);
+    if (signStatus != 0 || rename(temporary, path.fileSystemRepresentation) != 0) {
+        unlink(temporary);
+        return -1;
+    }
+    return 1;
+}
+
 static NSUInteger prepare_installed_tweak_payloads(void) {
     NSArray<NSString *> *directories = @[
         @"/var/jb/Library/MobileSubstrate/DynamicLibraries",
         @"/var/jb/Library/TweakInject",
         @"/var/jb/usr/lib/TweakInject",
+        @"/var/jb/Library/PreferenceBundles",
+        @"/var/jb/Library/Frameworks",
     ];
     NSMutableSet<NSString *> *visited = [NSMutableSet set];
     NSUInteger changed = 0;
     for (NSString *directory in directories) {
-        NSArray<NSString *> *entries = [[NSFileManager defaultManager]
-            contentsOfDirectoryAtPath:directory error:nil];
+        NSDirectoryEnumerator<NSString *> *entries =
+            [[NSFileManager defaultManager] enumeratorAtPath:directory];
         for (NSString *entry in entries) {
-            if ([[entry pathExtension]
-                    caseInsensitiveCompare:@"dylib"] != NSOrderedSame) {
-                continue;
-            }
             NSString *path = [directory stringByAppendingPathComponent:entry];
             NSString *canonical = [path stringByResolvingSymlinksInPath];
-            if ([visited containsObject:canonical]) continue;
-            [visited addObject:canonical];
+            if (![canonical hasPrefix:@"/var/jb/"] ||
+                [visited containsObject:canonical]) {
+                continue;
+            }
             struct stat status;
             if (stat(canonical.fileSystemRepresentation, &status) != 0 ||
                 !S_ISREG(status.st_mode) ||
-                !broker_command_is_macho(canonical.fileSystemRepresentation) ||
-                (status.st_mode & 0111) != 0) {
+                !broker_command_is_macho(canonical.fileSystemRepresentation)) {
                 continue;
             }
+            [visited addObject:canonical];
+            int dependencyResult =
+                rewrite_installed_legacy_dependencies(canonical);
+            if (dependencyResult < 0) {
+                log_message("sbinjectDependencyRewrite=false path=%s",
+                            canonical.fileSystemRepresentation);
+            }
+            if (dependencyResult > 0) {
+                ++changed;
+                log_message("sbinjectDependencyRewrite=true path=%s",
+                            canonical.fileSystemRepresentation);
+                continue;
+            }
+            if ((status.st_mode & 0111) != 0) continue;
             char *signArguments[] = {
                 "/var/jb/usr/bin/ldid", "-S", "-Cadhoc",
                 (char *)canonical.fileSystemRepresentation, NULL,
@@ -2942,9 +3233,9 @@ static NSUInteger prepare_installed_tweak_payloads(void) {
                 ++changed;
             } else {
                 log_message("sbinjectTweakPreparation=false path=%s "
-                            "signStatus=%d error=%d",
-                            canonical.fileSystemRepresentation, signStatus,
-                            errno);
+                            "dependencyRewrite=%d signStatus=%d error=%d",
+                            canonical.fileSystemRepresentation,
+                            dependencyResult, signStatus, errno);
             }
         }
     }
