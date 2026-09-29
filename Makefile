@@ -21,6 +21,7 @@ validate:
 	plutil -lint $(OVERLAY)/*.plist $(OVERLAY)/SBInject/*.plist >/dev/null
 
 test: validate
+	python3 -m unittest discover -s Tests -p 'test_*.py'
 	swift test --package-path MacApp
 
 build: validate

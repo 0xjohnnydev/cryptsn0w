@@ -6929,134 +6929,6 @@ static bool exact_file_pairs(NSString *scope,
     return allExact;
 }
 
-static bool install_dopamine_default_sources(NSString *source,
-                                             bool *didUpdate,
-                                             NSString **errorText) {
-    if (didUpdate != NULL) {
-        *didUpdate = false;
-    }
-    NSError *readError = nil;
-    NSData *expected = [NSData dataWithContentsOfFile:source
-                                              options:NSDataReadingMappedIfSafe
-                                                error:&readError];
-    if (expected == nil || expected.length == 0 || expected.length > 64 * 1024) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"default APT source payload is invalid: %@",
-                                 readError];
-        }
-        return false;
-    }
-
-    NSString *directory = @"/var/jb/etc/apt/sources.list.d";
-    NSError *directoryError = nil;
-    NSDictionary *directoryAttributes = @{
-        NSFilePosixPermissions : @0755,
-        NSFileOwnerAccountID : @0,
-        NSFileGroupOwnerAccountID : @0,
-    };
-    if (![[NSFileManager defaultManager]
-            createDirectoryAtPath:directory
-      withIntermediateDirectories:YES
-                       attributes:directoryAttributes
-                            error:&directoryError] ||
-        ![[NSFileManager defaultManager] setAttributes:directoryAttributes
-                                         ofItemAtPath:directory
-                                                error:&directoryError]) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"default APT source directory failed: %@",
-                                 directoryError];
-        }
-        return false;
-    }
-
-    NSString *destination =
-        [directory stringByAppendingPathComponent:@"dopamine-default.sources"];
-    struct stat destinationStatus;
-    if (lstat([destination fileSystemRepresentation], &destinationStatus) ==
-        0) {
-        if (!S_ISREG(destinationStatus.st_mode)) {
-            if (errorText != NULL) {
-                *errorText = @"managed default APT source is not a regular file";
-            }
-            return false;
-        }
-        NSError *currentError = nil;
-        NSData *current = [NSData dataWithContentsOfFile:destination
-                                                 options:0
-                                                   error:&currentError];
-        if (current == nil) {
-            if (errorText != NULL) {
-                *errorText = [NSString
-                    stringWithFormat:@"default APT source read failed: %@",
-                                     currentError];
-            }
-            return false;
-        }
-        if ([current isEqualToData:expected]) {
-            log_message("dopamineDefaultSources=current path=%s",
-                        [destination UTF8String]);
-            return true;
-        }
-    } else if (errno != ENOENT) {
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"default APT source status failed: %s",
-                                 strerror(errno)];
-        }
-        return false;
-    }
-
-    NSString *temporary = [directory
-        stringByAppendingPathComponent:
-            [NSString stringWithFormat:@".dopamine-default-%@",
-                                       [[NSUUID UUID] UUIDString]]];
-    NSError *writeError = nil;
-    if (![expected writeToFile:temporary
-                       options:NSDataWritingWithoutOverwriting
-                         error:&writeError] ||
-        ![[NSFileManager defaultManager]
-            setAttributes:@{
-                NSFilePosixPermissions : @0644,
-                NSFileOwnerAccountID : @0,
-                NSFileGroupOwnerAccountID : @0,
-            }
-             ofItemAtPath:temporary
-                    error:&writeError]) {
-        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"default APT source staging failed: %@",
-                                 writeError];
-        }
-        return false;
-    }
-    if (rename([temporary fileSystemRepresentation],
-               [destination fileSystemRepresentation]) != 0) {
-        int savedError = errno;
-        [[NSFileManager defaultManager] removeItemAtPath:temporary error:nil];
-        if (errorText != NULL) {
-            *errorText = [NSString
-                stringWithFormat:@"default APT source activation failed: %s",
-                                 strerror(savedError)];
-        }
-        return false;
-    }
-    if (!files_are_equal(source, destination)) {
-        if (errorText != NULL) {
-            *errorText = @"default APT source verification failed";
-        }
-        return false;
-    }
-    if (didUpdate != NULL) {
-        *didUpdate = true;
-    }
-    log_message("dopamineDefaultSources=updated path=%s bytes=%lu",
-                [destination UTF8String], (unsigned long)expected.length);
-    return true;
-}
-
 static bool install_managed_apt_file(NSString *source, NSString *directory,
                                      NSString *filename, off_t maximumSize,
                                      mode_t mode, const char *logName,
@@ -7792,6 +7664,49 @@ static bool replace_file_with_backup(NSString *source, NSString *destination,
         }
         return false;
     }
+    return true;
+}
+
+static bool restore_packaged_tool(NSString *source, NSString *destination,
+                                  NSString *cacheDirectory,
+                                  NSString **backupOut, NSString **errorText) {
+    NSString *name = [destination lastPathComponent];
+    NSString *logName = [name capitalizedString];
+    *backupOut = nil;
+    bool matches = files_are_equal(source, destination);
+    log_message("rootless%sMatches=%s", [logName UTF8String],
+                matches ? "true" : "false");
+    if (!matches) {
+        NSError *cacheError = nil;
+        if (![[NSFileManager defaultManager]
+                createDirectoryAtPath:cacheDirectory
+          withIntermediateDirectories:YES
+                           attributes:@{
+                               NSFilePosixPermissions : @0700,
+                               NSFileOwnerAccountID : @0,
+                               NSFileGroupOwnerAccountID : @0,
+                           }
+                                error:&cacheError]) {
+            *errorText = [NSString stringWithFormat:
+                @"%@ backup directory failed: %@", name, cacheError];
+            return false;
+        }
+        *backupOut = [cacheDirectory stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@-backup-%@", name,
+                                       [[NSUUID UUID] UUIDString]]];
+        if (!replace_file_with_backup(source, destination, *backupOut,
+                                      errorText)) {
+            return false;
+        }
+    }
+    if (!files_are_equal(source, destination)) {
+        *errorText = [NSString stringWithFormat:
+            @"rootless %@ refresh did not match the Cryptex trust-cache input",
+            name];
+        return false;
+    }
+    log_message("rootless%sTrusted=true backup=%s", [logName UTF8String],
+                *backupOut != nil ? [*backupOut UTF8String] : "not-needed");
     return true;
 }
 
@@ -9282,144 +9197,37 @@ int main(int argc, char *argv[]) {
                         [destinationProcursus UTF8String]);
         }
 
-        NSString *rootlessLaunchctl = @"/var/jb/usr/bin/launchctl";
+        NSString *toolBackupDirectory = [destinationProcursus
+            stringByAppendingPathComponent:@".codex-cache"];
+        NSString *toolRestoreError = nil;
         NSString *rootlessLaunchctlBackup = nil;
-        BOOL launchctlMatches =
-            files_are_equal(sourceTrustedLaunchctl, rootlessLaunchctl);
-        log_message("rootlessLaunchctlMatches=%s",
-                    launchctlMatches ? "true" : "false");
-        if (!launchctlMatches) {
-            NSString *cacheDirectory = [destinationProcursus
-                stringByAppendingPathComponent:@".codex-cache"];
-            NSError *cacheError = nil;
-            if (![[NSFileManager defaultManager]
-                    createDirectoryAtPath:cacheDirectory
-              withIntermediateDirectories:YES
-                               attributes:@{
-                                   NSFilePosixPermissions : @0700,
-                                   NSFileOwnerAccountID : @0,
-                                   NSFileGroupOwnerAccountID : @0,
-                               }
-                                    error:&cacheError]) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"launchctl backup directory failed: %@",
-                                  cacheError],
-                    nil);
-            }
-            rootlessLaunchctlBackup = [cacheDirectory
-                stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"launchctl-backup-%@",
-                                               [[NSUUID UUID] UUIDString]]];
-            NSString *replacementError = nil;
-            if (!replace_file_with_backup(sourceTrustedLaunchctl,
-                                          rootlessLaunchctl,
-                                          rootlessLaunchctlBackup,
-                                          &replacementError)) {
-                return fail(replacementError, nil);
-            }
+        if (!restore_packaged_tool(sourceTrustedLaunchctl,
+                                   @"/var/jb/usr/bin/launchctl",
+                                   toolBackupDirectory,
+                                   &rootlessLaunchctlBackup,
+                                   &toolRestoreError)) {
+            return fail(toolRestoreError, nil);
         }
-        if (!files_are_equal(sourceTrustedLaunchctl, rootlessLaunchctl)) {
-            return fail(@"rootless launchctl refresh did not match the "
-                         "Cryptex trust-cache input",
-                        nil);
-        }
-        log_message("rootlessLaunchctlTrusted=true backup=%s",
-                    rootlessLaunchctlBackup != nil
-                        ? [rootlessLaunchctlBackup UTF8String]
-                        : "not-needed");
 
         [[NSFileManager defaultManager]
             removeItemAtPath:@"/private/var/tmp/codex-stage-ssh" error:nil];
 
-        NSString *rootlessUiopen = @"/var/jb/usr/bin/uiopen";
         NSString *rootlessUiopenBackup = nil;
-        BOOL uiopenMatches = files_are_equal(sourceTrustedUiopen, rootlessUiopen);
-        log_message("rootlessUiopenMatches=%s",
-                    uiopenMatches ? "true" : "false");
-        if (!uiopenMatches) {
-            NSString *cacheDirectory = [destinationProcursus
-                stringByAppendingPathComponent:@".codex-cache"];
-            NSError *cacheError = nil;
-            if (![[NSFileManager defaultManager]
-                    createDirectoryAtPath:cacheDirectory
-              withIntermediateDirectories:YES
-                               attributes:@{
-                                   NSFilePosixPermissions : @0700,
-                                   NSFileOwnerAccountID : @0,
-                                   NSFileGroupOwnerAccountID : @0,
-                               }
-                                    error:&cacheError]) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"uiopen backup directory failed: %@",
-                                  cacheError],
-                    nil);
-            }
-            rootlessUiopenBackup = [cacheDirectory
-                stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"uiopen-backup-%@",
-                                               [[NSUUID UUID] UUIDString]]];
-            NSString *replacementError = nil;
-            if (!replace_file_with_backup(sourceTrustedUiopen, rootlessUiopen,
-                                          rootlessUiopenBackup,
-                                          &replacementError)) {
-                return fail(replacementError, nil);
-            }
+        if (!restore_packaged_tool(sourceTrustedUiopen,
+                                   @"/var/jb/usr/bin/uiopen",
+                                   toolBackupDirectory,
+                                   &rootlessUiopenBackup,
+                                   &toolRestoreError)) {
+            return fail(toolRestoreError, nil);
         }
-        if (!files_are_equal(sourceTrustedUiopen, rootlessUiopen)) {
-            return fail(@"rootless uiopen refresh did not match the Cryptex "
-                         "trust-cache input",
-                        nil);
-        }
-        log_message("rootlessUiopenTrusted=true backup=%s",
-                    rootlessUiopenBackup != nil
-                        ? [rootlessUiopenBackup UTF8String]
-                        : "not-needed");
 
         NSString *rootlessUicacheBackup = nil;
-        BOOL uicacheMatches =
-            files_are_equal(sourceTrustedUicache, kRootlessUicache);
-        log_message("rootlessUicacheMatches=%s",
-                    uicacheMatches ? "true" : "false");
-        if (!uicacheMatches) {
-            NSString *cacheDirectory = [destinationProcursus
-                stringByAppendingPathComponent:@".codex-cache"];
-            NSError *cacheError = nil;
-            if (![[NSFileManager defaultManager]
-                    createDirectoryAtPath:cacheDirectory
-              withIntermediateDirectories:YES
-                               attributes:@{
-                                   NSFilePosixPermissions : @0700,
-                                   NSFileOwnerAccountID : @0,
-                                   NSFileGroupOwnerAccountID : @0,
-                               }
-                                    error:&cacheError]) {
-                return fail(
-                    [NSString stringWithFormat:
-                                  @"uicache backup directory failed: %@",
-                                  cacheError], nil);
-            }
-            rootlessUicacheBackup = [cacheDirectory
-                stringByAppendingPathComponent:
-                    [NSString stringWithFormat:@"uicache-backup-%@",
-                                               [[NSUUID UUID] UUIDString]]];
-            NSString *replacementError = nil;
-            if (!replace_file_with_backup(sourceTrustedUicache,
-                                          kRootlessUicache,
-                                          rootlessUicacheBackup,
-                                          &replacementError)) {
-                return fail(replacementError, nil);
-            }
+        if (!restore_packaged_tool(sourceTrustedUicache, kRootlessUicache,
+                                   toolBackupDirectory,
+                                   &rootlessUicacheBackup,
+                                   &toolRestoreError)) {
+            return fail(toolRestoreError, nil);
         }
-        if (!files_are_equal(sourceTrustedUicache, kRootlessUicache)) {
-            return fail(@"rootless uicache refresh did not match the Cryptex "
-                         "trust-cache input", nil);
-        }
-        log_message("rootlessUicacheTrusted=true backup=%s",
-                    rootlessUicacheBackup != nil
-                        ? [rootlessUicacheBackup UTF8String]
-                        : "not-needed");
 
         NSArray<NSString *> *trustedPackageTools = @[
             @"usr/bin/dpkg", @"usr/bin/dpkg-deb", @"usr/bin/dpkg-divert",
@@ -10274,9 +10082,11 @@ int main(int argc, char *argv[]) {
 
         bool defaultSourcesUpdated = false;
         NSString *defaultSourcesError = nil;
-        if (!install_dopamine_default_sources(sourceDefaultSources,
-                                              &defaultSourcesUpdated,
-                                              &defaultSourcesError)) {
+        if (!install_managed_apt_file(
+                sourceDefaultSources, @"/var/jb/etc/apt/sources.list.d",
+                @"dopamine-default.sources", 64 * 1024, 0644,
+                "dopamineDefaultSources", &defaultSourcesUpdated,
+                &defaultSourcesError)) {
             return fail(defaultSourcesError, nil);
         }
 

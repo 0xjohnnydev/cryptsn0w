@@ -36,7 +36,9 @@ If it is moved, choose **Device > Choose Repository…**.
 ## Tests
 
 Run `make test` from the repository root. This checks the script syntax and
-runs the desktop app tests. The tests use temporary commands to check device
+runs the desktop app tests and bootstrap file-handling tests. The latter use
+temporary files and simulate root ownership; they do not require root access.
+The desktop tests use temporary commands to check device
 selection, large command output, errors, and complete log files. They do not
 run the jailbreak installer.
 
