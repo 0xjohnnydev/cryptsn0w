@@ -4,8 +4,8 @@
 installation details are intentionally omitted. The files retain placeholders
 for educational reference.
 
-CryptSn0w is the compact native SwiftUI front end for the repository's
-one-shot installer. Its layout is patterned after the classic Pangu utility:
+CryptSn0w is the native SwiftUI front end for the repository's installer.
+Its layout is patterned after the classic Pangu utility:
 a connected-device selector, a single Jailbreak action, concise status, and
 the supplied running-pineapple artwork.
 
@@ -27,11 +27,22 @@ open dist/CryptSn0w.app
 ```
 
 The build requires Swift 6.2 or newer, generates the macOS icon from
-`Resources/PineappleLogo.png`, signs the local app ad hoc, and places ignored
+`Resources/PineappleBrushLogo.png`, signs the local app ad hoc, and places ignored
 output under `dist/` and `MacApp/.build/`.
 
 Keep the built app in `dist/` so it can locate the repository automatically.
 If it is moved, choose **Device > Choose Repository…**.
+
+## Tests
+
+Run `make test` from the repository root. This checks the script syntax and
+runs the desktop app tests. The tests use temporary commands to check device
+selection, large command output, errors, and complete log files. They do not
+run the jailbreak installer.
+
+To also run five read-only device-discovery checks, set
+`CRYPTSN0W_TEST_REPOSITORY` to the repository's absolute path and
+`CRYPTSN0W_TEST_DEVICE` to a connected device's UDID before running `make test`.
 
 ## Devices and installation
 

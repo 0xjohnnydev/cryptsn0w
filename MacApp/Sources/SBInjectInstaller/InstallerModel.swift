@@ -11,7 +11,7 @@ final class InstallerModel {
     private(set) var repositoryURL: URL?
     private(set) var state = InstallState.idle
     private(set) var currentStep = InstallStep.connect
-    private(set) var logLines: [String] = []
+    private(set) var lastLogLine: String?
     private(set) var logFileURL: URL?
     private(set) var isDiscoveringDevices = false
     private(set) var sshShellIsAvailable = false
@@ -19,13 +19,11 @@ final class InstallerModel {
     private(set) var errorTitle = "CryptSn0w"
     private(set) var errorMessage = ""
 
-    @ObservationIgnored private var activeProcess: Process?
-    @ObservationIgnored private var installTask: Task<Void, Never>?
     @ObservationIgnored private let deviceDiscovery = DeviceDiscoveryService()
     @ObservationIgnored private let sshSession = SSHShellSessionManager()
 
-    init() {
-        repositoryURL = RepositoryLocator.locate()
+    init(repositoryURL: URL? = RepositoryLocator.locate()) {
+        self.repositoryURL = repositoryURL
     }
 
     var statusTitle: String {
@@ -65,11 +63,11 @@ final class InstallerModel {
                 selectedDevice?.detail ?? "Connect and unlock a paired iPhone."
             }
         case .running:
-            logLines.last ?? "Preparing the installer…"
+            lastLogLine ?? "Preparing the installer…"
         case .complete:
             "Sileo and the SBInject environment are ready."
         case .failed:
-            logLines.last ?? "The installation stopped before completion."
+            lastLogLine ?? "The installation stopped before completion."
         }
     }
 
@@ -95,7 +93,7 @@ final class InstallerModel {
 
     func chooseRepository() {
         let panel = NSOpenPanel()
-        panel.title = "Choose the SBInject repository"
+        panel.title = "Choose the CryptSn0w repository"
         panel.prompt = "Choose"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -179,11 +177,11 @@ final class InstallerModel {
         guard canStart, let repositoryURL, let selectedDevice else { return }
         state = .running
         currentStep = .connect
-        logLines.removeAll(keepingCapacity: true)
+        lastLogLine = nil
         logFileURL = nil
         errorMessage = ""
         let shouldEnableHostSSH = enableHostSSH
-        installTask = Task { [weak self] in
+        Task { [weak self] in
             await self?.runInstaller(
                 repositoryURL: repositoryURL,
                 requestedDevice: selectedDevice.id,
@@ -232,7 +230,7 @@ final class InstallerModel {
             logHandle = logFile.handle
             writeLog(
                 """
-                CryptexSn0w install log
+                CryptSn0w install log
                 Started: \(Date().formatted(.iso8601))
                 Repository: \(repositoryURL.path)
                 Device: \(requestedDevice)
@@ -243,13 +241,11 @@ final class InstallerModel {
             )
 
             try process.run()
-            activeProcess = process
             for try await line in outputPipe.fileHandleForReading.bytes.lines {
                 writeLog("\(line)\n", to: logFile.handle)
                 ingest(line)
             }
             process.waitUntilExit()
-            activeProcess = nil
             writeLog(
                 "\nFinished: \(Date().formatted(.iso8601))\nExit status: \(process.terminationStatus)\n",
                 to: logFile.handle
@@ -263,7 +259,6 @@ final class InstallerModel {
                 throw InstallerFailure.exitStatus(process.terminationStatus)
             }
         } catch {
-            activeProcess = nil
             state = .failed
             if let logHandle {
                 writeLog("\nGUI error: \(error.localizedDescription)\n", to: logHandle)
@@ -309,9 +304,7 @@ final class InstallerModel {
     }
 
     private func writeLog(_ text: String, to handle: FileHandle) {
-        guard let data = text.data(using: .utf8) else { return }
-        try? handle.write(contentsOf: data)
-        try? handle.synchronize()
+        try? handle.write(contentsOf: Data(text.utf8))
     }
 
     private func ingest(_ line: String) {
@@ -333,11 +326,7 @@ final class InstallerModel {
 
     private func appendLog(_ line: String) {
         guard !line.isEmpty else { return }
-        logLines.append(line)
-        let excess = logLines.count - 600
-        if excess > 0 {
-            logLines.removeFirst(excess)
-        }
+        lastLogLine = line
     }
 
     private func presentError(title: String, _ message: String) {

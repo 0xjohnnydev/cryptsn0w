@@ -15,7 +15,7 @@ enum DeviceDiscoveryFailure: LocalizedError {
         case .invalidResponse:
             "The connected-device query returned an unreadable response."
         case .noDevices:
-            "No paired USB device was found. Connect and unlock the iPhone, trust this Mac, then refresh."
+            "No paired device was found. Connect and unlock the iPhone, trust this Mac, then refresh."
         }
     }
 }

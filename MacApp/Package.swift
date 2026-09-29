@@ -13,5 +13,6 @@ let package = Package(
             name: "CryptSn0w",
             path: "Sources/SBInjectInstaller"
         ),
+        .testTarget(name: "CryptSn0wTests", dependencies: ["CryptSn0w"]),
     ]
 )

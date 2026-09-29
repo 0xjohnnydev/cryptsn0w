@@ -1,7 +1,7 @@
 import Foundation
 
 actor DeviceDiscoveryService {
-    func discover(repositoryURL: URL?) throws -> [ConnectedDevice] {
+    func discover(repositoryURL: URL?) async throws -> [ConnectedDevice] {
         let (executable, arguments) = try invocation(repositoryURL: repositoryURL)
         let process = Process()
         let outputPipe = Pipe()
@@ -12,12 +12,14 @@ actor DeviceDiscoveryService {
         process.standardError = errorPipe
 
         try process.run()
-        process.waitUntilExit()
 
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let error = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        // Drain both pipes before waiting. Either stream can fill its pipe.
+        async let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        async let error = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let (outputData, errorData) = await (output, error)
+        process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            let detail = String(decoding: error, as: UTF8.self)
+            let detail = String(decoding: errorData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             throw DeviceDiscoveryFailure.commandFailed(
                 detail.isEmpty ? "Exit status \(process.terminationStatus)." : detail
@@ -26,7 +28,7 @@ actor DeviceDiscoveryService {
 
         guard let records = try? JSONDecoder().decode(
             [USBMuxDeviceRecord].self,
-            from: output
+            from: outputData
         ) else {
             throw DeviceDiscoveryFailure.invalidResponse
         }

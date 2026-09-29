@@ -1,12 +1,10 @@
-enum InstallStep: Int, CaseIterable, Identifiable, Sendable {
+enum InstallStep: Sendable {
     case connect
     case transferStage
     case copySystemApps
     case buildFinal
     case installFinal
     case verify
-
-    var id: Self { self }
 
     var title: String {
         switch self {

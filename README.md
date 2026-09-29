@@ -1,4 +1,4 @@
-# SBInject Cryptex jailbreak
+# CryptSn0w
 
 **Redacted source:** TSS request construction, personalization, and related
 installation details are intentionally omitted. The files retain placeholders
@@ -86,7 +86,7 @@ Dopamine-upstream/CryptexBootstrap/out/runs/
 
 ## Native macOS installer
 
-Build and open the redsn0w-style SwiftUI front end with:
+Build and open the native SwiftUI front end with:
 
 ```sh
 make app

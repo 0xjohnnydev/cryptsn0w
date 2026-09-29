@@ -13,10 +13,7 @@ enum RepositoryLocator {
         for startingPoint in startingPoints {
             var candidate = startingPoint
             for _ in 0..<10 {
-                let installer = candidate.appending(
-                    path: "Dopamine-CryptexBootstrap/setup.sh"
-                )
-                if fileManager.isExecutableFile(atPath: installer.path) {
+                if isRepository(candidate) {
                     return candidate
                 }
                 let parent = candidate.deletingLastPathComponent()

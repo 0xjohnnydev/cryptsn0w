@@ -1,7 +1,5 @@
 struct USBMuxDeviceRecord: Decodable, Sendable {
-    let buildVersion: String?
     let connectionType: String?
-    let deviceClass: String?
     let deviceName: String?
     let identifier: String?
     let productType: String?
@@ -9,9 +7,7 @@ struct USBMuxDeviceRecord: Decodable, Sendable {
     let uniqueDeviceID: String?
 
     enum CodingKeys: String, CodingKey {
-        case buildVersion = "BuildVersion"
         case connectionType = "ConnectionType"
-        case deviceClass = "DeviceClass"
         case deviceName = "DeviceName"
         case identifier = "Identifier"
         case productType = "ProductType"

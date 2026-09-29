@@ -1,16 +1,7 @@
 import SwiftUI
 
 struct BrandFooterView: View {
-    private static let sourceURL: URL = {
-        guard
-            let url = URL(
-                string: "https://github.com/0xjohnnydev/untitled"
-            )
-        else {
-            fatalError("The CryptSn0w source URL is invalid")
-        }
-        return url
-    }()
+    private static let sourceURL = URL(string: "https://github.com/0xjohnnydev/untitled")!
 
     var body: some View {
         HStack(spacing: 12) {
