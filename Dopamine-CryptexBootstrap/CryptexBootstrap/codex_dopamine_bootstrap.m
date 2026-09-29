@@ -138,8 +138,6 @@ static NSString *const kPersistentRootArchive =
 static NSString *const kSileoIdentifier = CODEX_SILEO_BUNDLE_IDENTIFIER;
 static NSString *const kSileoPackageVersion = @"2.5.1+codex1";
 static NSString *const kSystemSileoDataRoot = @"/var/mobile";
-static NSString *const kBundleContainerRoot =
-    @"/var/containers/Bundle/Application";
 static NSString *gSystemSileoBundlePath;
 static NSString *const kTrollStoreLiteIdentifier =
     @"com.opa334.TrollStoreLite";

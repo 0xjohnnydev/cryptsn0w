@@ -12,7 +12,6 @@ enum AppTheme {
 
     static let paper = Color(red: 0.95, green: 0.96, blue: 0.93)
     static let paperHighlight = Color(red: 0.995, green: 1.00, blue: 0.98)
-    static let strongDivider = Color.black.opacity(0.16)
     static let progressTrack = Color.black.opacity(0.12)
 
     static let success = Color(red: 0.08, green: 0.55, blue: 0.31)

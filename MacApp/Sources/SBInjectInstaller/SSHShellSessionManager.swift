@@ -4,7 +4,6 @@ import Foundation
 @MainActor
 final class SSHShellSessionManager {
     private var forwardProcess: Process?
-    private var forwardErrorPipe: Pipe?
 
     func hasCredential(
         repositoryURL: URL,
@@ -44,7 +43,6 @@ final class SSHShellSessionManager {
             throw SSHShellFailure.forwardFailed(error.localizedDescription)
         }
         forwardProcess = process
-        forwardErrorPipe = errorPipe
 
         try await Task.sleep(for: .milliseconds(650))
         guard process.isRunning else {
@@ -53,7 +51,6 @@ final class SSHShellSessionManager {
                 as: UTF8.self
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             forwardProcess = nil
-            forwardErrorPipe = nil
             throw SSHShellFailure.forwardFailed(
                 detail.isEmpty ? "The forward process exited immediately." : detail
             )
@@ -179,6 +176,5 @@ final class SSHShellSessionManager {
             forwardProcess.terminate()
         }
         forwardProcess = nil
-        forwardErrorPipe = nil
     }
 }
