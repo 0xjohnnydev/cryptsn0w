@@ -47,6 +47,7 @@ typedef void (*ApplicationShortcutActivationImplementation)(
     id, SEL, id, id, id);
 typedef char ***(*ArgumentsStorageImplementation)(void);
 typedef void (*SetProgramNameImplementation)(const char *);
+typedef BOOL (*ResolveInstanceMethodImplementation)(id, SEL, SEL);
 
 static WindowHiddenImplementation OriginalWindowSetHidden;
 static WindowVisibleImplementation OriginalWindowMakeKeyAndVisible;
@@ -57,6 +58,7 @@ static char SubtitleLabelKey;
 static ObjectGetterImplementation OriginalApplicationShortcutItems;
 static ApplicationShortcutActivationImplementation
     OriginalApplicationShortcutActivation;
+static ResolveInstanceMethodImplementation OriginalResolveInstanceMethod;
 static char *ManagedArgumentZero;
 
 #define CODEX_MAX_PATH_MAPPINGS 32U
@@ -1120,6 +1122,112 @@ static void InstallWindowHooks(void) {
         method_setImplementation(visible, (IMP)CompatWindowMakeKeyAndVisible);
 }
 
+static id CompatRootFolderController(id iconController,
+                                     __unused SEL selector) {
+    SEL managerSelector = sel_registerName("iconManager");
+    SEL rootSelector = sel_registerName("rootFolderController");
+    if ([iconController respondsToSelector:managerSelector]) {
+        id manager = ((id (*)(id, SEL))objc_msgSend)(iconController,
+                                                     managerSelector);
+        if ([manager respondsToSelector:rootSelector]) {
+            return ((id (*)(id, SEL))objc_msgSend)(manager, rootSelector);
+        }
+    }
+    SEL currentSelector = sel_registerName("_currentFolderController");
+    if ([iconController respondsToSelector:currentSelector]) {
+        return ((id (*)(id, SEL))objc_msgSend)(iconController,
+                                               currentSelector);
+    }
+    return nil;
+}
+
+static void InstallSpringBoardFolderHooks(void) {
+    if (![NSBundle.mainBundle.bundleIdentifier
+            isEqualToString:@"com.apple.springboard"]) {
+        return;
+    }
+    Class iconControllerClass = objc_getClass("SBIconController");
+    SEL legacySelector = sel_registerName("_rootFolderController");
+    if (iconControllerClass == Nil ||
+        class_getInstanceMethod(iconControllerClass, legacySelector) != NULL) {
+        return;
+    }
+    if (class_addMethod(iconControllerClass, legacySelector,
+                        (IMP)CompatRootFolderController, "@16@0:8")) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "installed root folder controller bridge");
+    }
+}
+
+static id CompatDatabaseInitializer(id database, __unused SEL selector,
+                                    id storeDescription,
+                                    __unused BOOL runMigrations,
+                                    __unused BOOL useLockFile,
+                                    NSError **error) {
+    SEL urlSelector = sel_registerName("URL");
+    SEL currentSelector = sel_registerName(
+        "initWithPersistenceMode:fileURL:error:");
+    if (storeDescription == nil) return nil;
+    id fileURL = ((id (*)(id, SEL))objc_msgSend)(storeDescription,
+                                                 urlSelector);
+    if (fileURL == nil) return nil;
+    return ((id (*)(id, SEL, NSUInteger, id, NSError **))objc_msgSend)(
+        database, currentSelector, 0, fileURL, error);
+}
+
+static id CompatDatabaseInitializerWithoutLock(
+    id database, SEL selector, id storeDescription, BOOL runMigrations,
+    NSError **error) {
+    return CompatDatabaseInitializer(database, selector, storeDescription,
+                                     runMigrations, YES, error);
+}
+
+static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
+                                        SEL missingSelector) {
+    static const char databaseClassName[] = "WFDatabase";
+    static const char initializerWithLock[] =
+        "initWithStoreDescription:runMigrationsIfNecessary:"
+        "useLockFile:error:";
+    static const char initializerWithoutLock[] =
+        "initWithStoreDescription:runMigrationsIfNecessary:error:";
+    const char *className = class_getName(cls);
+    const char *methodName = sel_getName(missingSelector);
+    if (className != NULL && methodName != NULL &&
+        strcmp(className, databaseClassName) == 0) {
+        IMP implementation = NULL;
+        const char *types = NULL;
+        if (strcmp(methodName, initializerWithLock) == 0) {
+            implementation = (IMP)CompatDatabaseInitializer;
+            types = "@40@0:8@16B24B28^@32";
+        } else if (strcmp(methodName, initializerWithoutLock) == 0) {
+            implementation = (IMP)CompatDatabaseInitializerWithoutLock;
+            types = "@40@0:8@16B24^@32";
+        }
+        if (implementation != NULL &&
+            class_addMethod(cls, missingSelector, implementation, types)) {
+            os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                             "installed legacy database initializer bridge");
+            return YES;
+        }
+    }
+    return OriginalResolveInstanceMethod != NULL
+        ? OriginalResolveInstanceMethod(cls, selector, missingSelector) : NO;
+}
+
+static void InstallLegacyDatabaseResolver(void) {
+    if (OriginalResolveInstanceMethod != NULL) return;
+    Method resolver = class_getClassMethod(
+        NSObject.class, @selector(resolveInstanceMethod:));
+    if (resolver == NULL ||
+        method_getImplementation(resolver) ==
+            (IMP)CompatResolveInstanceMethod) {
+        return;
+    }
+    OriginalResolveInstanceMethod = (ResolveInstanceMethodImplementation)
+        method_setImplementation(resolver,
+                                 (IMP)CompatResolveInstanceMethod);
+}
+
 static BOOL IsSubclassOfClass(Class candidate, Class parent) {
     for (Class cursor = candidate; cursor != Nil;
          cursor = class_getSuperclass(cursor)) {
@@ -1392,6 +1500,8 @@ bool codex_legacy_tweak_compat_apply(void) {
         return false;
     }
     ApplyConfiguredAliases();
+    InstallLegacyDatabaseResolver();
+    InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
     if (NSThread.isMainThread) {
         InstallPreferenceHooks();
@@ -1418,6 +1528,8 @@ static void InitializeLegacyTweakCompatibility(void) {
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
     ApplyConfiguredAliases();
+    InstallLegacyDatabaseResolver();
+    InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
     InstallPathHooks();
     [NSNotificationCenter.defaultCenter
@@ -1426,6 +1538,7 @@ static void InitializeLegacyTweakCompatibility(void) {
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(__unused NSNotification *notification) {
         ApplyConfiguredAliases();
+        InstallSpringBoardFolderHooks();
         InstallSpringBoardShortcutHooks();
         InstallPreferenceHooks();
     }];
@@ -1437,6 +1550,7 @@ static void InitializeLegacyTweakCompatibility(void) {
         RepairOrphanWindows();
     }];
     dispatch_async(dispatch_get_main_queue(), ^{
+        InstallSpringBoardFolderHooks();
         InstallPreferenceHooks();
         RepairOrphanWindows();
     });

@@ -28,7 +28,10 @@ action contracts connected to the iOS 27 context-menu provider. This lets
 older icon-menu hooks receive the current item list and action calls. The
 library also gives the managed SpringBoard and Settings copies their standard
 process names before ElleKit loads tweaks. A tweak that selects its hooks from
-the process name then selects the correct hooks. It also exports four small
+the process name then selects the correct hooks. It translates the removed
+Shortcuts database initializer to the iOS 27 file-backed initializer while it
+keeps the same database URL. This lets older tweak panels read the current
+Shortcuts database without a per-tweak patch. It also exports four small
 functions for exact class, method, and path mappings. Their declarations are in
 `sbinject_legacy_tweak_compat.h`. The optional mapping file is
 `/var/jb/etc/sbinject/legacy-tweak-compat.plist`. It must be a regular,
