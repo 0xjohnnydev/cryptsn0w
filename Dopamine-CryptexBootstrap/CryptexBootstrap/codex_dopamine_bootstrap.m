@@ -7,6 +7,7 @@
 #import <os/log.h>
 
 #include "sileo_root_broker_protocol.h"
+#include "io_helpers.h"
 
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
@@ -2603,38 +2604,6 @@ static int create_sileo_broker_socket(NSString *dataContainer,
         *socketPathOut = socketPath;
     }
     return server;
-}
-
-static bool write_all(int descriptor, const void *bytes, size_t length) {
-    const unsigned char *cursor = bytes;
-    while (length > 0) {
-        ssize_t written = write(descriptor, cursor, length);
-        if (written < 0 && errno == EINTR) {
-            continue;
-        }
-        if (written <= 0) {
-            return false;
-        }
-        cursor += written;
-        length -= (size_t)written;
-    }
-    return true;
-}
-
-static bool read_all(int descriptor, void *bytes, size_t length) {
-    unsigned char *cursor = bytes;
-    while (length > 0) {
-        ssize_t received = read(descriptor, cursor, length);
-        if (received < 0 && errno == EINTR) {
-            continue;
-        }
-        if (received <= 0) {
-            return false;
-        }
-        cursor += received;
-        length -= (size_t)received;
-    }
-    return true;
 }
 
 struct codex_root_broker_request {

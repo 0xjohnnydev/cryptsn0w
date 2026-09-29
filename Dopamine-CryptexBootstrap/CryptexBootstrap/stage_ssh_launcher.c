@@ -1,3 +1,5 @@
+#include "io_helpers.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -45,18 +47,6 @@ static bool secure_privilege_separation_directory(void) {
         return false;
     }
     return chown(path, 0, 0) == 0 && chmod(path, 0755) == 0;
-}
-
-static bool write_all(int descriptor, const void *bytes, size_t size) {
-    const unsigned char *cursor = bytes;
-    while (size != 0) {
-        ssize_t amount = write(descriptor, cursor, size);
-        if (amount < 0 && errno == EINTR) continue;
-        if (amount <= 0) return false;
-        cursor += amount;
-        size -= (size_t)amount;
-    }
-    return true;
 }
 
 static bool executable_and_stage_root(char executable[PATH_MAX],

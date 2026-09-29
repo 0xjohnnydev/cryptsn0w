@@ -2,6 +2,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include "sbinject_protocol.h"
 #include "litehook_rebind.h"
+#include "io_helpers.h"
 
 #include <errno.h>
 #include <dlfcn.h>
@@ -130,38 +131,6 @@ struct codex_parent_reply {
 };
 
 static volatile sig_atomic_t gOwnedChild = -1;
-
-static bool write_all(int descriptor, const void *buffer, size_t size) {
-    const uint8_t *cursor = buffer;
-    while (size != 0) {
-        ssize_t amount = write(descriptor, cursor, size);
-        if (amount < 0 && errno == EINTR) {
-            continue;
-        }
-        if (amount <= 0) {
-            return false;
-        }
-        cursor += (size_t)amount;
-        size -= (size_t)amount;
-    }
-    return true;
-}
-
-static bool read_all(int descriptor, void *buffer, size_t size) {
-    uint8_t *cursor = buffer;
-    while (size != 0) {
-        ssize_t amount = read(descriptor, cursor, size);
-        if (amount < 0 && errno == EINTR) {
-            continue;
-        }
-        if (amount <= 0) {
-            return false;
-        }
-        cursor += (size_t)amount;
-        size -= (size_t)amount;
-    }
-    return true;
-}
 
 static bool path_is_descendant(const char *path, const char *root) {
     size_t rootLength = strlen(root);

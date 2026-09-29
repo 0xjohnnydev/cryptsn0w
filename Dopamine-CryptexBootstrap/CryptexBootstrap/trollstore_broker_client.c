@@ -1,4 +1,5 @@
 #include "sileo_root_broker_protocol.h"
+#include "io_helpers.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -15,30 +16,6 @@
 #define CODEX_TROLLSTORE_HELPER_PAYLOAD \
     "/var/jb/Applications/TrollStoreLite.app/.sbinject-root-helper"
 #define CODEX_ROOT_BROKER_SOCKET "/var/mobile/.codex-broker"
-
-static bool write_all(int descriptor, const void *bytes, size_t length) {
-    const uint8_t *cursor = bytes;
-    while (length != 0) {
-        ssize_t amount = write(descriptor, cursor, length);
-        if (amount < 0 && errno == EINTR) continue;
-        if (amount <= 0) return false;
-        cursor += amount;
-        length -= (size_t)amount;
-    }
-    return true;
-}
-
-static bool read_all(int descriptor, void *bytes, size_t length) {
-    uint8_t *cursor = bytes;
-    while (length != 0) {
-        ssize_t amount = read(descriptor, cursor, length);
-        if (amount < 0 && errno == EINTR) continue;
-        if (amount <= 0) return false;
-        cursor += amount;
-        length -= (size_t)amount;
-    }
-    return true;
-}
 
 static int decoded_wait_status(int32_t status) {
     if (WIFEXITED(status)) return WEXITSTATUS(status);

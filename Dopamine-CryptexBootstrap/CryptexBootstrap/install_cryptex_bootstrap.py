@@ -9,7 +9,6 @@ if __name__ == "__main__":
 
 import argparse
 import asyncio
-import hashlib
 import json
 import plistlib
 import re
@@ -18,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from artifact_metadata import sha256_file
 from pymobiledevice3.exceptions import ConnectionTerminatedError, StreamClosedError
 from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
 # [REDACTED] Related personalization helper imports omitted.
@@ -87,14 +87,6 @@ def _validate_identity(identity: dict[str, Any]) -> None:
     raise RuntimeError('TSS/Cryptex personalization and installation details are redacted from this educational source release.')
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _validate_trustcache(path: Path, expected: dict[str, Any]) -> dict[str, Any]:
     output = subprocess.run(
         [str(CRYPTEXCTL), "dump-trust-cache", str(path)],
@@ -112,7 +104,7 @@ def _validate_trustcache(path: Path, expected: dict[str, Any]) -> dict[str, Any]
         raise ValueError(
             "trust cache does not exactly match the pinned build summary"
         )
-    actual_sha256 = _sha256(path)
+    actual_sha256 = sha256_file(path)
     if actual_sha256 != expected.get("sha256"):
         raise ValueError("trust-cache SHA-256 does not match build summary")
     return {

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
 import re
@@ -20,6 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from artifact_metadata import sha256_file
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 UPSTREAM_ROOT = SCRIPT_DIR.parent
@@ -43,14 +43,6 @@ class DeployError(RuntimeError):
 
 def note(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def read_json(path: Path) -> dict[str, Any]:
