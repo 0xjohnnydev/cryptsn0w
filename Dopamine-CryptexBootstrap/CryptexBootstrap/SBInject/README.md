@@ -18,6 +18,35 @@ updates the section array and both lookup dictionaries before SwiftUI evaluates
 each snapshot, and sends row selections through libprefs to the installed
 preference bundle controller. It is inert when the iOS 27 model class is absent.
 
+Before ElleKit loads, the same lane loads `legacy-tweak-compat.dylib`. This
+fixed library provides common iOS 27 repairs for old tweak windows and old
+PreferenceLoader cells. It also exports three small functions for exact class
+and method mappings. Their declarations are in
+`sbinject_legacy_tweak_compat.h`. The optional mapping file is
+`/var/jb/etc/sbinject/legacy-tweak-compat.plist`. It must be a regular,
+root-owned file. It must not be writable by a group or other users. Its maximum
+size is 64 KiB. This is the supported format:
+
+```plist
+{
+    ClassAliases = {
+        LegacyClassName = CurrentClassName;
+    };
+    SelectorAliases = (
+        {
+            Class = CurrentClassName;
+            Legacy = "oldMethod:";
+            Current = "newMethod:";
+            ClassMethod = false;
+        }
+    );
+}
+```
+
+The library applies only exact mappings with matching argument counts. It does
+not translate changed data types or changed behavior. A load failure does not
+stop ElleKit or the target process.
+
 The launchd hook is inert unless the root-owned
 `/var/jb/var/lib/sbinject/enabled` marker exists.  Three replacement launches
 inside sixty seconds remove that marker and return launchd to the stock

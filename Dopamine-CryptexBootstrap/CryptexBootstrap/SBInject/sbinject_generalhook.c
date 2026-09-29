@@ -775,6 +775,20 @@ __attribute__((constructor)) static void initialize_general_hook(void) {
     }
     pre_main_log("dyld-bypass-ready");
     dlerror();
+    void *legacy_compat = dlopen(
+        CODEX_SBINJECT_LEGACY_TWEAK_COMPAT, RTLD_NOW | RTLD_GLOBAL);
+    if (legacy_compat == NULL) {
+        const char *error = dlerror();
+        os_log_with_type(hook_log(), OS_LOG_TYPE_ERROR,
+                         "legacy tweak compatibility unavailable: %{public}s",
+                         error != NULL ? error : "unknown");
+        pre_main_log("legacy-compat-unavailable");
+    } else {
+        os_log_with_type(hook_log(), OS_LOG_TYPE_DEFAULT,
+                         "legacy tweak compatibility loaded pre-main");
+        pre_main_log("legacy-compat-ready");
+    }
+    dlerror();
     void *injector = dlopen(CODEX_SBINJECT_ELLEKIT, RTLD_NOW | RTLD_LOCAL);
     if (injector == NULL) {
         pre_main_log("ellekit-failed");

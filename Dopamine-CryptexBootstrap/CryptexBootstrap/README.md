@@ -75,6 +75,16 @@ PreferenceLoader bridge publishes legacy preference bundles into iOS 27’s
 `SettingsSidebarListState` and forwards supported pane respring commands to the
 same broker.
 
+`legacy-tweak-compat.dylib` is a small shared compatibility library. A dynamic
+library, or dylib, is code that several processes can load. The launch path
+loads this library before ElleKit in SpringBoard, Settings, and managed apps
+that enable tweak injection. On iOS 27 it attaches old overlay windows to the
+active window scene. In Settings it also restores supported legacy row heights
+and subtitle text for third-party PreferenceLoader bundles. One root-owned
+property list can add exact class and method name mappings without a new tweak
+patch. The library ignores unsafe mapping files and does not guess mappings.
+Create `/var/mobile/.sbinject-legacy-compat-disabled` to disable the library.
+
 Safe mode does not rename or disable installed tweaks. Crash attribution strips
 PAC bits and identifies a loaded tweak when a matching image is available.
 

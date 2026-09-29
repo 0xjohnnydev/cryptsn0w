@@ -1585,6 +1585,16 @@ static int run_managed_app_payload(const char *runtime_path, int argc,
         runtime_path, CFSTR("TweakInjection"), false);
     if (tweakInjection) {
         dlerror();
+        void *legacyCompat = dlopen(
+            CODEX_SBINJECT_LEGACY_TWEAK_COMPAT, RTLD_NOW | RTLD_GLOBAL);
+        const char *legacyCompatError =
+            legacyCompat == NULL ? dlerror() : NULL;
+        app_launcher_log("pid=%d stage=legacy-tweak-compat ready=%d "
+                         "path=%s error=%s", getpid(),
+                         legacyCompat != NULL, runtime_path,
+                         legacyCompatError != NULL ? legacyCompatError :
+                                                     "none");
+        dlerror();
         void *injector = dlopen(
             CODEX_SBINJECT_ELLEKIT, RTLD_NOW | RTLD_LOCAL);
         const char *injectorError = injector == NULL ? dlerror() : NULL;

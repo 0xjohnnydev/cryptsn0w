@@ -47,6 +47,7 @@ PREFER_DIRECT_SILEO_REGISTRATION=${CODEX_PREFER_DIRECT_SILEO_REGISTRATION:-0}
 HOST_SSH_AUTHORIZED_KEY=${CODEX_HOST_SSH_AUTHORIZED_KEY:-}
 MAX_CRYPTEX_IMAGE_BYTES=$((128 * 1024 * 1024))
 MAX_PREFERENCES_BRIDGE_BYTES=$((1024 * 1024))
+MAX_LEGACY_TWEAK_COMPAT_BYTES=$((512 * 1024))
 
 CACHE_DIR="$SCRIPT_DIR/cache"
 GPG_HOME="$CACHE_DIR/gnupg"
@@ -138,6 +139,8 @@ SBINJECT_TROLLSTORE_REGISTRATION_HOOK="$IMAGE_ROOT/usr/local/lib/sbinject/trolls
 SBINJECT_PREFERENCES_BRIDGE="$IMAGE_ROOT/usr/local/lib/sbinject/preferences-bridge.dylib"
 PREFERENCES_BRIDGE_SUPPORT_DIR="$SBINJECT_SOURCE_DIR/PreferenceBridgeSupport"
 PREFERENCES_BRIDGE_BUILD_DIRECTORY="$WORK_DIR/preferences-bridge-build"
+SBINJECT_LEGACY_TWEAK_COMPAT="$IMAGE_ROOT/usr/local/lib/sbinject/legacy-tweak-compat.dylib"
+LEGACY_TWEAK_COMPAT_BUILD_DIRECTORY="$WORK_DIR/legacy-tweak-compat-build"
 SBINJECT_JITTERD="$IMAGE_ROOT/usr/local/bin/sbinject-jitterd"
 SBINJECT_JITTERD_ENTITLEMENTS="$SBINJECT_SOURCE_DIR/jitterd-entitlements.plist"
 SBINJECT_JITTERD_PLIST_SOURCE="$SBINJECT_SOURCE_DIR/com.openai.codex.sbinject.jitterd.plist"
@@ -424,6 +427,7 @@ rm -rf "$IMAGE_ROOT" "$PACKAGE_ROOT" "$ELLEKIT_PACKAGE_ROOT" \
     "$OPENSSH_PACKAGE_ROOT" "$LDID_PACKAGE_ROOT" \
     "$LIBPLIST_PACKAGE_ROOT" "$LDID_SOURCE_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY" \
+    "$LEGACY_TWEAK_COMPAT_BUILD_DIRECTORY" \
     "$UNSIGNED_OUT" "$REPACKED_SILEO" \
     "$REPACKED_ELLEKIT" "$REPACKED_SHADOW" "$REPACKED_LIBSANDY" \
     "$REPACKED_HOOKKIT" "$REPACKED_HOOKKIT_GUM" \
@@ -452,6 +456,7 @@ mkdir -p \
     "$TRUSTED_HOOKKIT_GUM_ROOT" \
     "$TRUSTED_ALTLIST_ROOT" \
     "$PREFERENCES_BRIDGE_BUILD_DIRECTORY/module-cache" \
+    "$LEGACY_TWEAK_COMPAT_BUILD_DIRECTORY" \
     "$LDID_SOURCE_ROOT" \
     "$PACKAGE_ROOT" \
     "$UNSIGNED_OUT"
@@ -725,6 +730,35 @@ lipo -create "${shadow_bootstrap_slices[@]}" \
     -output "$SBINJECT_SHADOW_BOOTSTRAP"
 codesign --force --sign - --timestamp=none --pagesize 4096 \
     "$SBINJECT_SHADOW_BOOTSTRAP"
+
+typeset -a legacy_tweak_compat_slices
+for architecture in arm64 arm64e; do
+    slice="$LEGACY_TWEAK_COMPAT_BUILD_DIRECTORY/${architecture}.dylib"
+    xcrun --sdk iphoneos clang \
+        -arch "$architecture" \
+        -miphoneos-version-min=17.0 \
+        -isysroot "$SDKROOT" \
+        -dynamiclib -fblocks -fobjc-arc \
+        -Os -Wall -Wextra -Werror \
+        "$SBINJECT_SOURCE_DIR/sbinject_legacy_tweak_compat.m" \
+        -framework Foundation \
+        -framework CoreGraphics \
+        -framework UIKit \
+        -install_name \
+            /var/jb/usr/lib/sbinject/legacy-tweak-compat.dylib \
+        -o "$slice"
+    legacy_tweak_compat_slices+=("$slice")
+done
+lipo -create "${legacy_tweak_compat_slices[@]}" \
+    -output "$SBINJECT_LEGACY_TWEAK_COMPAT"
+codesign --force --sign - --timestamp=none --pagesize 4096 \
+    "$SBINJECT_LEGACY_TWEAK_COMPAT"
+codesign --verify --strict --all-architectures \
+    "$SBINJECT_LEGACY_TWEAK_COMPAT" || \
+    die "legacy tweak compatibility signature is invalid"
+(( $(stat -f %z "$SBINJECT_LEGACY_TWEAK_COMPAT") <= \
+   MAX_LEGACY_TWEAK_COMPAT_BYTES )) || \
+    die "legacy tweak compatibility exceeds its 512 KiB size ceiling"
 
 xcrun --sdk iphoneos clang \
     -arch arm64e \
@@ -1394,6 +1428,7 @@ for candidate in \
     "$SBINJECT_LSD_REGISTRATION_HOOK" \
     "$SBINJECT_TROLLSTORE_REGISTRATION_HOOK" \
     "$SBINJECT_PREFERENCES_BRIDGE" \
+    "$SBINJECT_LEGACY_TWEAK_COMPAT" \
     "$SBINJECT_LAUNCHDHOOK" \
     "$SBINJECT_SHADOW_BOOTSTRAP" \
     "$SBINJECT_JITTERD" \

@@ -197,6 +197,8 @@ static NSString *const kSBInjectAmfidHook =
     @"/var/jb/usr/libexec/sbinject/a";
 static NSString *const kSBInjectPreferencesBridge =
     @"/var/jb/usr/lib/sbinject/preferences-bridge.dylib";
+static NSString *const kSBInjectLegacyTweakCompat =
+    @"/var/jb/usr/lib/sbinject/legacy-tweak-compat.dylib";
 static NSString *const kSBInjectLaunchdHook =
     @"/var/jb/usr/lib/sbinject/launchdhook-v41.dylib";
 static NSString *const kSBInjectShadowBootstrap =
@@ -5191,6 +5193,7 @@ static bool prepare_sbinject_redirect(const char *reason) {
         @{@"path" : kElleKitInjectorDylib, @"mode" : @0644},
         @{@"path" : kSBInjectJitterdExecutable, @"mode" : @0755},
         @{@"path" : kSBInjectGeneralHook, @"mode" : @0755},
+        @{@"path" : kSBInjectLegacyTweakCompat, @"mode" : @0755},
         @{@"path" : kSBInjectLaunchdHook, @"mode" : @0755},
         @{@"path" : kSBInjectShadowBootstrap, @"mode" : @0755},
         @{@"path" : kSpringBoardCandidateExecutable, @"mode" : @0755},
@@ -5358,6 +5361,7 @@ static bool activate_sbinject_preferences(void) {
         @{@"path" : kSBInjectJitterdExecutable, @"mode" : @0755},
         @{@"path" : kSBInjectGeneralHook, @"mode" : @0755},
         @{@"path" : kSBInjectPreferencesBridge, @"mode" : @0755},
+        @{@"path" : kSBInjectLegacyTweakCompat, @"mode" : @0755},
         @{@"path" : kSBInjectLaunchdHook, @"mode" : @0755},
         @{@"path" : kSBInjectShadowBootstrap, @"mode" : @0755},
         @{@"path" : kPreferencesCandidateExecutable, @"mode" : @0755},
@@ -8511,6 +8515,9 @@ int main(int argc, char *argv[]) {
         NSString *sourceSBInjectPreferencesBridge =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/preferences-bridge.dylib"];
+        NSString *sourceSBInjectLegacyTweakCompat =
+            [mountRoot stringByAppendingPathComponent:
+                           @"usr/local/lib/sbinject/legacy-tweak-compat.dylib"];
         NSString *sourceTrollStoreSettingsHook =
             [mountRoot stringByAppendingPathComponent:
                            @"usr/local/lib/sbinject/trollstore-settings-hook.dylib"];
@@ -8731,6 +8738,9 @@ int main(int argc, char *argv[]) {
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectGeneralHook fileSystemRepresentation],
+                  &injectionHelperStatus) != 0 ||
+            !S_ISREG(injectionHelperStatus.st_mode) ||
+            lstat([sourceSBInjectLegacyTweakCompat fileSystemRepresentation],
                   &injectionHelperStatus) != 0 ||
             !S_ISREG(injectionHelperStatus.st_mode) ||
             lstat([sourceSBInjectLaunchdHook fileSystemRepresentation],
@@ -9236,6 +9246,9 @@ int main(int argc, char *argv[]) {
                 @{@"name" : @"preferences-bridge",
                   @"source" : sourceSBInjectPreferencesBridge,
                   @"installed" : kSBInjectPreferencesBridge},
+                @{@"name" : @"legacy-tweak-compat",
+                  @"source" : sourceSBInjectLegacyTweakCompat,
+                  @"installed" : kSBInjectLegacyTweakCompat},
                 @{@"name" : @"launchd-hook",
                   @"source" : sourceSBInjectLaunchdHook,
                   @"installed" : kSBInjectLaunchdHook},
@@ -9394,6 +9407,8 @@ int main(int argc, char *argv[]) {
                   @"installed" : kAmfidCandidateExecutable},
                 @{@"source" : sourceSBInjectPreferencesBridge,
                   @"installed" : kSBInjectPreferencesBridge},
+                @{@"source" : sourceSBInjectLegacyTweakCompat,
+                  @"installed" : kSBInjectLegacyTweakCompat},
                 @{@"source" : sourceSBInjectLaunchdHook,
                   @"installed" : kSBInjectLaunchdHook},
                 @{@"source" : sourceSBInjectShadowBootstrap,
@@ -9981,6 +9996,7 @@ int main(int argc, char *argv[]) {
         bool sbinjectAmfidHookUpdated = false;
         bool sbinjectAmfidCandidateUpdated = false;
         bool sbinjectPreferencesBridgeUpdated = false;
+        bool sbinjectLegacyTweakCompatUpdated = false;
         bool sbinjectLaunchdHookUpdated = false;
         bool sbinjectShadowBootstrapUpdated = false;
         bool sbinjectLsdRegistrationHookUpdated = false;
@@ -10054,6 +10070,13 @@ int main(int argc, char *argv[]) {
                 &sbinjectPreferencesBridgeUpdated,
                 &sbinjectPayloadError) ||
             !install_managed_apt_file(
+                sourceSBInjectLegacyTweakCompat,
+                @"/var/jb/usr/lib/sbinject",
+                @"legacy-tweak-compat.dylib", 1024 * 1024, 0755,
+                "sbinjectLegacyTweakCompat",
+                &sbinjectLegacyTweakCompatUpdated,
+                &sbinjectPayloadError) ||
+            !install_managed_apt_file(
                 sourceSBInjectLaunchdHook, @"/var/jb/usr/lib/sbinject",
                 @"launchdhook-v41.dylib", 16 * 1024 * 1024, 0755,
                 "sbinjectLaunchdHook", &sbinjectLaunchdHookUpdated,
@@ -10120,6 +10143,7 @@ int main(int argc, char *argv[]) {
             runtimeExecWorkerUpdated || sbinjectGeneralHookUpdated ||
             sbinjectAmfidHookUpdated || sbinjectAmfidCandidateUpdated ||
             sbinjectPreferencesBridgeUpdated ||
+            sbinjectLegacyTweakCompatUpdated ||
             sbinjectLaunchdHookUpdated ||
             sbinjectShadowBootstrapUpdated ||
             sbinjectLsdRegistrationHookUpdated ||
@@ -10130,6 +10154,7 @@ int main(int argc, char *argv[]) {
         bool sbinjectPreferencesRestartRequired =
             preferenceLoaderDpkgStatus == 0 || sbinjectGeneralHookUpdated ||
             sbinjectPreferencesBridgeUpdated ||
+            sbinjectLegacyTweakCompatUpdated ||
             sbinjectPreferencesBundleUpdated;
         if (sbinjectPayloadUpdated) {
             NSString *sbinjectStateDirectory = @"/var/jb/var/lib/sbinject";
@@ -10490,6 +10515,8 @@ int main(int argc, char *argv[]) {
         manifest[@"SBInjectAmfidHook"] = kSBInjectAmfidHook;
         manifest[@"SBInjectAmfidExecutable"] = kAmfidCandidateExecutable;
         manifest[@"SBInjectPreferencesBridge"] = kSBInjectPreferencesBridge;
+        manifest[@"SBInjectLegacyTweakCompat"] =
+            kSBInjectLegacyTweakCompat;
         manifest[@"SBInjectLaunchdHook"] = kSBInjectLaunchdHook;
         manifest[@"SBInjectShadowBootstrap"] = kSBInjectShadowBootstrap;
         manifest[@"SpringBoardTweakAdmission"] =
@@ -10579,9 +10606,11 @@ int main(int argc, char *argv[]) {
             }
             log_message("sbinjectPreferencesRestartRequired=true "
                         "preferenceLoaderInstalled=true generalHookUpdated=%s "
-                        "bridgeUpdated=%s bundleUpdated=%s",
+                        "bridgeUpdated=%s legacyCompatUpdated=%s "
+                        "bundleUpdated=%s",
                         sbinjectGeneralHookUpdated ? "true" : "false",
                         sbinjectPreferencesBridgeUpdated ? "true" : "false",
+                        sbinjectLegacyTweakCompatUpdated ? "true" : "false",
                         sbinjectPreferencesBundleUpdated ? "true" : "false");
         }
 

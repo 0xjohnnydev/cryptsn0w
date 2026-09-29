@@ -104,6 +104,8 @@ struct codex_sbinject_shadow_response {
     "/var/jb/usr/lib/TweakInject/PreferenceLoader.dylib"
 #define CODEX_SBINJECT_PREFERENCES_BRIDGE \
     "/var/jb/usr/lib/sbinject/preferences-bridge.dylib"
+#define CODEX_SBINJECT_LEGACY_TWEAK_COMPAT \
+    "/var/jb/usr/lib/sbinject/legacy-tweak-compat.dylib"
 #define CODEX_SBINJECT_ENABLE_MARKER \
     "/var/jb/var/lib/sbinject/enabled"
 #define CODEX_SBINJECT_CRASH_MARKER \
