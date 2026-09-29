@@ -85,7 +85,7 @@ connects old application shortcut item and action hooks to the iOS 27
 context-menu provider. It retries missing legacy tweak paths under `/var/jb`.
 It gives old virtual icons a safe application result. It also maps the old
 lock-screen flashlight and camera button getters to the current quick-action
-button list.
+button list. It maps the old volume HUD value getter to its current name.
 It restores the standard process names for the managed SpringBoard and
 Settings copies before ElleKit loads tweaks. It also retries old tool launches
 from the rootless tool directories. An exact Settings respring request uses the

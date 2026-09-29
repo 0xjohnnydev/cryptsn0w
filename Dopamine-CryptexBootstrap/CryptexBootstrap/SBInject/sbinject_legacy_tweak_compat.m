@@ -64,6 +64,7 @@ static char *ManagedArgumentZero;
 
 static id CompatFlashlightButton(id view, SEL selector);
 static id CompatCameraButton(id view, SEL selector);
+static float CompatCurrentVolume(id viewController, SEL selector);
 static void InstallSpringBoardQuickActionsHooks(void);
 
 static _Atomic bool QuickActionsInstallScheduled;
@@ -1204,6 +1205,14 @@ static id CompatDatabaseInitializerWithoutLock(
                                      runMigrations, YES, error);
 }
 
+static float CompatCurrentVolume(id viewController,
+                                 __unused SEL selector) {
+    SEL currentValueSelector = sel_registerName("currentValue");
+    if (![viewController respondsToSelector:currentValueSelector]) return 0.0f;
+    return ((float (*)(id, SEL))objc_msgSend)(viewController,
+                                              currentValueSelector);
+}
+
 static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
                                         SEL missingSelector) {
     static const char databaseClassName[] = "WFDatabase";
@@ -1231,6 +1240,15 @@ static BOOL CompatResolveInstanceMethod(id cls, SEL selector,
                              "installed legacy database initializer bridge");
             return YES;
         }
+    }
+    if (className != NULL && methodName != NULL &&
+        strcmp(className, "SBElasticVolumeViewController") == 0 &&
+        strcmp(methodName, "currentVolume") == 0 &&
+        class_addMethod(cls, missingSelector, (IMP)CompatCurrentVolume,
+                        "f16@0:8")) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "resolved legacy volume getter");
+        return YES;
     }
     if (className != NULL && methodName != NULL &&
         strcmp(className, "CSQuickActionsView") == 0) {
