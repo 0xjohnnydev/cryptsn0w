@@ -61,6 +61,7 @@ static NSMutableDictionary<NSString *, NSValue *> *LayoutImplementations;
 static NSHashTable<UIWindow *> *OrphanWindows;
 static NSMutableArray<Class> *LegacyWindowOwnerClasses;
 static NSMutableSet<NSString *> *LegacyWindowOwnerNames;
+static NSMutableSet<NSString *> *NoninteractiveWindowOwnerNames;
 static NSMutableDictionary<NSString *, NSValue *> *WindowOwnerFrameImplementations;
 static MonitorUpdateImplementation OriginalBatteryMonitorUpdate;
 static MonitorUpdateImplementation OriginalCPUMonitorUpdate;
@@ -1140,10 +1141,24 @@ static WindowOwnerFrameImplementation WindowOwnerFrameImplementationForClass(
     return NULL;
 }
 
+static void DisableLegacyWindowOwnerInteraction(id owner) {
+    if (![NoninteractiveWindowOwnerNames containsObject:
+            NSStringFromClass([owner class])]) {
+        return;
+    }
+    SEL selector = sel_registerName("springboardWindow");
+    if (![owner respondsToSelector:selector]) return;
+    id window = ((id (*)(id, SEL))objc_msgSend)(owner, selector);
+    if ([window isKindOfClass:UIWindow.class]) {
+        ((UIWindow *)window).userInteractionEnabled = NO;
+    }
+}
+
 static void CompatWindowOwnerUpdateFrame(id owner, SEL selector) {
     WindowOwnerFrameImplementation original =
         WindowOwnerFrameImplementationForClass((Class)[owner class]);
     if (original != NULL) original(owner, selector);
+    DisableLegacyWindowOwnerInteraction(owner);
     if (NSThread.isMainThread) {
         UIWindowScene *scene = ActiveWindowScene();
         if (scene != nil) LayoutLegacyStatusOverlayWindows(scene);
@@ -1204,6 +1219,7 @@ static void FitKeepEyeMonitorToText(id monitor) {
     UIWindow *window = ((id (*)(id, SEL))objc_msgSend)(monitor,
                                                        windowSelector);
     if (![window isKindOfClass:UIWindow.class]) return;
+    window.userInteractionEnabled = NO;
 
     CGRect frame = window.frame;
     CGSize textSize = ((CGSize (*)(id, SEL, CGSize))objc_msgSend)(
@@ -1422,6 +1438,10 @@ static void InstallKeepEyeDisplayCompatibility(void) {
     }
 
     KeepEyeDisplayCompatibilityInstalled = YES;
+    [NoninteractiveWindowOwnerNames addObjectsFromArray:@[
+        NSStringFromClass(batteryClass), NSStringFromClass(cpuClass),
+        NSStringFromClass(ramClass), NSStringFromClass(networkClass)
+    ]];
     os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                      "installed KeepEye display compatibility");
 }
@@ -1478,6 +1498,7 @@ static BOOL RepairLegacyWindowOwners(void) {
                 ready = NO;
                 continue;
             }
+            DisableLegacyWindowOwnerInteraction(owner);
             if (window.windowScene != scene) window.windowScene = scene;
             if ([owner respondsToSelector:updateFrameSelector]) {
                 ((void (*)(id, SEL))objc_msgSend)(owner,
@@ -2192,6 +2213,7 @@ static void InitializeLegacyTweakCompatibility(void) {
     OrphanWindows = [NSHashTable weakObjectsHashTable];
     LegacyWindowOwnerClasses = [NSMutableArray array];
     LegacyWindowOwnerNames = [NSMutableSet set];
+    NoninteractiveWindowOwnerNames = [NSMutableSet set];
     WindowOwnerFrameImplementations = [NSMutableDictionary dictionary];
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
