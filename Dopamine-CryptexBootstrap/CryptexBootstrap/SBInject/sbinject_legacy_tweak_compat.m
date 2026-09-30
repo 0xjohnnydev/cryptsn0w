@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <mach-o/dyld.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -62,6 +63,7 @@ static NSHashTable<UIWindow *> *OrphanWindows;
 static NSMutableArray<Class> *LegacyWindowOwnerClasses;
 static NSMutableSet<NSString *> *LegacyWindowOwnerNames;
 static NSMutableSet<NSString *> *NoninteractiveWindowOwnerNames;
+static NSMutableSet<NSString *> *PassthroughWindowClassNames;
 static NSMutableDictionary<NSString *, NSValue *> *WindowOwnerFrameImplementations;
 static MonitorUpdateImplementation OriginalBatteryMonitorUpdate;
 static MonitorUpdateImplementation OriginalCPUMonitorUpdate;
@@ -1098,6 +1100,12 @@ static void CompatWindowSetHidden(UIWindow *window, SEL selector, BOOL hidden) {
 
 static void CompatWindowMakeKeyAndVisible(UIWindow *window, SEL selector) {
     (void)AdoptWindowScene(window);
+    if ([PassthroughWindowClassNames containsObject:
+            NSStringFromClass(window.class)]) {
+        OriginalWindowSetHidden(window, @selector(setHidden:), NO);
+        ScheduleLegacyStatusOverlayLayout();
+        return;
+    }
     OriginalWindowMakeKeyAndVisible(window, selector);
     ScheduleLegacyStatusOverlayLayout();
 }
@@ -1141,16 +1149,78 @@ static WindowOwnerFrameImplementation WindowOwnerFrameImplementationForClass(
     return NULL;
 }
 
-static void DisableLegacyWindowOwnerInteraction(id owner) {
-    if (![NoninteractiveWindowOwnerNames containsObject:
-            NSStringFromClass([owner class])]) {
+static UIView *PassthroughWindowHitTest(__unused UIWindow *window,
+                                        __unused SEL selector,
+                                        __unused CGPoint point,
+                                        __unused UIEvent *event) {
+    return nil;
+}
+
+static BOOL PassthroughWindowPointInside(__unused UIWindow *window,
+                                         __unused SEL selector,
+                                         __unused CGPoint point,
+                                         __unused UIEvent *event) {
+    return NO;
+}
+
+static BOOL PassthroughWindowCanBecomeKey(__unused UIWindow *window,
+                                          __unused SEL selector) {
+    return NO;
+}
+
+static BOOL IsNoninteractiveWindowOwner(id owner) {
+    for (Class cls = [owner class]; cls != Nil;
+         cls = class_getSuperclass(cls)) {
+        if ([NoninteractiveWindowOwnerNames containsObject:
+                NSStringFromClass(cls)]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void InstallPassthroughWindowBehavior(UIWindow *window) {
+    Class cls = window.class;
+    const char *image = class_getImageName(cls);
+    if (cls == UIWindow.class || image == NULL ||
+        !TweakInjectionImage([NSString stringWithUTF8String:image])) {
         return;
     }
+    NSString *name = NSStringFromClass(cls);
+    if ([PassthroughWindowClassNames containsObject:name]) return;
+
+    Method hitTest = class_getInstanceMethod(cls,
+                                             @selector(hitTest:withEvent:));
+    Method pointInside = class_getInstanceMethod(
+        cls, @selector(pointInside:withEvent:));
+    Method canBecomeKey = class_getInstanceMethod(
+        cls, @selector(canBecomeKeyWindow));
+    if (hitTest == NULL || pointInside == NULL || canBecomeKey == NULL) return;
+    class_replaceMethod(cls, @selector(hitTest:withEvent:),
+                        (IMP)PassthroughWindowHitTest,
+                        method_getTypeEncoding(hitTest));
+    class_replaceMethod(cls, @selector(pointInside:withEvent:),
+                        (IMP)PassthroughWindowPointInside,
+                        method_getTypeEncoding(pointInside));
+    class_replaceMethod(cls, @selector(canBecomeKeyWindow),
+                        (IMP)PassthroughWindowCanBecomeKey,
+                        method_getTypeEncoding(canBecomeKey));
+    [PassthroughWindowClassNames addObject:name];
+    os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                     "installed pass-through window class=%{public}s",
+                     class_getName(cls));
+}
+
+static void DisableLegacyWindowOwnerInteraction(id owner) {
+    if (!IsNoninteractiveWindowOwner(owner)) return;
     SEL selector = sel_registerName("springboardWindow");
     if (![owner respondsToSelector:selector]) return;
     id window = ((id (*)(id, SEL))objc_msgSend)(owner, selector);
     if ([window isKindOfClass:UIWindow.class]) {
-        ((UIWindow *)window).userInteractionEnabled = NO;
+        UIWindow *overlay = (UIWindow *)window;
+        InstallPassthroughWindowBehavior(overlay);
+        overlay.userInteractionEnabled = NO;
+        if (overlay.isKeyWindow) [overlay resignKeyWindow];
     }
 }
 
@@ -1305,10 +1375,15 @@ static void KeepEyeBatteryUpdate(id monitor, SEL selector) {
         return;
     }
 
-    NSString *number = [text substringToIndex:degree.location];
-    NSScanner *scanner = [NSScanner scannerWithString:number];
-    double celsius = 0.0;
-    if (![scanner scanDouble:&celsius] || !scanner.isAtEnd) {
+    const char *utf8 = text.UTF8String;
+    const char *degreeBytes = utf8 == NULL
+        ? NULL
+        : strstr(utf8, "\xC2\xB0");
+    char *end = NULL;
+    errno = 0;
+    double celsius = utf8 == NULL ? 0.0 : strtod(utf8, &end);
+    if (degreeBytes == NULL || end != degreeBytes || errno == ERANGE ||
+        !isfinite(celsius)) {
         ScheduleLegacyStatusOverlayLayout();
         return;
     }
@@ -1334,17 +1409,17 @@ static void KeepEyeRAMUpdate(id monitor, SEL selector) {
         OriginalRAMMonitorUpdate(monitor, selector);
     }
     NSString *text = KeepEyeLabelText(monitor);
-    NSScanner *scanner = [NSScanner scannerWithString:text ?: @""];
-    double megabytes = 0.0;
-    if ([scanner scanDouble:&megabytes]) {
-        NSString *unit = [[text substringFromIndex:scanner.scanLocation]
-            stringByTrimmingCharactersInSet:
-                NSCharacterSet.whitespaceCharacterSet];
-        if ([unit isEqualToString:@"MB"] && megabytes >= 1024.0) {
-            SetKeepEyeLabelText(
-                monitor,
-                [NSString stringWithFormat:@"%.1f GB", megabytes / 1024.0]);
-        }
+    const char *utf8 = text.UTF8String;
+    char *unit = NULL;
+    errno = 0;
+    double megabytes = utf8 == NULL ? 0.0 : strtod(utf8, &unit);
+    while (unit != NULL && isspace((unsigned char)*unit)) ++unit;
+    if (utf8 != NULL && unit != utf8 && unit != NULL &&
+        strcmp(unit, "MB") == 0 && errno != ERANGE &&
+        isfinite(megabytes) && megabytes >= 1024.0) {
+        SetKeepEyeLabelText(
+            monitor,
+            [NSString stringWithFormat:@"%.1f GB", megabytes / 1024.0]);
     }
     FitKeepEyeMonitorToText(monitor);
     ScheduleLegacyStatusOverlayLayout();
@@ -2214,6 +2289,7 @@ static void InitializeLegacyTweakCompatibility(void) {
     LegacyWindowOwnerClasses = [NSMutableArray array];
     LegacyWindowOwnerNames = [NSMutableSet set];
     NoninteractiveWindowOwnerNames = [NSMutableSet set];
+    PassthroughWindowClassNames = [NSMutableSet set];
     WindowOwnerFrameImplementations = [NSMutableDictionary dictionary];
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
