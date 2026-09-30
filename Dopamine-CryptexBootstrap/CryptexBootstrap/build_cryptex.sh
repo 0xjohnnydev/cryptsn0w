@@ -740,6 +740,7 @@ for architecture in arm64 arm64e; do
         "$SBINJECT_SOURCE_DIR/litehook_rebind.c" \
         -framework Foundation \
         -framework CoreGraphics \
+        -framework IOKit \
         -framework UIKit \
         -install_name \
             /var/jb/usr/lib/sbinject/legacy-tweak-compat.dylib \

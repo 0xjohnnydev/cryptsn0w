@@ -127,8 +127,8 @@ static BOOL preference_filter_passes(id filter) {
 
 static NSDictionary<NSString *, NSDictionary *> *entries_by_title(void) {
     static NSDictionary<NSString *, NSDictionary *> *entries;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
+    @synchronized (kPL27PreferencesDirectory) {
+        if (entries != nil) return entries;
         NSMutableDictionary<NSString *, NSDictionary *> *found =
             [NSMutableDictionary dictionary];
         NSDirectoryEnumerator<NSString *> *enumerator =
@@ -161,9 +161,10 @@ static NSDictionary<NSString *, NSDictionary *> *entries_by_title(void) {
                 @"source" : path.stringByDeletingLastPathComponent,
             };
         }
-        entries = [found copy];
-    });
-    return entries;
+        NSDictionary *result = [found copy];
+        if (result.count > 0) entries = result;
+        return result;
+    }
 }
 
 static NSArray<NSString *> *preference_titles(void) {

@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <IOKit/IOKitLib.h>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -41,6 +42,9 @@
 
 typedef void (*WindowHiddenImplementation)(UIWindow *, SEL, BOOL);
 typedef void (*WindowVisibleImplementation)(UIWindow *, SEL);
+typedef void (*WindowOwnerFrameImplementation)(id, SEL);
+typedef void (*MonitorUpdateImplementation)(id, SEL);
+typedef id (*BatteryDictionaryImplementation)(id, SEL);
 typedef CGFloat (*RowHeightImplementation)(id, SEL, UITableView *, NSIndexPath *);
 typedef void (*CellLayoutImplementation)(UITableViewCell *, SEL);
 typedef id (*ObjectGetterImplementation)(id, SEL);
@@ -55,6 +59,16 @@ static WindowVisibleImplementation OriginalWindowMakeKeyAndVisible;
 static NSMutableDictionary<NSString *, NSValue *> *HeightImplementations;
 static NSMutableDictionary<NSString *, NSValue *> *LayoutImplementations;
 static NSHashTable<UIWindow *> *OrphanWindows;
+static NSMutableArray<Class> *LegacyWindowOwnerClasses;
+static NSMutableSet<NSString *> *LegacyWindowOwnerNames;
+static NSMutableDictionary<NSString *, NSValue *> *WindowOwnerFrameImplementations;
+static MonitorUpdateImplementation OriginalBatteryMonitorUpdate;
+static MonitorUpdateImplementation OriginalCPUMonitorUpdate;
+static MonitorUpdateImplementation OriginalRAMMonitorUpdate;
+static MonitorUpdateImplementation OriginalNetworkMonitorUpdate;
+static BatteryDictionaryImplementation OriginalBatteryDictionary;
+static io_service_t BatteryPackService;
+static BOOL KeepEyeDisplayCompatibilityInstalled;
 static char SubtitleLabelKey;
 static ObjectGetterImplementation OriginalApplicationShortcutItems;
 static ApplicationShortcutActivationImplementation
@@ -66,8 +80,15 @@ static id CompatFlashlightButton(id view, SEL selector);
 static id CompatCameraButton(id view, SEL selector);
 static float CompatCurrentVolume(id viewController, SEL selector);
 static void InstallSpringBoardQuickActionsHooks(void);
+static void LayoutLegacyStatusOverlayWindows(UIWindowScene *scene);
+static void ScheduleLegacyStatusOverlayLayout(void);
+static void ScheduleLegacyPreferenceRefresh(void);
 
 static _Atomic bool QuickActionsInstallScheduled;
+static _Atomic bool LegacyWindowRegistrationScheduled;
+static _Atomic bool LegacyWindowRepairScheduled;
+static _Atomic bool LegacyStatusLayoutScheduled;
+static _Atomic bool LegacyPreferenceRefreshScheduled;
 
 #define CODEX_MAX_PATH_MAPPINGS 32U
 
@@ -1071,11 +1092,13 @@ static BOOL AdoptWindowScene(UIWindow *window) {
 static void CompatWindowSetHidden(UIWindow *window, SEL selector, BOOL hidden) {
     if (!hidden) (void)AdoptWindowScene(window);
     OriginalWindowSetHidden(window, selector, hidden);
+    if (!hidden) ScheduleLegacyStatusOverlayLayout();
 }
 
 static void CompatWindowMakeKeyAndVisible(UIWindow *window, SEL selector) {
     (void)AdoptWindowScene(window);
     OriginalWindowMakeKeyAndVisible(window, selector);
+    ScheduleLegacyStatusOverlayLayout();
 }
 
 static void RepairOrphanWindows(void) {
@@ -1086,6 +1109,591 @@ static void RepairOrphanWindows(void) {
     for (UIWindow *window in windows) {
         (void)AdoptWindowScene(window);
     }
+}
+
+static BOOL TweakInjectionImage(NSString *path) {
+    if (path.length == 0 || [path containsString:@"/usr/lib/sbinject/"]) {
+        return NO;
+    }
+    return [path containsString:@"/Library/MobileSubstrate/DynamicLibraries/"] ||
+           [path containsString:@"/Library/TweakInject/"] ||
+           [path containsString:@"/usr/lib/TweakInject/"];
+}
+
+static BOOL ObjectReturningNoArgumentMethod(Method method) {
+    if (method == NULL || method_getNumberOfArguments(method) != 2) return NO;
+    char returnType[8] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    return returnType[0] == '@';
+}
+
+static WindowOwnerFrameImplementation WindowOwnerFrameImplementationForClass(
+    Class cls) {
+    @synchronized (WindowOwnerFrameImplementations) {
+        for (Class cursor = cls; cursor != Nil;
+             cursor = class_getSuperclass(cursor)) {
+            NSValue *value = WindowOwnerFrameImplementations[
+                NSStringFromClass(cursor)];
+            if (value != nil) return value.pointerValue;
+        }
+    }
+    return NULL;
+}
+
+static void CompatWindowOwnerUpdateFrame(id owner, SEL selector) {
+    WindowOwnerFrameImplementation original =
+        WindowOwnerFrameImplementationForClass((Class)[owner class]);
+    if (original != NULL) original(owner, selector);
+    if (NSThread.isMainThread) {
+        UIWindowScene *scene = ActiveWindowScene();
+        if (scene != nil) LayoutLegacyStatusOverlayWindows(scene);
+    } else {
+        ScheduleLegacyStatusOverlayLayout();
+    }
+}
+
+static void InstallLegacyWindowOwnerFrameHook(Class cls) {
+    SEL selector = sel_registerName("updateFrame");
+    Method method = class_getInstanceMethod(cls, selector);
+    if (method == NULL || method_getNumberOfArguments(method) != 2) return;
+    NSString *name = NSStringFromClass(cls);
+    @synchronized (WindowOwnerFrameImplementations) {
+        if (WindowOwnerFrameImplementations[name] != nil) return;
+        IMP original = method_getImplementation(method);
+        if (original == (IMP)CompatWindowOwnerUpdateFrame) return;
+        IMP replaced = class_replaceMethod(
+            cls, selector, (IMP)CompatWindowOwnerUpdateFrame,
+            method_getTypeEncoding(method));
+        if (replaced != NULL) original = replaced;
+        WindowOwnerFrameImplementations[name] =
+            [NSValue valueWithPointer:original];
+    }
+}
+
+static id KeepEyeLabel(id monitor) {
+    SEL selector = sel_registerName("label");
+    if (![monitor respondsToSelector:selector]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(monitor, selector);
+}
+
+static void SetKeepEyeLabelText(id monitor, NSString *text) {
+    id label = KeepEyeLabel(monitor);
+    if (label == nil || text == nil ||
+        ![label respondsToSelector:@selector(setText:)]) {
+        return;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(label, @selector(setText:), text);
+}
+
+static NSString *KeepEyeLabelText(id monitor) {
+    id label = KeepEyeLabel(monitor);
+    if (label == nil || ![label respondsToSelector:@selector(text)]) {
+        return nil;
+    }
+    id text = ((id (*)(id, SEL))objc_msgSend)(label, @selector(text));
+    return [text isKindOfClass:NSString.class] ? text : nil;
+}
+
+static void FitKeepEyeMonitorToText(id monitor) {
+    id label = KeepEyeLabel(monitor);
+    SEL windowSelector = sel_registerName("springboardWindow");
+    if (label == nil || ![label respondsToSelector:@selector(sizeThatFits:)] ||
+        ![monitor respondsToSelector:windowSelector]) {
+        return;
+    }
+    UIWindow *window = ((id (*)(id, SEL))objc_msgSend)(monitor,
+                                                       windowSelector);
+    if (![window isKindOfClass:UIWindow.class]) return;
+
+    CGRect frame = window.frame;
+    CGSize textSize = ((CGSize (*)(id, SEL, CGSize))objc_msgSend)(
+        label, @selector(sizeThatFits:),
+        CGSizeMake(CGFLOAT_MAX, MAX(1.0, CGRectGetHeight(frame))));
+    CGFloat width = MAX(CGRectGetWidth(frame), ceil(textSize.width) + 10.0);
+    frame.size.width = MIN(width, 180.0);
+    window.frame = frame;
+
+    CGFloat height = CGRectGetHeight(frame);
+    CGFloat innerWidth = MAX(0.0, CGRectGetWidth(frame) - 8.0);
+    for (NSString *selectorName in @[@"backView", @"content"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![monitor respondsToSelector:selector]) continue;
+        id view = ((id (*)(id, SEL))objc_msgSend)(monitor, selector);
+        if (![view isKindOfClass:UIView.class]) continue;
+        CGRect bounds = [selectorName isEqualToString:@"backView"]
+            ? CGRectMake(0.0, 0.0, CGRectGetWidth(frame), height)
+            : CGRectMake(4.0, 0.0, innerWidth, height);
+        ((void (*)(id, SEL, CGRect))objc_msgSend)(view,
+                                                  @selector(setFrame:), bounds);
+    }
+    if ([label isKindOfClass:UIView.class]) {
+        ((UIView *)label).frame = CGRectMake(0.0, 0.0, innerWidth, height);
+    }
+    if ([label respondsToSelector:@selector(setAdjustsFontSizeToFitWidth:)]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(
+            label, @selector(setAdjustsFontSizeToFitWidth:), YES);
+    }
+    if ([label respondsToSelector:@selector(setMinimumScaleFactor:)]) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(
+            label, @selector(setMinimumScaleFactor:), 0.6);
+    }
+    if (NSThread.isMainThread) {
+        UIWindowScene *scene = ActiveWindowScene();
+        if (scene != nil) LayoutLegacyStatusOverlayWindows(scene);
+    } else {
+        ScheduleLegacyStatusOverlayLayout();
+    }
+}
+
+static id KeepEyeBatteryDictionary(id monitor, SEL selector) {
+    id dictionary = OriginalBatteryDictionary == NULL
+        ? nil
+        : OriginalBatteryDictionary(monitor, selector);
+    if (![dictionary isKindOfClass:NSDictionary.class] ||
+        dictionary[@"Temperature"] != nil) {
+        return dictionary;
+    }
+
+    if (BatteryPackService == IO_OBJECT_NULL) {
+        BatteryPackService = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("AppleSmartBatteryPack"));
+    }
+    if (BatteryPackService == IO_OBJECT_NULL) return dictionary;
+
+    CFMutableDictionaryRef properties = NULL;
+    kern_return_t result = IORegistryEntryCreateCFProperties(
+        BatteryPackService, &properties, kCFAllocatorDefault, 0);
+    if (result != KERN_SUCCESS || properties == NULL) return dictionary;
+
+    NSDictionary *propertyDictionary = CFBridgingRelease(properties);
+    id batteryData = propertyDictionary[@"BatteryData"];
+    id temperature = [batteryData isKindOfClass:NSDictionary.class]
+        ? batteryData[@"Temperature"]
+        : nil;
+    if (temperature == nil) return dictionary;
+
+    NSMutableDictionary *updated = [dictionary mutableCopy];
+    updated[@"Temperature"] = temperature;
+    return updated;
+}
+
+static void KeepEyeBatteryUpdate(id monitor, SEL selector) {
+    if (OriginalBatteryMonitorUpdate != NULL) {
+        OriginalBatteryMonitorUpdate(monitor, selector);
+    }
+    NSString *text = KeepEyeLabelText(monitor);
+    NSRange degree = [text rangeOfString:@"°"];
+    if (degree.location == NSNotFound) {
+        ScheduleLegacyStatusOverlayLayout();
+        return;
+    }
+
+    NSString *number = [text substringToIndex:degree.location];
+    NSScanner *scanner = [NSScanner scannerWithString:number];
+    double celsius = 0.0;
+    if (![scanner scanDouble:&celsius] || !scanner.isAtEnd) {
+        ScheduleLegacyStatusOverlayLayout();
+        return;
+    }
+    NSString *suffix = [text substringFromIndex:NSMaxRange(degree)];
+    SetKeepEyeLabelText(
+        monitor,
+        [NSString stringWithFormat:@"%.1f°%@", celsius * 9.0 / 5.0 + 32.0,
+                                   suffix]);
+    FitKeepEyeMonitorToText(monitor);
+    ScheduleLegacyStatusOverlayLayout();
+}
+
+static void KeepEyeCPUUpdate(id monitor, SEL selector) {
+    if (OriginalCPUMonitorUpdate != NULL) {
+        OriginalCPUMonitorUpdate(monitor, selector);
+    }
+    FitKeepEyeMonitorToText(monitor);
+    ScheduleLegacyStatusOverlayLayout();
+}
+
+static void KeepEyeRAMUpdate(id monitor, SEL selector) {
+    if (OriginalRAMMonitorUpdate != NULL) {
+        OriginalRAMMonitorUpdate(monitor, selector);
+    }
+    NSString *text = KeepEyeLabelText(monitor);
+    NSScanner *scanner = [NSScanner scannerWithString:text ?: @""];
+    double megabytes = 0.0;
+    if ([scanner scanDouble:&megabytes]) {
+        NSString *unit = [[text substringFromIndex:scanner.scanLocation]
+            stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceCharacterSet];
+        if ([unit isEqualToString:@"MB"] && megabytes >= 1024.0) {
+            SetKeepEyeLabelText(
+                monitor,
+                [NSString stringWithFormat:@"%.1f GB", megabytes / 1024.0]);
+        }
+    }
+    FitKeepEyeMonitorToText(monitor);
+    ScheduleLegacyStatusOverlayLayout();
+}
+
+static void KeepEyeNetworkUpdate(id monitor, SEL selector) {
+    if (OriginalNetworkMonitorUpdate != NULL) {
+        OriginalNetworkMonitorUpdate(monitor, selector);
+    }
+    NSString *text = KeepEyeLabelText(monitor);
+    NSDictionary<NSString *, NSString *> *units = @{
+        @"K/s" : @"kb/s",
+        @"M/s" : @"mb/s",
+        @"G/s" : @"gb/s",
+        @"B/s" : @"b/s",
+    };
+    for (NSString *unit in units) {
+        text = [text stringByReplacingOccurrencesOfString:unit
+                                               withString:units[unit]];
+    }
+    SetKeepEyeLabelText(monitor, text);
+    FitKeepEyeMonitorToText(monitor);
+    ScheduleLegacyStatusOverlayLayout();
+}
+
+static BOOL InstallKeepEyeUpdateHook(Class cls, IMP replacement,
+                                     MonitorUpdateImplementation *original) {
+    Method method = class_getInstanceMethod(cls, sel_registerName("update"));
+    if (method == NULL || method_getNumberOfArguments(method) != 2) return NO;
+    IMP current = method_getImplementation(method);
+    if (current == replacement) return *original != NULL;
+    *original = (MonitorUpdateImplementation)
+        method_setImplementation(method, replacement);
+    return *original != NULL;
+}
+
+static void InstallKeepEyeDisplayCompatibility(void) {
+    if (KeepEyeDisplayCompatibilityInstalled || !IsSpringBoardProcess()) {
+        return;
+    }
+    Class batteryClass = objc_getClass("BattMonitor");
+    Class ramClass = objc_getClass("RAMMonitor");
+    Class networkClass = objc_getClass("NetMonitor");
+    Class cpuClass = objc_getClass("CPUMonitor");
+    if (batteryClass == Nil || ramClass == Nil || networkClass == Nil ||
+        cpuClass == Nil) {
+        return;
+    }
+
+    const char *image = class_getImageName(batteryClass);
+    const char *ramImage = class_getImageName(ramClass);
+    const char *networkImage = class_getImageName(networkClass);
+    const char *cpuImage = class_getImageName(cpuClass);
+    if (image == NULL || ramImage == NULL || networkImage == NULL ||
+        cpuImage == NULL || strcmp(image, ramImage) != 0 ||
+        strcmp(image, networkImage) != 0 || strcmp(image, cpuImage) != 0 ||
+        !TweakInjectionImage([NSString stringWithUTF8String:image])) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_ERROR,
+                         "KeepEye display compatibility image check failed");
+        return;
+    }
+
+    Method dictionaryMethod = class_getInstanceMethod(
+        batteryClass, sel_registerName("dicPrivateBatt"));
+    if (dictionaryMethod == NULL ||
+        !ObjectReturningNoArgumentMethod(dictionaryMethod)) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_ERROR,
+                         "KeepEye battery dictionary method is unavailable");
+        return;
+    }
+    IMP currentDictionary = method_getImplementation(dictionaryMethod);
+    if (currentDictionary != (IMP)KeepEyeBatteryDictionary) {
+        OriginalBatteryDictionary = (BatteryDictionaryImplementation)
+            method_setImplementation(dictionaryMethod,
+                                     (IMP)KeepEyeBatteryDictionary);
+    }
+    if (OriginalBatteryDictionary == NULL ||
+        !InstallKeepEyeUpdateHook(batteryClass,
+                                  (IMP)KeepEyeBatteryUpdate,
+                                  &OriginalBatteryMonitorUpdate) ||
+        !InstallKeepEyeUpdateHook(cpuClass, (IMP)KeepEyeCPUUpdate,
+                                  &OriginalCPUMonitorUpdate) ||
+        !InstallKeepEyeUpdateHook(ramClass, (IMP)KeepEyeRAMUpdate,
+                                  &OriginalRAMMonitorUpdate) ||
+        !InstallKeepEyeUpdateHook(networkClass,
+                                  (IMP)KeepEyeNetworkUpdate,
+                                  &OriginalNetworkMonitorUpdate)) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_ERROR,
+                         "KeepEye display compatibility hook failed");
+        return;
+    }
+
+    KeepEyeDisplayCompatibilityInstalled = YES;
+    os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                     "installed KeepEye display compatibility");
+}
+
+static void RegisterLegacyWindowOwnersInImage(NSString *path) {
+    if (!IsSpringBoardProcess() || !TweakInjectionImage(path)) return;
+    unsigned int count = 0;
+    const char **names = objc_copyClassNamesForImage(
+        path.fileSystemRepresentation, &count);
+    SEL sharedSelector = sel_registerName("sharedInstance");
+    SEL windowSelector = sel_registerName("springboardWindow");
+    for (unsigned int index = 0; index < count; ++index) {
+        Class cls = objc_getClass(names[index]);
+        if (cls == Nil ||
+            !ObjectReturningNoArgumentMethod(
+                class_getClassMethod(cls, sharedSelector)) ||
+            !ObjectReturningNoArgumentMethod(
+                class_getInstanceMethod(cls, windowSelector))) {
+            continue;
+        }
+        NSString *name = NSStringFromClass(cls);
+        if ([LegacyWindowOwnerNames containsObject:name]) continue;
+        [LegacyWindowOwnerNames addObject:name];
+        [LegacyWindowOwnerClasses addObject:cls];
+        InstallLegacyWindowOwnerFrameHook(cls);
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "registered legacy window owner class=%{public}s",
+                         class_getName(cls));
+    }
+    free(names);
+}
+
+static BOOL RepairLegacyWindowOwners(void) {
+    if (!IsSpringBoardProcess() || LegacyWindowOwnerClasses.count == 0) {
+        return YES;
+    }
+    UIWindowScene *scene = ActiveWindowScene();
+    if (scene == nil) return NO;
+
+    BOOL ready = YES;
+    SEL sharedSelector = sel_registerName("sharedInstance");
+    SEL windowSelector = sel_registerName("springboardWindow");
+    SEL updateFrameSelector = sel_registerName("updateFrame");
+    for (Class cls in [LegacyWindowOwnerClasses copy]) {
+        @try {
+            id owner = ((id (*)(id, SEL))objc_msgSend)(cls, sharedSelector);
+            if (owner == nil) {
+                ready = NO;
+                continue;
+            }
+            UIWindow *window = ((id (*)(id, SEL))objc_msgSend)(
+                owner, windowSelector);
+            if (![window isKindOfClass:UIWindow.class]) {
+                ready = NO;
+                continue;
+            }
+            if (window.windowScene != scene) window.windowScene = scene;
+            if ([owner respondsToSelector:updateFrameSelector]) {
+                ((void (*)(id, SEL))objc_msgSend)(owner,
+                                                  updateFrameSelector);
+            }
+            if (!window.hidden) window.hidden = NO;
+        } @catch (NSException *exception) {
+            ready = NO;
+            os_log_with_type(
+                CompatLog(), OS_LOG_TYPE_ERROR,
+                "legacy window owner failed class=%{public}s reason=%{public}s",
+                class_getName(cls), exception.reason.UTF8String);
+        }
+    }
+    return ready;
+}
+
+static BOOL IsLegacyStatusOverlayWindow(UIWindow *window,
+                                        CGRect statusBarFrame) {
+    const char *image = class_getImageName(window.class);
+    if (image == NULL ||
+        !TweakInjectionImage([NSString stringWithUTF8String:image]) ||
+        window.hidden || window.alpha <= 0.0 ||
+        window.rootViewController != nil) {
+        return NO;
+    }
+    CGRect frame = window.frame;
+    return frame.size.width >= 16.0 && frame.size.width <= 180.0 &&
+           frame.size.height >= 8.0 && frame.size.height <= 44.0 &&
+           CGRectGetMinY(frame) >= 0.0 &&
+           CGRectGetMinY(frame) <= CGRectGetMaxY(statusBarFrame) + 20.0;
+}
+
+static void LayoutLegacyStatusOverlayWindows(UIWindowScene *scene) {
+    CGRect screenBounds = scene.screen.bounds;
+    CGRect statusBarFrame = scene.statusBarManager.statusBarFrame;
+    if (screenBounds.size.width <= 0.0 ||
+        CGRectGetMaxY(statusBarFrame) < 50.0) {
+        return;
+    }
+
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    for (UIWindow *window in scene.windows) {
+        if (IsLegacyStatusOverlayWindow(window, statusBarFrame)) {
+            [windows addObject:window];
+        }
+    }
+    if (windows.count < 2U || windows.count > 12U) return;
+    [windows sortUsingComparator:^NSComparisonResult(UIWindow *left,
+                                                       UIWindow *right) {
+        CGFloat difference = CGRectGetMinX(left.frame) -
+                             CGRectGetMinX(right.frame);
+        return difference < 0.0 ? NSOrderedAscending :
+               difference > 0.0 ? NSOrderedDescending : NSOrderedSame;
+    }];
+
+    CGFloat spacing = 8.0;
+    CGFloat contentWidth = 0.0;
+    CGFloat rowHeight = 0.0;
+    for (UIWindow *window in windows) {
+        contentWidth += CGRectGetWidth(window.frame);
+        rowHeight = MAX(rowHeight, CGRectGetHeight(window.frame));
+    }
+    CGFloat availableWidth = CGRectGetWidth(screenBounds) - 16.0;
+    CGFloat rowWidth = contentWidth + spacing * (windows.count - 1U);
+    if (rowWidth > availableWidth) {
+        spacing = 4.0;
+        rowWidth = contentWidth + spacing * (windows.count - 1U);
+    }
+    CGFloat widthScale = rowWidth > availableWidth && contentWidth > 0.0
+        ? (availableWidth - spacing * (windows.count - 1U)) / contentWidth
+        : 1.0;
+    rowWidth = contentWidth * widthScale + spacing * (windows.count - 1U);
+
+    CGFloat screenScale = MAX(1.0, scene.screen.scale);
+    CGFloat x = CGRectGetMinX(screenBounds) +
+                (CGRectGetWidth(screenBounds) - rowWidth) / 2.0;
+    CGFloat y = CGRectGetMaxY(statusBarFrame) + 2.0;
+    BOOL changed = NO;
+    for (UIWindow *window in windows) {
+        CGFloat width = CGRectGetWidth(window.frame) * widthScale;
+        CGRect frame = CGRectMake(round(x * screenScale) / screenScale,
+                                  round(y * screenScale) / screenScale,
+                                  round(width * screenScale) / screenScale,
+                                  rowHeight);
+        if (!CGRectEqualToRect(window.frame, frame)) {
+            window.frame = frame;
+            changed = YES;
+        }
+        x += width + spacing;
+    }
+    if (changed) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "aligned %lu legacy status overlays below cutout",
+                         (unsigned long)windows.count);
+    }
+}
+
+static void ScheduleLegacyStatusOverlayLayout(void) {
+    if (!IsSpringBoardProcess() ||
+        atomic_exchange(&LegacyStatusLayoutScheduled, true)) {
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        UIWindowScene *scene = ActiveWindowScene();
+        if (scene != nil) LayoutLegacyStatusOverlayWindows(scene);
+        atomic_store(&LegacyStatusLayoutScheduled, false);
+    });
+}
+
+static void RefreshLegacyPreferenceObservers(void) {
+    if (LegacyWindowOwnerClasses.count == 0) return;
+    NSString *directory = @"/var/jb/Library/PreferenceLoader/Preferences";
+    NSArray<NSString *> *files =
+        [NSFileManager.defaultManager contentsOfDirectoryAtPath:directory
+                                                          error:nil];
+    NSMutableSet<NSString *> *domains = [NSMutableSet set];
+    for (NSString *file in files) {
+        if (![file.pathExtension.lowercaseString isEqualToString:@"plist"]) {
+            continue;
+        }
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:
+            [directory stringByAppendingPathComponent:file]];
+        NSString *bundleName = plist[@"entry"][@"bundle"];
+        if (![bundleName isKindOfClass:NSString.class] ||
+            bundleName.length == 0) {
+            continue;
+        }
+        NSString *infoPath = [NSString stringWithFormat:
+            @"/var/jb/Library/PreferenceBundles/%@.bundle/Info.plist",
+            bundleName];
+        NSString *identifier =
+            [NSDictionary dictionaryWithContentsOfFile:infoPath]
+                [@"CFBundleIdentifier"];
+        if (![identifier isKindOfClass:NSString.class]) continue;
+        NSString *lowercase = identifier.lowercaseString;
+        for (NSString *suffix in @[@".settings", @".preferences", @".prefs"]) {
+            if (![lowercase hasSuffix:suffix] ||
+                identifier.length <= suffix.length) {
+                continue;
+            }
+            [domains addObject:[identifier substringToIndex:
+                identifier.length - suffix.length]];
+            break;
+        }
+    }
+    for (NSString *domain in domains) {
+        NSString *notification = [domain stringByAppendingString:@"/Settings"];
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge CFStringRef)notification, NULL, NULL, true);
+    }
+    if (domains.count > 0) {
+        os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
+                         "refreshed %lu legacy preference observer(s)",
+                         (unsigned long)domains.count);
+    }
+}
+
+static void ScheduleLegacyPreferenceRefresh(void) {
+    if (!IsSpringBoardProcess() ||
+        atomic_exchange(&LegacyPreferenceRefreshScheduled, true)) {
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        if (LegacyWindowOwnerClasses.count == 0) {
+            atomic_store(&LegacyPreferenceRefreshScheduled, false);
+            return;
+        }
+        RefreshLegacyPreferenceObservers();
+    });
+}
+
+static void RepairLegacyWindowOwnersWithRetry(NSUInteger attempt) {
+    RepairOrphanWindows();
+    BOOL ready = RepairLegacyWindowOwners();
+    ScheduleLegacyStatusOverlayLayout();
+    if (ready || attempt >= 40U) {
+        atomic_store(&LegacyWindowRepairScheduled, false);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2),
+                   dispatch_get_main_queue(), ^{
+        RepairLegacyWindowOwnersWithRetry(attempt + 1U);
+    });
+}
+
+static void ScheduleLegacyWindowOwnerRepair(void) {
+    if (atomic_exchange(&LegacyWindowRepairScheduled, true)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RepairLegacyWindowOwnersWithRetry(0);
+    });
+}
+
+static void RegisterLoadedLegacyWindowOwners(void) {
+    uint32_t count = _dyld_image_count();
+    for (uint32_t index = 0; index < count; ++index) {
+        const char *path = _dyld_get_image_name(index);
+        if (path != NULL) {
+            RegisterLegacyWindowOwnersInImage(
+                [NSString stringWithUTF8String:path]);
+        }
+    }
+    InstallKeepEyeDisplayCompatibility();
+    ScheduleLegacyWindowOwnerRepair();
+    ScheduleLegacyPreferenceRefresh();
+}
+
+static void ScheduleLoadedLegacyWindowOwners(void) {
+    if (atomic_exchange(&LegacyWindowRegistrationScheduled, true)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        RegisterLoadedLegacyWindowOwners();
+        atomic_store(&LegacyWindowRegistrationScheduled, false);
+    });
 }
 
 static void InstallWindowHooks(void) {
@@ -1389,6 +1997,7 @@ static void ScheduleSpringBoardQuickActionsHooks(void) {
 static void CompatObjectiveCImageDidLoad(
     __unused const struct mach_header *header) {
     ScheduleSpringBoardQuickActionsHooks();
+    ScheduleLoadedLegacyWindowOwners();
 }
 
 static IMP OriginalImplementation(NSDictionary<NSString *, NSValue *> *table,
@@ -1558,6 +2167,7 @@ bool codex_legacy_tweak_compat_apply(void) {
     InstallSpringBoardFolderHooks();
     InstallSpringBoardShortcutHooks();
     InstallSpringBoardQuickActionsHooks();
+    ScheduleLegacyWindowOwnerRepair();
     if (NSThread.isMainThread) {
         InstallPreferenceHooks();
         RepairOrphanWindows();
@@ -1580,6 +2190,9 @@ static void InitializeLegacyTweakCompatibility(void) {
     HeightImplementations = [NSMutableDictionary dictionary];
     LayoutImplementations = [NSMutableDictionary dictionary];
     OrphanWindows = [NSHashTable weakObjectsHashTable];
+    LegacyWindowOwnerClasses = [NSMutableArray array];
+    LegacyWindowOwnerNames = [NSMutableSet set];
+    WindowOwnerFrameImplementations = [NSMutableDictionary dictionary];
     OriginalSystem = (SystemImplementation)dlsym(RTLD_DEFAULT, "system");
     InstallWindowHooks();
     ApplyConfiguredAliases();
@@ -1601,19 +2214,20 @@ static void InitializeLegacyTweakCompatibility(void) {
         InstallSpringBoardShortcutHooks();
         InstallSpringBoardQuickActionsHooks();
         InstallPreferenceHooks();
+        ScheduleLoadedLegacyWindowOwners();
     }];
     [NSNotificationCenter.defaultCenter
         addObserverForName:UISceneDidActivateNotification
                     object:nil
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(__unused NSNotification *notification) {
-        RepairOrphanWindows();
+        ScheduleLegacyWindowOwnerRepair();
     }];
     dispatch_async(dispatch_get_main_queue(), ^{
         InstallSpringBoardFolderHooks();
         InstallSpringBoardQuickActionsHooks();
         InstallPreferenceHooks();
-        RepairOrphanWindows();
+        ScheduleLoadedLegacyWindowOwners();
     });
     os_log_with_type(CompatLog(), OS_LOG_TYPE_DEFAULT,
                      "iOS 27 legacy tweak compatibility ready");
