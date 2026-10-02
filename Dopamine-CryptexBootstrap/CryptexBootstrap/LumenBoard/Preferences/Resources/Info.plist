@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>de</string></array>
+  <key>CFBundleDisplayName</key><string>☆ Rebug</string>
+  <key>CFBundleExecutable</key><string>LumenBoardPrefs</string>
+  <key>CFBundleIdentifier</key><string>com.xsxs18.lumenboard.preferences</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>LumenBoardPrefs</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleShortVersionString</key><string>1.0.0+codex7</string>
+  <key>CFBundleVersion</key><string>7</string>
+  <key>NSPrincipalClass</key><string>LMRootViewController</string>
+</dict>
+</plist>

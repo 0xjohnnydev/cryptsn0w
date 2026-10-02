@@ -1,0 +1,15 @@
+#!/bin/sh
+# roothide runs this inside the jbroot, so its paths have no prefix
+if [ "$DPKG_MAINTSCRIPT_ARCH" = "iphoneos-arm64e" ]; then
+  JB=""
+else
+  JB=/var/jb
+  [ -d "$JB" ] || JB=""
+fi
+
+mkdir -p "$JB/var/mobile/Library/LumenBoard" "$JB/Library/Themes"
+chown -R mobile:mobile "$JB/var/mobile/Library/LumenBoard" 2>/dev/null
+chmod 0755 "$JB/var/mobile/Library/LumenBoard"
+
+killall -9 iconservicesagent 2>/dev/null
+exit 0

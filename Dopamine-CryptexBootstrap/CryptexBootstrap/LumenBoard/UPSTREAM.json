@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/xsxs18-dev/LumenBoard",
+  "commit": "7a7f1a62e2a8cca232bdd75191fdfecad5b0ac68",
+  "license": "MIT",
+  "packageVersion": "1.0.0+codex7",
+  "changes": "Replace the standalone app with a Settings pane branded ☆ Rebug using the supplied logo; polish grouped appearance controls, adaptive theme rows, a fixed Apply button, and accessible progress sheets. Render app and Control Center PNG artwork, masks, and effect layers locally; classify packs and allow generation-checked continuation after partial failures. Preserve Small icon sizing with hidden labels. Add independent Apply dock only updates without altering artwork or applying pending theme and label selections. Preserve original package and configuration identifiers for upgrades. Expose Hide dock background only and Apply dock only directly on the main pane; label Appearance navigation explicitly."
+}

@@ -1,0 +1,12 @@
+Package: com.xsxs18.lumenboard
+Name: ☆ Rebug
+Version: 1.0.0+codex7
+Architecture: iphoneos-arm64
+Description: Rebug Home Screen and Control Center themes in Settings, with independent dock background controls. Based on LumenBoard.
+Maintainer: xsxs18-dev
+Author: xsxs18-dev
+Section: Tweaks
+Depends: mobilesubstrate, preferenceloader (>= 2.3.3), firmware (>= 17.0)
+Provides: com.spark.snowboard, com.anemonetheming.anemone, winterboard
+Conflicts: com.spark.snowboard, com.anemonetheming.anemone, winterboard, com.artikus.neonboard, com.xsxs18.neonboard, com.xsxs18.avalanche, com.xsxs18.lumen
+Replaces: com.xsxs18.avalanche, com.xsxs18.lumen

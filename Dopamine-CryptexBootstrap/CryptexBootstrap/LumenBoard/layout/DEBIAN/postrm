@@ -1,0 +1,21 @@
+#!/bin/sh
+# roothide runs this inside the jbroot: no prefix for jailbreak paths, /rootfs for system paths
+if [ "$DPKG_MAINTSCRIPT_ARCH" = "iphoneos-arm64e" ]; then
+  JB=""
+  ROOTFS=/rootfs
+else
+  JB=/var/jb
+  [ -d "$JB" ] || JB=""
+  ROOTFS=""
+fi
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+  rm -f "$JB/var/mobile/Library/LumenBoard/IconMap.plist"
+  [ "$1" = "purge" ] && rm -rf "$JB/var/mobile/Library/LumenBoard"
+  # drop the cached theme icons
+  rm -rf "$ROOTFS/var/containers/Shared/SystemGroup/systemgroup.com.apple.lsd.iconscache/Library/Caches/com.apple.IconsCache"
+  rm -rf "$ROOTFS/var/mobile/Library/Caches/com.apple.IconsCache"
+  killall -9 iconservicesagent 2>/dev/null
+  uicache 2>/dev/null
+fi
+exit 0
