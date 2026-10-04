@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -303,50 +304,118 @@ static kern_return_t read_remote(task_t task, mach_vm_address_t address,
     return result;
 }
 
-static bool local_macho_has_uuid(NSString *path,
-                                 const uint8_t expected[16],
-                                 uint32_t expectedFiletype) {
-    if (path.length == 0) return false;
+static bool local_ring_component(NSString *path, uint8_t uuidOut[16],
+                                 uint64_t *returnSiteOut) {
+    if (path.length == 0 || uuidOut == NULL || returnSiteOut == NULL) {
+        return false;
+    }
     int descriptor = open(path.fileSystemRepresentation,
                           O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (descriptor < 0) return false;
     struct stat status = {0};
-    struct mach_header_64 header = {0};
     bool valid = fstat(descriptor, &status) == 0 &&
         S_ISREG(status.st_mode) && status.st_nlink == 1 &&
-        pread(descriptor, &header, sizeof(header), 0) == sizeof(header) &&
-        header.magic == MH_MAGIC_64 && header.filetype == expectedFiletype &&
-        header.ncmds > 0 && header.ncmds <= 4096U &&
-        header.sizeofcmds > 0 && header.sizeofcmds <= 4U * 1024U * 1024U &&
-        (uint64_t)sizeof(header) + header.sizeofcmds <=
+        status.st_size >= (off_t)sizeof(struct mach_header_64) &&
+        status.st_size <= 512LL * 1024LL * 1024LL &&
+        (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+    uint8_t *bytes = valid
+        ? mmap(NULL, (size_t)status.st_size, PROT_READ, MAP_PRIVATE,
+               descriptor, 0)
+        : MAP_FAILED;
+    valid = valid && bytes != MAP_FAILED;
+    const struct mach_header_64 *header = valid
+        ? (const struct mach_header_64 *)bytes : NULL;
+    valid = valid && header->magic == MH_MAGIC_64 &&
+        header->filetype == MH_DYLIB &&
+        header->ncmds > 0 && header->ncmds <= 4096U &&
+        header->sizeofcmds > 0 &&
+        header->sizeofcmds <= 4U * 1024U * 1024U &&
+        (uint64_t)sizeof(*header) + header->sizeofcmds <=
             (uint64_t)status.st_size;
-    uint8_t *commands = valid ? malloc(header.sizeofcmds) : NULL;
-    valid = valid && commands != NULL &&
-        pread(descriptor, commands, header.sizeofcmds, sizeof(header)) ==
-            (ssize_t)header.sizeofcmds;
-    bool matched = false;
+    bool uuidFound = false;
+    uint8_t uuid[16] = {0};
+    uint64_t textAddress = 0;
+    uint64_t textOffset = 0;
+    uint64_t textSize = 0;
     if (valid) {
+        const uint8_t *commands = bytes + sizeof(*header);
         size_t offset = 0;
-        for (uint32_t index = 0; index < header.ncmds; ++index) {
-            if (offset + sizeof(struct load_command) > header.sizeofcmds) break;
-            struct load_command *command =
-                (struct load_command *)(commands + offset);
+        for (uint32_t index = 0; index < header->ncmds; ++index) {
+            if (offset + sizeof(struct load_command) > header->sizeofcmds) {
+                valid = false;
+                break;
+            }
+            const struct load_command *command =
+                (const struct load_command *)(commands + offset);
             if (command->cmdsize < sizeof(*command) ||
-                offset + command->cmdsize > header.sizeofcmds) {
+                offset + command->cmdsize > header->sizeofcmds) {
+                valid = false;
                 break;
             }
             if (command->cmd == LC_UUID &&
                 command->cmdsize >= sizeof(struct uuid_command)) {
-                struct uuid_command *uuid = (struct uuid_command *)command;
-                matched = memcmp(uuid->uuid, expected, 16) == 0;
-                break;
+                const struct uuid_command *uuidCommand =
+                    (const struct uuid_command *)command;
+                memcpy(uuid, uuidCommand->uuid, sizeof(uuid));
+                uuidFound = true;
+            } else if (command->cmd == LC_SEGMENT_64 &&
+                       command->cmdsize >= sizeof(struct segment_command_64)) {
+                const struct segment_command_64 *segment =
+                    (const struct segment_command_64 *)command;
+                uint64_t sectionsSize =
+                    (uint64_t)segment->nsects * sizeof(struct section_64);
+                if (sectionsSize > command->cmdsize - sizeof(*segment)) {
+                    valid = false;
+                    break;
+                }
+                const struct section_64 *sections =
+                    (const struct section_64 *)(segment + 1);
+                for (uint32_t sectionIndex = 0;
+                     sectionIndex < segment->nsects; ++sectionIndex) {
+                    const struct section_64 *section =
+                        &sections[sectionIndex];
+                    if (memcmp(section->segname, "__TEXT", 6) == 0 &&
+                        memcmp(section->sectname, "__text", 6) == 0) {
+                        textAddress = section->addr;
+                        textOffset = section->offset;
+                        textSize = section->size;
+                    }
+                }
             }
             offset += command->cmdsize;
         }
     }
-    free(commands);
+    static const uint8_t returnSitePattern[] = {
+        0x6a, 0x8a, 0x1d, 0x91, 0x4a, 0x01, 0x08, 0x8b,
+        0x49, 0x01, 0x00, 0x39, 0x09, 0x01, 0x40, 0xb2,
+        0x08, 0x01, 0x40, 0xd2, 0x29, 0xf9, 0x7f, 0xd3,
+        0x28, 0x01, 0x08, 0xcb, 0x1f, 0x39, 0x00, 0xf1,
+    };
+    valid = valid && uuidFound && textSize >= sizeof(returnSitePattern) &&
+        textOffset <= (uint64_t)status.st_size &&
+        textSize <= (uint64_t)status.st_size - textOffset;
+    uint64_t match = 0;
+    unsigned int matches = 0;
+    if (valid) {
+        for (uint64_t offset = 0;
+             offset <= textSize - sizeof(returnSitePattern); ++offset) {
+            if (memcmp(bytes + textOffset + offset, returnSitePattern,
+                       sizeof(returnSitePattern)) == 0) {
+                match = offset;
+                if (++matches > 1) break;
+            }
+        }
+    }
+    valid = valid && matches == 1;
+    if (valid) {
+        memcpy(uuidOut, uuid, sizeof(uuid));
+        *returnSiteOut = textAddress + match + 52U;
+    }
+    if (bytes != MAP_FAILED) {
+        munmap(bytes, (size_t)status.st_size);
+    }
     close(descriptor);
-    return matched;
+    return valid;
 }
 
 static bool remote_macho_has_uuid_type(task_t task,
@@ -385,49 +454,6 @@ static bool remote_macho_has_uuid_type(task_t task,
     }
     free(commands);
     return matched;
-}
-
-static bool find_remote_macho_with_uuid_type(task_t task,
-                                             const uint8_t expected[16],
-                                             uint32_t expectedFiletype,
-                                             mach_vm_address_t *addressOut) {
-    if (addressOut != NULL) *addressOut = 0;
-    mach_vm_address_t address = 0;
-    natural_t depth = 0;
-    for (unsigned int attempt = 0; attempt < 8192U; ++attempt) {
-        mach_vm_size_t size = 0;
-        vm_region_submap_info_data_64_t info = {0};
-        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
-        vm_address_t regionAddress = (vm_address_t)address;
-        vm_size_t regionSize = (vm_size_t)size;
-        kern_return_t result = vm_region_recurse_64(
-            task, &regionAddress, &regionSize, &depth,
-            (vm_region_recurse_info_t)&info, &count);
-        address = (mach_vm_address_t)regionAddress;
-        size = (mach_vm_size_t)regionSize;
-        if (result != KERN_SUCCESS || size == 0) break;
-        if (info.is_submap) {
-            ++depth;
-            continue;
-        }
-        if ((info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
-                (VM_PROT_READ | VM_PROT_EXECUTE) &&
-            remote_macho_has_uuid_type(task, address, expected,
-                                       expectedFiletype)) {
-            if (addressOut != NULL) *addressOut = address;
-            return true;
-        }
-        if (address > UINT64_MAX - size) break;
-        address += size;
-    }
-    return false;
-}
-
-static bool find_remote_macho_with_uuid(task_t task,
-                                        const uint8_t expected[16],
-                                        mach_vm_address_t *addressOut) {
-    return find_remote_macho_with_uuid_type(task, expected, MH_EXECUTE,
-                                            addressOut);
 }
 
 static vm_address_t write_remote_cstring(task_t task, const char *value,
@@ -562,24 +588,12 @@ static int replace_navy_detector_methods(task_t task,
         ![identifier isEqualToString:@"org.navyfederal.nfcuforiphone"]) {
         return 78;
     }
-    static const uint8_t expectedUUID[16] = {
-        0x22, 0xe7, 0x0c, 0x5a, 0x50, 0x71, 0x34, 0xf4,
-        0xb4, 0x68, 0xe8, 0x78, 0x74, 0xf6, 0x02, 0x31,
-    };
-    mach_vm_address_t image = 0;
-    if (!find_remote_macho_with_uuid(task, expectedUUID, &image)) {
-        unified_loader_log(
-            "navyRuntimePolicy identifier=%s matched=false",
-            identifier.UTF8String);
-        return 83;
-    }
-
     struct remote_objc_symbols symbols = {0};
     if (!resolve_remote_objc_symbols(task, allImageInfo, &symbols)) {
         unified_loader_log(
-            "navyRuntimePolicy identifier=%s image=0x%llx "
-            "objcSymbols=false complete=false",
-            identifier.UTF8String, image);
+            "navyRuntimePolicy identifier=%s objcSymbols=false "
+            "complete=false",
+            identifier.UTF8String);
         return 84;
     }
 
@@ -703,10 +717,10 @@ static int replace_navy_detector_methods(task_t task,
         }
     }
     unified_loader_log(
-        "navyRuntimePolicy identifier=%s image=0x%llx uuidMatch=true "
-        "thread=%d backbase=%s detector=%s zeroSource=%s methods=%s "
+        "navyRuntimePolicy identifier=%s thread=%d backbase=%s "
+        "detector=%s zeroSource=%s methods=%s "
         "falseImp=0x%llx zeroImp=0x%llx complete=%s",
-        identifier.UTF8String, image, threadResult,
+        identifier.UTF8String, threadResult,
         backbaseClass != 0 ? "true" : "false",
         detectorClass != 0 ? "true" : "false",
         zeroClass != 0 ? "true" : "false",
@@ -726,7 +740,7 @@ struct ring_exception_context {
     mach_port_t exceptionPort;
     bool active;
     bool recovered;
-    mach_vm_address_t iloqImage;
+    mach_vm_address_t componentImage;
     uint64_t pc;
     uint64_t lr;
     uint64_t x0;
@@ -734,6 +748,8 @@ struct ring_exception_context {
     uint32_t code0;
     uint32_t code1;
     int recoveryMode;
+    uint8_t componentUUID[16];
+    uint64_t componentReturnSite;
 };
 
 static struct ring_exception_context gRingExceptionContext = {0};
@@ -793,28 +809,24 @@ kern_return_t catch_exception_raise_state_identity(
     }
     if (!taskMatches) return KERN_FAILURE;
 
-    static const uint8_t expectedIloqUUID[16] = {
-        0xdd, 0x9d, 0x3e, 0x33, 0xa7, 0x51, 0x3b, 0x4a,
-        0xb9, 0x99, 0x69, 0xbf, 0x81, 0x8b, 0x02, 0xa1,
-    };
-    mach_vm_address_t iloqImage = 0;
-    if (!find_remote_macho_with_uuid_type(
-            task, expectedIloqUUID, MH_DYLIB, &iloqImage)) {
-        return KERN_FAILURE;
-    }
-
     arm_thread_state64_t state = {0};
     memcpy(&state, old_state, sizeof(state));
     uint64_t pc = (uint64_t)arm_thread_state64_get_pc(state);
     uint64_t lr = (uint64_t)arm_thread_state64_get_lr(state);
-    context->iloqImage = iloqImage;
+    mach_vm_address_t componentImage = lr >= context->componentReturnSite
+        ? (mach_vm_address_t)(lr - context->componentReturnSite) : 0;
+    context->componentImage = componentImage;
     context->pc = pc;
     context->lr = lr;
     context->x0 = state.__x[0];
     context->x1 = state.__x[1];
     context->code0 = (uint32_t)code[0];
     context->code1 = (uint32_t)code[1];
-    if (lr != iloqImage + 0x755b4ULL || state.__x[0] != 0x60ULL ||
+    if (componentImage == 0 ||
+        !remote_macho_has_uuid_type(task, componentImage,
+                                    context->componentUUID,
+                                    MH_DYLIB) ||
+        state.__x[0] != 0x60ULL ||
         state.__x[1] != 0x2dULL) {
         return KERN_FAILURE;
     }
@@ -861,33 +873,21 @@ static int protect_ring_initializer(task_t task, pid_t targetPid,
                                     const char *targetPath) {
     NSString *requested = targetPath != NULL
         ? [NSString stringWithUTF8String:targetPath] : nil;
-    NSString *resolved = nil;
     NSString *bundle = nil;
-    NSString *container = nil;
     NSString *identifier = nil;
-    struct stat status = {0};
-    if (!app_store_main_executable(requested, &resolved, &bundle, &container,
-                                   &identifier, &status) ||
+    if (!app_store_main_executable(requested, NULL, &bundle, NULL,
+                                   &identifier, NULL) ||
         ![identifier isEqualToString:@"com.ring"]) {
         return 78;
     }
-    NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
-        [bundle stringByAppendingPathComponent:@"Info.plist"]];
-    if (![info[@"CFBundleShortVersionString"] isEqual:@"5.113.0"] ||
-        ![info[@"CFBundleVersion"] isEqual:@"5.113.0.20"]) {
+    NSString *componentPath = [bundle stringByAppendingPathComponent:
+        @"Frameworks/iLOQLockCommunicationSDK.framework/iLOQLockCommunicationSDK"];
+    uint8_t componentUUID[16] = {0};
+    uint64_t componentReturnSite = 0;
+    if (!local_ring_component(componentPath, componentUUID,
+                              &componentReturnSite)) {
         unified_loader_log(
-            "ringRuntimePolicy identifier=%s versionMatch=false",
-            identifier.UTF8String);
-        return 83;
-    }
-
-    static const uint8_t expectedMainUUID[16] = {
-        0xf6, 0x14, 0xab, 0xbc, 0xdb, 0x5b, 0x30, 0xbf,
-        0x97, 0x18, 0xaa, 0x1f, 0xb4, 0xe9, 0x3a, 0xdb,
-    };
-    if (!local_macho_has_uuid(resolved, expectedMainUUID, MH_EXECUTE)) {
-        unified_loader_log(
-            "ringRuntimePolicy identifier=%s mainUuidMatch=false",
+            "ringRuntimePolicy identifier=%s componentCompatible=false",
             identifier.UTF8String);
         return 83;
     }
@@ -922,7 +922,10 @@ static int protect_ring_initializer(task_t task, pid_t targetPid,
         .pid = targetPid,
         .exceptionPort = exceptionPort,
         .active = setResult == KERN_SUCCESS,
+        .componentReturnSite = componentReturnSite,
     };
+    memcpy(gRingExceptionContext.componentUUID, componentUUID,
+           sizeof(componentUUID));
 
     int resumeResult = setResult == KERN_SUCCESS ? kill(targetPid, SIGCONT)
                                                   : -1;
@@ -955,7 +958,8 @@ static int protect_ring_initializer(task_t task, pid_t targetPid,
 
     gRingExceptionContext.active = false;
     bool recovered = gRingExceptionContext.recovered;
-    mach_vm_address_t iloqImage = gRingExceptionContext.iloqImage;
+    mach_vm_address_t componentImage =
+        gRingExceptionContext.componentImage;
     uint64_t pc = gRingExceptionContext.pc;
     uint64_t lr = gRingExceptionContext.lr;
     uint64_t x0 = gRingExceptionContext.x0;
@@ -986,12 +990,12 @@ static int protect_ring_initializer(task_t task, pid_t targetPid,
     unified_loader_log(
         "ringRuntimePolicy pid=%d get=%d allocate=%d right=%d set=%d "
         "resume=%d resumeError=%d receive=%d server=%s send=%d "
-        "iloq=0x%llx pc=0x%llx lr=0x%llx x0=0x%llx x1=0x%llx "
+        "component=0x%llx pc=0x%llx lr=0x%llx x0=0x%llx x1=0x%llx "
         "code0=0x%x code1=0x%x recoveryMode=%d recovered=%s "
         "restored=%s complete=%s",
         targetPid, getResult, allocateResult, rightResult, setResult,
         resumeResult, resumeError, receiveResult,
-        serverResult ? "true" : "false", sendResult, iloqImage, pc, lr,
+        serverResult ? "true" : "false", sendResult, componentImage, pc, lr,
         x0, x1, code0, code1, recoveryMode,
         recovered ? "true" : "false", restored ? "true" : "false",
         complete ? "true" : "false");

@@ -6,7 +6,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
-#include <mach-o/loader.h>
 #include <os/log.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -318,55 +317,7 @@ static bool target_compatibility_app_process(pid_t pid) {
                                CODEX_SBINJECT_SHADOW_BOOTSTRAP);
 }
 
-static bool macho_file_has_uuid(const char *path,
-                                const uint8_t expected[16]) {
-    struct stat status = {0};
-    if (path == NULL || lstat(path, &status) != 0 ||
-        !S_ISREG(status.st_mode) || S_ISLNK(status.st_mode) ||
-        status.st_nlink != 1 || status.st_uid != 33 || status.st_gid != 33 ||
-        status.st_size != 64328448 ||
-        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        return false;
-    }
-    int descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) return false;
-    struct mach_header_64 header = {0};
-    bool valid = pread(descriptor, &header, sizeof(header), 0) ==
-                     (ssize_t)sizeof(header) &&
-                 header.magic == MH_MAGIC_64 &&
-                 header.filetype == MH_EXECUTE && header.ncmds > 0 &&
-                 header.ncmds <= 4096U && header.sizeofcmds > 0 &&
-                 header.sizeofcmds <= 4U * 1024U * 1024U;
-    uint8_t *commands = valid ? malloc(header.sizeofcmds) : NULL;
-    valid = valid && commands != NULL &&
-            pread(descriptor, commands, header.sizeofcmds,
-                  (off_t)sizeof(header)) == (ssize_t)header.sizeofcmds;
-    bool matched = false;
-    if (valid) {
-        size_t offset = 0;
-        for (uint32_t index = 0; index < header.ncmds; ++index) {
-            if (offset + sizeof(struct load_command) > header.sizeofcmds) break;
-            struct load_command *command =
-                (struct load_command *)(commands + offset);
-            if (command->cmdsize < sizeof(*command) ||
-                offset + command->cmdsize > header.sizeofcmds) {
-                break;
-            }
-            if (command->cmd == LC_UUID &&
-                command->cmdsize >= sizeof(struct uuid_command)) {
-                struct uuid_command *uuid = (struct uuid_command *)command;
-                matched = memcmp(uuid->uuid, expected, 16) == 0;
-                break;
-            }
-            offset += command->cmdsize;
-        }
-    }
-    free(commands);
-    close(descriptor);
-    return matched;
-}
-
-static bool target_memory_patch_app_process(pid_t pid) {
+static bool navy_runtime_policy_app_process(pid_t pid) {
     char raw_path[CODEX_PROC_PIDPATH_MAX] = {0};
     char observed[CODEX_PROC_PIDPATH_MAX] = {0};
     if (proc_pidpath(pid, raw_path, sizeof(raw_path)) <= 0 ||
@@ -399,13 +350,8 @@ static bool target_memory_patch_app_process(pid_t pid) {
     NSBundle *bundle = [NSBundle bundleWithPath:
         [NSString stringWithUTF8String:bundle_path]];
     NSString *identifier = bundle.bundleIdentifier;
-    NSString *version = [bundle objectForInfoDictionaryKey:
-        @"CFBundleShortVersionString"];
-    NSString *build = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
     NSString *executablePath = bundle.executablePath;
     if (![identifier isEqualToString:@"org.navyfederal.nfcuforiphone"] ||
-        ![version isEqualToString:@"2026.9.1"] ||
-        ![build isEqualToString:@"2258241"] ||
         executablePath.length == 0) {
         return false;
     }
@@ -415,11 +361,11 @@ static bool target_memory_patch_app_process(pid_t pid) {
         strcmp(resolved_executable, observed) != 0) {
         return false;
     }
-    static const uint8_t expectedUUID[16] = {
-        0x22, 0xe7, 0x0c, 0x5a, 0x50, 0x71, 0x34, 0xf4,
-        0xb4, 0x68, 0xe8, 0x78, 0x74, 0xf6, 0x02, 0x31,
-    };
-    return macho_file_has_uuid(observed, expectedUUID);
+    struct stat status = {0};
+    return lstat(observed, &status) == 0 && S_ISREG(status.st_mode) &&
+           !S_ISLNK(status.st_mode) && status.st_nlink == 1 &&
+           status.st_uid == 33 && status.st_gid == 33 &&
+           (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
 static bool exact_process_path(pid_t pid, const char *expected_path) {
@@ -758,7 +704,7 @@ static void receive_shadow_socket_request(int descriptor) {
                      exact_root_launchd_process(peer_pid)) &&
                     (shadow_enabled_app_process(requested) ||
                      target_compatibility_app_process(requested) ||
-                     target_memory_patch_app_process(requested));
+                     navy_runtime_policy_app_process(requested));
     if (result == 0) {
         result = admitted ? admit_trusted_shadow_task(requested) : EPERM;
     }
