@@ -9031,25 +9031,55 @@ int main(int argc, char *argv[]) {
 
         NSString *persistentArchive = nil;
         if (staleVarJbTarget != nil) {
-            NSString *archiveError = nil;
-            NSString *sourceTar =
-                [sourceProcursus stringByAppendingPathComponent:@"usr/bin/tar"];
-            persistentArchive = persistent_root_archive(sourceTar,
-                                                        &archiveError);
-            if (archiveError != nil) {
-                return fail(archiveError, nil);
-            }
-            if (persistentArchive == nil) {
-                return fail(@"old jailbreak root is missing and no persistent "
-                             "backup is available; refusing a fresh reset",
-                            nil);
-            }
+            // Rootless Procursus tools load libraries through /var/jb.  After
+            // an OS update, that link names the previous Preboot identity and
+            // no longer resolves.  Point it at the immutable source root while
+            // validating the persistent backup, then remove the temporary
+            // link before creating the new managed root.
             if (unlink(kVarJb) != 0) {
                 return fail(
                     [NSString stringWithFormat:
                                   @"stale /var/jb removal failed: %s",
                                   strerror(errno)],
                     nil);
+            }
+            if (symlink([sourceProcursus fileSystemRepresentation], kVarJb) !=
+                0) {
+                int savedError = errno;
+                (void)symlink([staleVarJbTarget fileSystemRepresentation],
+                              kVarJb);
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"temporary /var/jb creation failed: %s",
+                                  strerror(savedError)],
+                    nil);
+            }
+            log_message("staleManagedVarJbToolLink=true source=%s",
+                        [sourceProcursus UTF8String]);
+
+            NSString *archiveError = nil;
+            NSString *sourceTar =
+                [sourceProcursus stringByAppendingPathComponent:@"usr/bin/tar"];
+            persistentArchive = persistent_root_archive(sourceTar,
+                                                        &archiveError);
+            if (unlink(kVarJb) != 0) {
+                return fail(
+                    [NSString stringWithFormat:
+                                  @"temporary /var/jb removal failed: %s",
+                                  strerror(errno)],
+                    nil);
+            }
+            if (archiveError != nil) {
+                (void)symlink([staleVarJbTarget fileSystemRepresentation],
+                              kVarJb);
+                return fail(archiveError, nil);
+            }
+            if (persistentArchive == nil) {
+                (void)symlink([staleVarJbTarget fileSystemRepresentation],
+                              kVarJb);
+                return fail(@"old jailbreak root is missing and no persistent "
+                             "backup is available; refusing a fresh reset",
+                            nil);
             }
             log_message("staleManagedVarJbRemoved=true target=%s "
                         "persistentBackup=%s",
@@ -9097,18 +9127,44 @@ int main(int argc, char *argv[]) {
                     randomizedRoot);
             }
             if (persistentArchive != nil) {
-                NSString *restoreError = nil;
-                NSString *sourceTar = [sourceProcursus
-                    stringByAppendingPathComponent:@"usr/bin/tar"];
-                if (!restore_persistent_root_backup(
-                        persistentArchive, sourceTar,
-                        destinationProcursus, staleVarJbTarget,
-                        &restoreError)) {
+                if (symlink(
+                        [destinationProcursus fileSystemRepresentation],
+                        kVarJb) != 0) {
+                    int savedError = errno;
                     [[NSFileManager defaultManager]
                         removeItemAtPath:randomizedRoot error:nil];
                     (void)symlink(
                         [staleVarJbTarget fileSystemRepresentation], kVarJb);
-                    return fail(restoreError, nil);
+                    return fail(
+                        [NSString stringWithFormat:
+                                      @"restore /var/jb creation failed: %s",
+                                      strerror(savedError)],
+                        nil);
+                }
+                NSString *restoreError = nil;
+                NSString *sourceTar = [sourceProcursus
+                    stringByAppendingPathComponent:@"usr/bin/tar"];
+                bool restored = restore_persistent_root_backup(
+                    persistentArchive, sourceTar, destinationProcursus,
+                    staleVarJbTarget, &restoreError);
+                int unlinkStatus = unlink(kVarJb);
+                int unlinkError = errno;
+                if (!restored || unlinkStatus != 0) {
+                    if (unlinkStatus == 0) {
+                        (void)symlink(
+                            [staleVarJbTarget fileSystemRepresentation],
+                            kVarJb);
+                        [[NSFileManager defaultManager]
+                            removeItemAtPath:randomizedRoot error:nil];
+                    }
+                    if (!restored) {
+                        return fail(restoreError, nil);
+                    }
+                    return fail(
+                        [NSString stringWithFormat:
+                                      @"restore /var/jb removal failed: %s",
+                                      strerror(unlinkError)],
+                        nil);
                 }
             }
             NSString *cachedSileo =
@@ -10301,6 +10357,8 @@ int main(int argc, char *argv[]) {
             return fail(kernelPackageError, nil);
         }
 
+        BOOL existingRootMode = repairMode || persistentArchive != nil;
+
         // Repair runs must refresh dpkg's metadata-only maintainer-script copy
         // after the SBInject package policy and broker are refreshed. The
         // immutable application itself remains in the Cryptex.
@@ -10344,13 +10402,13 @@ int main(int argc, char *argv[]) {
         char *dpkgConfigureArguments[] = {
             "/var/jb/usr/bin/dpkg", "--configure", "-a", NULL};
         int dpkgConfigureStatus =
-            repairMode
+            existingRootMode
                 ? run_and_wait_bounded(dpkgConfigureArguments[0],
                                        dpkgConfigureArguments, 90000)
                 : run_and_wait(dpkgConfigureArguments[0],
                                dpkgConfigureArguments);
         log_message("dpkgConfigurePendingExit=%d", dpkgConfigureStatus);
-        if (dpkgConfigureStatus != 0 && !repairMode) {
+        if (dpkgConfigureStatus != 0 && !existingRootMode) {
             return fail(
                 [NSString stringWithFormat:
                               @"pending package configuration exited %d",
@@ -10382,7 +10440,7 @@ int main(int argc, char *argv[]) {
                         ? "repository-metadata-changed"
                         : "sileo-authentication-preflight");
         int apt_update_status =
-            repairMode
+            existingRootMode
                 ? run_and_wait_bounded(apt_update_arguments[0],
                                        apt_update_arguments, 60000)
                 : run_and_wait(apt_update_arguments[0],
@@ -10390,7 +10448,7 @@ int main(int argc, char *argv[]) {
         log_message("aptUpdateExit=%d", apt_update_status);
         bool packageListsPopulated = apt_package_lists_are_populated();
         if (!packageListsPopulated ||
-            (!repairMode && apt_update_status != 0)) {
+            (!existingRootMode && apt_update_status != 0)) {
             return fail(
                 [NSString stringWithFormat:@"APT index refresh exited %d",
                                            apt_update_status],
@@ -10406,12 +10464,12 @@ int main(int argc, char *argv[]) {
             "/var/jb/usr/bin/apt-get", "check", "-o", "Dpkg::Use-Pty=0",
             NULL};
         int apt_check_status =
-            repairMode
+            existingRootMode
                 ? run_and_wait_bounded(apt_check_arguments[0],
                                        apt_check_arguments, 60000)
                 : run_and_wait(apt_check_arguments[0], apt_check_arguments);
         log_message("aptDependencyCheckExit=%d", apt_check_status);
-        if (apt_check_status != 0 && !repairMode) {
+        if (apt_check_status != 0 && !existingRootMode) {
             return fail(
                 [NSString stringWithFormat:
                               @"APT dependency check exited %d",
