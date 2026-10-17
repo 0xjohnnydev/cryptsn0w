@@ -62,7 +62,28 @@ App launcher and TrollStore registration logs were
 
 ## Credits
 
-- **htrowii** — the original SBInject proof of concept that this port builds on.
+### Maintainers and project contributions
+
+- **[Johnny Franks / 0xjohnnydev](https://github.com/0xjohnnydev)** — project
+  maintainer; the original root SSH proof of concept, Cryptex bootstrap,
+  build and signing workflow, Sileo bootstrap and package handling, reboot
+  recovery, and later iOS compatibility and runtime fixes.
+- **[GenericCoding](https://github.com/GenericCoding)** — project maintainer;
+  SBInject and Sileo integration, Settings/PreferenceLoader integration, the
+  two-stage installer, native macOS app, TrollStore/app-launcher integration,
+  and runtime fixes.
+- **[Varik Matevosyan / var77](https://github.com/var77)** — project maintainer;
+  device-discovery fixes in the CLI and macOS app so a phone connected over
+  both USB and Wi-Fi appears as one device, with USB preferred.
+- **[hrtowii](https://github.com/hrtowii)** — the original SBInject proof of
+  concept that this port builds on.
+
+Other repository collaborators include
+[jakeashacks](https://github.com/jakeashacks), and
+[forcequitOS](https://github.com/forcequitOS).
+
+### Upstream projects
+
 - **opa334** — [Dopamine](https://github.com/opa334/Dopamine),
   [opainject](https://github.com/opa334/opainject),
   [litehook](https://github.com/opa334/litehook),
