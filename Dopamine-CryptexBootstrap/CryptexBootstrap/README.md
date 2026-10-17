@@ -4,6 +4,9 @@
 installation details are intentionally omitted. The files retain placeholders
 for educational reference.
 
+Historical documentation for an obsolete project. See the
+[project status](../../README.md) before using these instructions.
+
 This directory is self-contained when copied into the pinned Dopamine checkout.
 It builds and deploys the production runtime and its temporary SSH acquisition
 stage; it contains no research probes.
@@ -12,12 +15,11 @@ stage; it contains no research probes.
 
 [REDACTED: Related request, payload, or installation details omitted.]
 
-An install uses the already-loaded base-bootstrap job to mount an ephemeral
-public-key-only SSH payload without rebooting. It copies the device's own
-SpringBoard and Preferences bundles into the ignored `build/target/` directory,
-builds the candidates from those exact files, then replaces the stage with the
-final Cryptex. Nothing in the tracked repository is tied to a device model,
-UDID, Apple binary hash, UUID, or dyld offset.
+An install builds and installs a temporary Cryptex with its own launch daemon
+and public-key-only SSH server. It copies the device's SpringBoard and
+Preferences bundles and `amfid` executable into the ignored `build/target/`
+directory, builds from those inputs, then replaces the stage with the final
+Cryptex. The flow is designed to complete without a reboot.
 
 ## Installed model
 

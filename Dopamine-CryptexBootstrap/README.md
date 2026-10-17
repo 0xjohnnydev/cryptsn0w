@@ -4,6 +4,9 @@
 installation details are intentionally omitted. The files retain placeholders
 for educational reference.
 
+Historical documentation for an obsolete project. See the
+[project status](../README.md) before using these instructions.
+
 This directory contains the reproducible wrapper and source overlay for the
 SBInject jailbreak. The supported runtime consists of Sileo/package operations,
 SBInject SpringBoard, Settings/PreferenceLoader, OpenSSH, and reboot recovery.
@@ -32,14 +35,16 @@ Host-only builds read local device inputs from:
 ```text
 build/target/SpringBoard.app/
 build/target/Preferences.app/
+build/target/amfid
 ```
 
-The normal `--install` flow uses the already-loaded base-bootstrap job to swap
-in an ephemeral SSH payload, copies those bundles from the selected phone, and
-installs the final patched Cryptex as its second live Cryptex installation. It
-does not reboot. No model or UDID is hardcoded.
+The `--install` flow builds and installs a temporary SSH Cryptex, copies those
+inputs from the selected phone, then builds and installs the final Cryptex.
+The temporary image includes its own launch daemon and SSH server. The flow
+is designed to complete without a reboot.
 
-All network inputs and the upstream commit are pinned. The image is rejected
+The upstream commit and direct Python dependency versions are pinned; bootstrap
+and package archives are checked against committed hashes. The image is rejected
 above 128 MiB. Sileo retains `org.coolstar.SileoStore`, has no provisioning
 profile, and is registered as a non-removable system app. The pinned SSH
 bootstrap and OpenSSH Debian packages keep `com.openssh.sshd` available after

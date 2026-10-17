@@ -4,6 +4,10 @@
 installation details are intentionally omitted. The files retain placeholders
 for educational reference.
 
+Historical documentation for an obsolete project. The app uses the same
+patched TSS/Cryptex path as the command-line installer. See the
+[project status](../README.md).
+
 CryptSn0w is the native SwiftUI front end for the repository's installer.
 Its layout is patterned after the classic Pangu utility:
 a connected-device selector, a single Jailbreak action, concise status, and
