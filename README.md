@@ -24,17 +24,32 @@ after a reboot.
 
 ## How it worked
 
-The bootstrap and loaders lived in a Cryptex with a fixed trust cache. New
-package binaries and tweaks ran through those trusted components using JIT
-(just-in-time) execution permissions. The loaders mapped their code into
-executable memory, with dyld handling linking, so supported payloads did not
-need a new trust-cache entry each time.
+The Cryptex carried the bootstrap, Sileo, ElleKit, SSH, and a fixed set of
+loaders. Its trust cache listed the hashes of those binaries. That gave the
+project a trusted base, but it did not automatically trust every package
+installed later. Adding each new binary to the cache would have required
+updating and signing the cache whenever its contents changed.
 
-The broker routed package executables and install scripts through a trusted
-worker. SBInject used the same idea to load compatible tweaks into SpringBoard
-and Settings. Some binaries still needed patching or ad-hoc signing, but no
-new Apple-signed trust cache was needed for each payload. Changing the fixed
-bootstrap itself still required rebuilding it.
+CryptSn0w used JIT (just-in-time) execution permissions to load supported new
+code through that existing base. An already trusted worker, or an
+SBInject-managed process, first entered the required debugged state. The
+loader then adjusted dyld's signature checks and copied the payload's code
+into anonymous memory, making it executable after the copy. Dyld still handled
+loading and linking. This ran existing native machine code without adding its
+hash to the fixed trust cache.
+
+The broker routed supported package executables and native install scripts
+through `codex-exec-worker`. SBInject applied the same approach inside
+SpringBoard and Settings, allowing ElleKit to load compatible tweak libraries.
+**Installing a supported payload therefore did not require a new Apple-signed
+trust cache for that payload.**
+
+Some binaries still needed patching, rehashing, or ad-hoc signing to work with
+the loader. They also had to use the supported execution path; they did not
+become trusted system-wide. Compatibility depended on the process and OS
+build, and changing the fixed bootstrap or loaders still required rebuilding
+the installation. This all depended on the original Cryptex bootstrap, whose
+installation path is now obsolete.
 
 See the [worker](Dopamine-CryptexBootstrap/CryptexBootstrap/codex_exec_worker.c)
 and [SBInject loader](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_dyld_bypass.c)
