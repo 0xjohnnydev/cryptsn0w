@@ -32,7 +32,49 @@ binaries are not included in this repository.
 The Cryptex held the bootstrap, Sileo, ElleKit, SSH, and a fixed trust cache.
 SBInject redirected SpringBoard and Settings to the replacement bundles.
 Package scripts and installed apps used a broker and launcher, with a
-JIT/dyld loading path for third-party code. See the source for the details.
+JIT/dyld loading path for third-party code.
+
+## How JIT avoided per-binary trust-cache updates
+
+The trust cache covered a fixed set of bootstrap binaries, loaders, and
+injection components. It contained their code hashes, so a new or modified
+binary on disk did not automatically become trusted. Adding every package's
+binaries to that cache would have meant updating the cache whenever those
+binaries changed.
+
+Instead, supported package executables ran through an already trusted worker,
+and supported tweaks loaded inside an SBInject-managed process. The worker or
+target process first needed the debugged state that allowed it to execute code
+from memory. This was a property of that process, not a new trust-cache entry
+for the payload.
+
+JIT means *just in time*. Here, the project used that execution model to run
+existing native machine code; it did not compile each tweak from source.
+Apple's dynamic loader, **dyld**, still handled loading and linking. The loader
+hooks adjusted its signature checks and copied payload code into anonymous
+memory, which was writable while being filled and then made executable.
+That let supported payloads run without adding their hashes to the fixed
+trust cache.
+
+The package broker routed supported native install scripts and executables
+through `codex-exec-worker`. The SBInject hooks used the same approach in
+SpringBoard and Settings so ElleKit could load compatible tweak libraries.
+This avoided a new trust-cache signing round trip for each supported payload.
+Some files were still patched, rehashed, or ad-hoc signed as part of preparing
+them for the loader; that was separate from getting a new Apple-signed trust
+cache.
+
+This did not make every installed binary trusted system-wide. Code had to use
+the supported worker or injection path, and compatibility depended on the
+target process and OS build. Changing the fixed bootstrap or loader binaries
+still required rebuilding their installation. The whole arrangement depended
+on the original bootstrap being installed, which is why the patched
+TSS/Cryptex path still makes this an obsolete project.
+
+The relevant code is in
+[`codex_exec_worker.c`](Dopamine-CryptexBootstrap/CryptexBootstrap/codex_exec_worker.c),
+[`sbinject_dyld_bypass.c`](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_dyld_bypass.c),
+and [`sbinject_jitterd.m`](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_jitterd.m).
 
 ## macOS app
 
