@@ -59,3 +59,40 @@ The main runtime log was `/var/tmp/codex-dopamine-cryptex-bootstrap.log`.
 App launcher and TrollStore registration logs were
 `/var/mobile/.sbinject-app-launcher.log` and
 `/var/mobile/.sbinject-trollstore-registration.log`.
+
+## Credits
+
+- **htrowii** — the original SBInject proof of concept that this port builds on.
+- **opa334** — [Dopamine](https://github.com/opa334/Dopamine),
+  [opainject](https://github.com/opa334/opainject),
+  [litehook](https://github.com/opa334/litehook),
+  [libSandy](https://github.com/opa334/libSandy), and
+  [AltList](https://github.com/opa334/AltList).
+- **Évelyne Bélanger and the ElleKit contributors** —
+  [ElleKit](https://github.com/tealbathingsuit/ellekit), used for tweak injection
+  and hooking.
+- **Sileo Team** — [Sileo](https://github.com/Sileo/Sileo), the package manager.
+  This product includes software developed by the Sileo Team.
+- **Dustin Howett, Dhinak G, Yves000, and the PreferenceLoader contributors** —
+  [PreferenceLoader](https://github.com/Yves000/preferenceloader), including the
+  Swift metadata, heap, and string helpers used by the Settings bridge.
+- **Procursus Team** — the [Procursus bootstrap and packages](https://github.com/ProcursusTeam/Procursus)
+  and the [ldid fork](https://github.com/ProcursusTeam/ldid), based on
+  [saurik's ldid](https://git.saurik.com/ldid.git).
+- **jjolano** — [HookKit](https://github.com/jjolano/HookKit) and
+  [Shadow](https://github.com/jjolano/shadow).
+- **Frida contributors** — [Frida Gum](https://github.com/frida/frida-gum), used
+  by HookKit's Gum provider.
+- **doronz88 and the pymobiledevice3 contributors** —
+  [pymobiledevice3](https://github.com/doronz88/pymobiledevice3), used for device
+  communication and Cryptex services.
+- **m1stadev** — [PyIMG4](https://github.com/m1stadev/PyIMG4), used to parse and
+  check Image4 manifests.
+- The maintainers of [OpenSSH](https://www.openssh.com/),
+  [libplist](https://github.com/libimobiledevice/libplist), and
+  [Requests](https://github.com/psf/requests) for the SSH, plist, and HTTP tools
+  used by this project.
+
+The copied PreferenceLoader helpers retain their
+[source attribution](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/PreferenceBridgeSupport/UPSTREAM.md)
+and [license](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/PreferenceBridgeSupport/LICENSE).
