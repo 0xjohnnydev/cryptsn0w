@@ -87,6 +87,10 @@ TSS request construction, personalization, and related installation details
 are intentionally omitted. The files retain placeholders for educational
 reference.
 
+Some details are also omitted to avoid prematurely disclosing information
+relevant to other potential TSS issues. This does not mean we have an
+unreleased untethered jailbreak or a working exploit that we are withholding.
+
 ## Credits
 
 ### Maintainers and project contributions
