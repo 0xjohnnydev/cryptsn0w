@@ -1,9 +1,5 @@
 # CryptSn0w
 
-**Redacted source:** TSS request construction, personalization, and related
-installation details are intentionally omitted. The files retain placeholders
-for educational reference.
-
 **This project is obsolete.** Apple patched the TSS/Cryptex bug it relied on.
 The original signing and installation flow is no longer usable for new
 installs. The code is shared for educational purposes and to document the work.
@@ -15,7 +11,7 @@ installs. The code is shared for educational purposes and to document the work.
 CryptSn0w packaged an SBInject-based jailbreak as a device-personalized
 Cryptex: a disk image with an associated trust cache and an Apple signing
 ticket. The original installer obtained that ticket from Apple's signing
-service. The request and installation details are redacted from this source.
+service.
 
 The project includes SpringBoard and Settings tweak injection through
 ElleKit, Sileo package management, PreferenceLoader, optional root SSH, and
@@ -84,6 +80,12 @@ The main runtime log was `/var/tmp/codex-dopamine-cryptex-bootstrap.log`.
 App launcher and TrollStore registration logs were
 `/var/mobile/.sbinject-app-launcher.log` and
 `/var/mobile/.sbinject-trollstore-registration.log`.
+
+## Redactions
+
+TSS request construction, personalization, and related installation details
+are intentionally omitted. The files retain placeholders for educational
+reference.
 
 ## Credits
 
