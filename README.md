@@ -22,59 +22,23 @@ ElleKit, Sileo package management, PreferenceLoader, optional root SSH, and
 a macOS installer. The bootstrap also contains code to restore its services
 after a reboot.
 
-## How it was put together
+## How it worked
 
-The installer used a temporary SSH payload to copy SpringBoard, Settings, and
-`amfid` (the system code-signature validation daemon) from the connected phone.
-It then built the final Cryptex using those device-matched inputs. The Apple
-binaries are not included in this repository.
+The bootstrap and loaders lived in a Cryptex with a fixed trust cache. New
+package binaries and tweaks ran through those trusted components using JIT
+(just-in-time) execution permissions. The loaders mapped their code into
+executable memory, with dyld handling linking, so supported payloads did not
+need a new trust-cache entry each time.
 
-The Cryptex held the bootstrap, Sileo, ElleKit, SSH, and a fixed trust cache.
-SBInject redirected SpringBoard and Settings to the replacement bundles.
-Package scripts and installed apps used a broker and launcher, with a
-JIT/dyld loading path for third-party code.
+The broker routed package executables and install scripts through a trusted
+worker. SBInject used the same idea to load compatible tweaks into SpringBoard
+and Settings. Some binaries still needed patching or ad-hoc signing, but no
+new Apple-signed trust cache was needed for each payload. Changing the fixed
+bootstrap itself still required rebuilding it.
 
-## How JIT avoided per-binary trust-cache updates
-
-The trust cache covered a fixed set of bootstrap binaries, loaders, and
-injection components. It contained their code hashes, so a new or modified
-binary on disk did not automatically become trusted. Adding every package's
-binaries to that cache would have meant updating the cache whenever those
-binaries changed.
-
-Instead, supported package executables ran through an already trusted worker,
-and supported tweaks loaded inside an SBInject-managed process. The worker or
-target process first needed the debugged state that allowed it to execute code
-from memory. This was a property of that process, not a new trust-cache entry
-for the payload.
-
-JIT means *just in time*. Here, the project used that execution model to run
-existing native machine code; it did not compile each tweak from source.
-Apple's dynamic loader, **dyld**, still handled loading and linking. The loader
-hooks adjusted its signature checks and copied payload code into anonymous
-memory, which was writable while being filled and then made executable.
-That let supported payloads run without adding their hashes to the fixed
-trust cache.
-
-The package broker routed supported native install scripts and executables
-through `codex-exec-worker`. The SBInject hooks used the same approach in
-SpringBoard and Settings so ElleKit could load compatible tweak libraries.
-This avoided a new trust-cache signing round trip for each supported payload.
-Some files were still patched, rehashed, or ad-hoc signed as part of preparing
-them for the loader; that was separate from getting a new Apple-signed trust
-cache.
-
-This did not make every installed binary trusted system-wide. Code had to use
-the supported worker or injection path, and compatibility depended on the
-target process and OS build. Changing the fixed bootstrap or loader binaries
-still required rebuilding their installation. The whole arrangement depended
-on the original bootstrap being installed, which is why the patched
-TSS/Cryptex path still makes this an obsolete project.
-
-The relevant code is in
-[`codex_exec_worker.c`](Dopamine-CryptexBootstrap/CryptexBootstrap/codex_exec_worker.c),
-[`sbinject_dyld_bypass.c`](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_dyld_bypass.c),
-and [`sbinject_jitterd.m`](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_jitterd.m).
+See the [worker](Dopamine-CryptexBootstrap/CryptexBootstrap/codex_exec_worker.c)
+and [SBInject loader](Dopamine-CryptexBootstrap/CryptexBootstrap/SBInject/sbinject_dyld_bypass.c)
+for the implementation.
 
 ## macOS app
 
