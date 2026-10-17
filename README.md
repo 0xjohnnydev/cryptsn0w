@@ -30,63 +30,6 @@ SBInject redirected SpringBoard and Settings to the replacement bundles.
 Package scripts and installed apps used a broker and launcher, with a
 JIT/dyld loading path for third-party code. See the source for the details.
 
-## Building the source
-
-These instructions are kept for reference. Building the code does not restore
-the patched TSS/Cryptex path.
-
-The original build environment required:
-
-- macOS with full Xcode and the iPhoneOS SDK selected
-- Apple Security Research Device host tools, including
-  `/System/Library/SecurityResearch/usr/bin/cryptexctl.research`
-- Homebrew, or the required host utilities installed separately
-- Python 3.10 or newer
-- A paired device for any steps that read device-specific inputs
-
-From the repository root:
-
-```sh
-./Dopamine-CryptexBootstrap/setup.sh --prepare
-make validate
-make build
-```
-
-The setup script checks out a pinned Dopamine revision and applies the local
-overlay to `Dopamine-upstream/`. The bootstrap and package archives have
-committed SHA-256 checks; direct Python dependencies have pinned versions.
-Build output goes to:
-
-```text
-Dopamine-upstream/CryptexBootstrap/out/build-summary.json
-Dopamine-upstream/CryptexBootstrap/out/unsigned/*.cxbd
-```
-
-For a host-only build, supply these files from the target device:
-
-```text
-build/target/SpringBoard.app/
-build/target/Preferences.app/
-build/target/amfid
-```
-
-`build/` is ignored by Git. Set `CODEX_TARGET_BUNDLE_ROOT` to use a different
-input directory. The normal install flow copies all three inputs over its
-temporary SSH connection.
-
-## Historical install command
-
-The old install flow used:
-
-```sh
-./Dopamine-CryptexBootstrap/setup.sh --install --device <UDID>
-```
-
-[REDACTED: Related request, payload, or installation details omitted.]
-
-This flow depended on the now-patched TSS/Cryptex bug and is included only as a
-reference.
-
 ## macOS app
 
 The SwiftUI app runs the same installer as the command line. It requires
