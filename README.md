@@ -64,7 +64,7 @@ App launcher and TrollStore registration logs were
 
 ### Maintainers and project contributions
 
-- **[Johnny Franks / 0xjohnnydev](https://github.com/0xjohnnydev)** — project
+- **[0xjohnny](https://github.com/0xjohnnydev)** — project
   maintainer; the original root SSH proof of concept, Cryptex bootstrap,
   build and signing workflow, Sileo bootstrap and package handling, reboot
   recovery, and later iOS compatibility and runtime fixes.
