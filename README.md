@@ -8,6 +8,10 @@ for educational reference.
 The original signing and installation flow is no longer usable for new
 installs. The code is shared for educational purposes and to document the work.
 
+<p align="center">
+  <img src="docs/images/cryptsn0w-gui.png" alt="CryptSn0w macOS GUI (historical screenshot)" width="500">
+</p>
+
 CryptSn0w packaged an SBInject-based jailbreak as a device-personalized
 Cryptex: a disk image with an associated trust cache and an Apple signing
 ticket. The original installer obtained that ticket from Apple's signing
