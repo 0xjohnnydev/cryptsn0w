@@ -4,14 +4,13 @@
 installation details are intentionally omitted. The files retain placeholders
 for educational reference.
 
-**This project is obsolete.** Apple patched the TSS bug it relied on. The code
+**This project is obsolete.** Apple patched the TSS/Cryptex bug it relied on. The code
 is shared for educational purposes and to document the work. It is no longer
 a working jailbreak method.
 
 CryptSn0w packaged an SBInject-based jailbreak as a device-personalized
 Cryptex: a disk image with an associated trust cache and an Apple signing
-ticket. It relied on a bug in Apple's TSS signing service to obtain that
-ticket.
+ticket. It relied on the TSS/Cryptex bug to obtain that ticket.
 
 The project includes SpringBoard and Settings tweak injection through
 ElleKit, Sileo package management, PreferenceLoader, optional root SSH, and
@@ -33,7 +32,7 @@ JIT/dyld loading path for third-party code. See the source for the details.
 ## Building the source
 
 These instructions are kept for reference. Building the code does not restore
-the patched TSS signing path.
+the patched TSS/Cryptex path.
 
 The original build environment required:
 
@@ -82,7 +81,7 @@ It installed a temporary SSH Cryptex, copied the device's app bundles, then
 built and installed the final Cryptex without a reboot. Per-run files were
 saved under `Dopamine-upstream/CryptexBootstrap/out/runs/`.
 
-This flow depended on the now-patched TSS bug and is included only as a
+This flow depended on the now-patched TSS/Cryptex bug and is included only as a
 reference.
 
 ## macOS app
@@ -97,7 +96,7 @@ open dist/CryptSn0w.app
 
 Keep the app in `dist/` so it can find the repository, or select the repository
 with the app's folder chooser. Root SSH is off by default and was an optional
-part of installation. The app is subject to the same TSS limitation described
+part of installation. The app is subject to the same TSS/Cryptex limitation described
 above. See [MacApp/README.md](MacApp/README.md) for its build and UI details.
 
 ## Source layout
